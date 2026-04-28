@@ -245,13 +245,29 @@ def main():
               f"Stake £{stake} | {dt}")
     print()
 
-    # Push notification
-    n = len(all_bets)
-    title = f"Bets - {n} value bet{'s' if n > 1 else ''} ({', '.join(sport_summary)})"
-    message = "\n\n".join(format_bet_line(vb) for vb in all_bets[:10])  # cap at 10 for readability
-    if n > 10:
-        message += f"\n\n...and {n - 10} more. Check routines for full list."
-    notify(title=title, message=message, priority="high")
+    # Split by confidence and send separate notifications
+    high = [vb for vb in all_bets if vb["confidence"] == "HIGH"]
+    med  = [vb for vb in all_bets if vb["confidence"] == "MED"]
+    low  = [vb for vb in all_bets if vb["confidence"] == "LOW"]
+
+    if high:
+        notify(
+            title=f"Bets HIGH - {len(high)} bet{'s' if len(high) > 1 else ''} (>=30 books)",
+            message="\n\n".join(format_bet_line(vb) for vb in high),
+            priority="high",
+        )
+    if med:
+        notify(
+            title=f"Bets MED - {len(med)} bet{'s' if len(med) > 1 else ''} (20-29 books)",
+            message="\n\n".join(format_bet_line(vb) for vb in med),
+            priority="default",
+        )
+    if low:
+        notify(
+            title=f"Bets LOW - {len(low)} bet{'s' if len(low) > 1 else ''} (<20 books)",
+            message="\n\n".join(format_bet_line(vb) for vb in low),
+            priority="low",
+        )
 
 
 if __name__ == "__main__":
