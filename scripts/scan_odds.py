@@ -4,6 +4,7 @@ Reads ODDS_API_KEY from environment. Run with:
     ODDS_API_KEY=xxx python3 scripts/scan_odds.py
 """
 
+import csv
 import json
 import os
 import statistics
@@ -11,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
@@ -244,6 +246,37 @@ def main():
               f"Consensus {vb['cons']:.1%} | {vb['n_books']} books [{vb['confidence']}] | "
               f"Stake £{stake} | {dt}")
     print()
+
+    # Write bets to CSV log
+    log_file = Path(__file__).parent.parent / "logs" / "bets.csv"
+    write_header = not log_file.exists()
+    with open(log_file, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "scanned_at", "sport", "home", "away", "kickoff",
+            "side", "book", "odds", "edge", "consensus", "n_books", "confidence", "stake", "result"
+        ])
+        if write_header:
+            writer.writeheader()
+        for vb in all_bets:
+            dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+            kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
+            writer.writerow({
+                "scanned_at": now,
+                "sport": vb["sport"],
+                "home": vb["home"],
+                "away": vb["away"],
+                "kickoff": dt,
+                "side": {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"]),
+                "book": vb["book"],
+                "odds": vb["odds"],
+                "edge": round(vb["edge"], 4),
+                "consensus": round(vb["cons"], 4),
+                "n_books": vb["n_books"],
+                "confidence": vb["confidence"],
+                "stake": round(kelly * BANKROLL, 2),
+                "result": "",  # filled in manually after the match
+            })
+    print(f"[log] {len(all_bets)} bets appended to logs/bets.csv")
 
     # Split by confidence and send separate notifications
     high = [vb for vb in all_bets if vb["confidence"] == "HIGH"]
