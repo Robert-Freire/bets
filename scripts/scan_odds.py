@@ -50,21 +50,16 @@ UK_LICENSED_BOOKS = {
 
 # Fixed sports to always scan
 FIXED_SPORTS = [
-    ("soccer_epl",                "EPL",          20),   # min_books
-    ("soccer_germany_bundesliga", "Bundesliga",   20),
-    ("soccer_italy_serie_a",      "Serie A",      20),
-    ("soccer_spain_la_liga",      "La Liga",      25),   # higher threshold — noisier
-    ("basketball_nba",            "NBA",          20),
+    ("soccer_epl",                "EPL",        20),   # min_books
+    ("soccer_germany_bundesliga", "Bundesliga", 20),
+    ("soccer_italy_serie_a",      "Serie A",    20),
+    ("basketball_nba",            "NBA",        20),
 ]
 
 # Min books per sport — below this the consensus is unreliable
 DEFAULT_MIN_BOOKS = 15
 SPORT_MIN_BOOKS = {k: v for k, _, v in FIXED_SPORTS}
-
-# La Liga needs a higher edge threshold due to wider book dispersion
-SPORT_MIN_EDGE = {
-    "soccer_spain_la_liga": 0.04,
-}
+SPORT_MIN_EDGE = {}
 
 
 def api_get(path: str, params: dict) -> tuple[list | dict, str]:
@@ -128,6 +123,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
             continue
 
         cons = {s: statistics.mean(vals) for s, vals in impl.items()}
+        n_books = len(book_list)
+        confidence = "HIGH" if n_books >= 30 else ("MED" if n_books >= 20 else "LOW")
 
         for b in book_list:
             if b["book"] not in UK_LICENSED_BOOKS:
@@ -147,6 +144,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                         "impl": round(1 / odds, 4),
                         "cons": round(cons[side], 4),
                         "edge": round(edge, 4),
+                        "n_books": n_books,
+                        "confidence": confidence,
                     })
 
     # Deduplicate: keep best edge per fixture + side
@@ -168,7 +167,8 @@ def format_bet_line(vb: dict) -> str:
     side = {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
     return (
         f"{vb['home']} vs {vb['away']} [{side}]\n"
-        f"  {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | Stake £{stake}\n"
+        f"  {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
+        f"{vb['n_books']} books [{vb['confidence']}] | Stake £{stake}\n"
         f"  {dt}"
     )
 
@@ -238,7 +238,8 @@ def main():
         side = side_labels.get(vb["side"], vb["side"])
         print(f"  {vb['home']} vs {vb['away']} [{side}]")
         print(f"    {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
-              f"Consensus {vb['cons']:.1%} | Stake £{stake} | {dt}")
+              f"Consensus {vb['cons']:.1%} | {vb['n_books']} books [{vb['confidence']}] | "
+              f"Stake £{stake} | {dt}")
     print()
 
     # Push notification
