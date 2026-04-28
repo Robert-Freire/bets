@@ -1,50 +1,82 @@
 """
-Daily EPL value bet scanner with ntfy.sh push notifications.
-Run with:
+Daily multi-sport value bet scanner using the Kaunitz consensus strategy.
+Reads ODDS_API_KEY from environment. Run with:
     ODDS_API_KEY=xxx python3 scripts/scan_odds.py
 """
 
 import json
 import os
-import urllib.request
-import urllib.parse
-import urllib.error
 import statistics
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
 
-NTFY_TOPIC = "robert-epl-bets-m4x9k"  # your private ntfy.sh topic
+NTFY_TOPIC = "robert-epl-bets-m4x9k"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
 BASE_URL = "https://api.the-odds-api.com/v4"
-SPORT = "soccer_epl"
 MIN_EDGE = 0.03
-MIN_BOOKS = 5
 BANKROLL = 1000.0
 
-SIDE_LABEL = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
+# Fixed sports to always scan
+FIXED_SPORTS = [
+    ("soccer_epl",                "EPL",          20),   # min_books
+    ("soccer_germany_bundesliga", "Bundesliga",   20),
+    ("soccer_italy_serie_a",      "Serie A",      20),
+    ("soccer_spain_la_liga",      "La Liga",      25),   # higher threshold — noisier
+    ("basketball_nba",            "NBA",          20),
+]
+
+# Min books per sport — below this the consensus is unreliable
+DEFAULT_MIN_BOOKS = 15
+SPORT_MIN_BOOKS = {k: v for k, _, v in FIXED_SPORTS}
+
+# La Liga needs a higher edge threshold due to wider book dispersion
+SPORT_MIN_EDGE = {
+    "soccer_spain_la_liga": 0.04,
+}
 
 
-def fetch_odds():
-    params = urllib.parse.urlencode({
-        "apiKey": API_KEY,
-        "regions": "uk,eu",
-        "markets": "h2h",
-        "oddsFormat": "decimal",
-    })
-    with urllib.request.urlopen(f"{BASE_URL}/sports/{SPORT}/odds/?{params}", timeout=15) as r:
+def api_get(path: str, params: dict) -> tuple[list | dict, str]:
+    params["apiKey"] = API_KEY
+    url = f"{BASE_URL}{path}?{urllib.parse.urlencode(params)}"
+    with urllib.request.urlopen(url, timeout=15) as r:
         remaining = r.headers.get("X-Requests-Remaining", "?")
         return json.loads(r.read()), remaining
 
 
-def find_value_bets(events):
+def get_active_tennis_sports() -> list[tuple[str, str, int]]:
+    """Fetch active tennis tournaments dynamically (free call — no quota cost)."""
+    data, _ = api_get("/sports/", {"all": "false"})
+    tennis = []
+    for s in data:
+        if s.get("active") and s["key"].startswith("tennis_"):
+            label = s.get("title", s["key"])
+            tennis.append((s["key"], label, 15))
+    return tennis
+
+
+def fetch_odds(sport_key: str) -> tuple[list, str]:
+    data, remaining = api_get(
+        f"/sports/{sport_key}/odds/",
+        {"regions": "uk,eu,us", "markets": "h2h", "oddsFormat": "decimal"},
+    )
+    return data, remaining
+
+
+def find_value_bets(events: list, sport_key: str) -> list[dict]:
+    min_books = SPORT_MIN_BOOKS.get(sport_key, DEFAULT_MIN_BOOKS)
+    min_edge = SPORT_MIN_EDGE.get(sport_key, MIN_EDGE)
     bets = []
+
     for ev in events:
         home, away, commence = ev["home_team"], ev["away_team"], ev["commence_time"]
-        impl = {"H": [], "D": [], "A": []}
+        impl: dict[str, list] = {}
         book_list = []
 
         for b in ev.get("bookmakers", []):
@@ -52,42 +84,66 @@ def find_value_bets(events):
                 if m["key"] != "h2h":
                     continue
                 oc = {o["name"]: o["price"] for o in m["outcomes"]}
-                oh, od, oa = oc.get(home), oc.get("Draw"), oc.get(away)
-                if oh and od and oa and all(x > 1.0 for x in [oh, od, oa]):
-                    impl["H"].append(1 / oh)
-                    impl["D"].append(1 / od)
-                    impl["A"].append(1 / oa)
-                    book_list.append({"book": b["key"], "H": oh, "D": od, "A": oa})
+                entries = {
+                    "H": oc.get(home),
+                    "A": oc.get(away),
+                }
+                draw = oc.get("Draw")
+                if draw:
+                    entries["D"] = draw
 
-        if len(book_list) < MIN_BOOKS:
+                if not all(v and v > 1.0 for v in entries.values()):
+                    continue
+
+                for side, odds in entries.items():
+                    impl.setdefault(side, []).append(1 / odds)
+                book_list.append({"book": b["key"], **entries})
+
+        if len(book_list) < min_books:
             continue
 
-        cons = {s: statistics.mean(impl[s]) for s in "HDA"}
+        cons = {s: statistics.mean(vals) for s, vals in impl.items()}
 
         for b in book_list:
-            for s in "HDA":
-                edge = cons[s] - 1 / b[s]
-                if edge >= MIN_EDGE and 1.2 <= b[s] <= 15.0:
+            for side, odds in b.items():
+                if side == "book" or side not in cons:
+                    continue
+                edge = cons[side] - 1 / odds
+                if edge >= min_edge and 1.2 <= odds <= 15.0:
                     bets.append({
                         "commence": commence,
                         "home": home,
                         "away": away,
-                        "side": s,
+                        "side": side,
                         "book": b["book"],
-                        "odds": b[s],
-                        "impl": round(1 / b[s], 4),
-                        "cons": round(cons[s], 4),
+                        "odds": odds,
+                        "impl": round(1 / odds, 4),
+                        "cons": round(cons[side], 4),
                         "edge": round(edge, 4),
                     })
 
+    # Deduplicate: keep best edge per fixture + side
     bets.sort(key=lambda x: x["edge"], reverse=True)
-    seen, out = set(), []
+    seen: set = set()
+    out = []
     for vb in bets:
         k = (vb["home"], vb["away"], vb["side"])
         if k not in seen:
             seen.add(k)
             out.append(vb)
     return out
+
+
+def format_bet_line(vb: dict) -> str:
+    dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
+    kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
+    stake = round(kelly * BANKROLL, 2)
+    side = {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
+    return (
+        f"{vb['home']} vs {vb['away']} [{side}]\n"
+        f"  {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | Stake £{stake}\n"
+        f"  {dt}"
+    )
 
 
 def notify(title: str, message: str, priority: str = "default"):
@@ -103,58 +159,67 @@ def notify(title: str, message: str, priority: str = "default"):
             method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
-        print(f"[ntfy] Notification sent to topic '{NTFY_TOPIC}'")
+        print(f"[ntfy] Sent: '{title}'")
     except urllib.error.URLError as e:
-        print(f"[ntfy] Failed to send notification: {e}")
-
-
-def format_bet(vb: dict) -> str:
-    dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
-    kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
-    stake = round(kelly * BANKROLL, 2)
-    return (
-        f"{vb['home']} vs {vb['away']} [{SIDE_LABEL[vb['side']]}]\n"
-        f"  {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | Stake £{stake}\n"
-        f"  {dt}"
-    )
+        print(f"[ntfy] Failed: {e}")
 
 
 def main():
-    events, remaining = fetch_odds()
-    bets = find_value_bets(events)
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    avg_books = sum(len(e.get("bookmakers", [])) for e in events) // max(len(events), 1)
+    print(f"=== Multi-Sport Value Bet Scanner === {now}\n")
 
-    print(f"=== EPL Value Bets === {now}")
-    print(f"Fixtures: {len(events)} | Avg books: {avg_books} | API quota left: {remaining}")
-    print(f"Edge >= {MIN_EDGE:.0%} bets found: {len(bets)}")
-    print()
+    # Build sport list: fixed + dynamic tennis
+    tennis_sports = get_active_tennis_sports()
+    all_sports = FIXED_SPORTS + tennis_sports
 
-    if not bets:
-        print("No value bets today.")
-        notify(
-            title="EPL Bets - No value today",
-            message=f"Scanned {len(events)} fixtures across {avg_books} bookmakers. No edge >= 3% found.",
-            priority="low",
-        )
+    quota_remaining = "?"
+    all_bets: list[dict] = []
+    sport_summary: list[str] = []
+
+    for sport_key, label, _ in all_sports:
+        try:
+            events, quota_remaining = fetch_odds(sport_key)
+            bets = find_value_bets(events, sport_key)
+            all_bets.extend([{**b, "sport": label} for b in bets])
+            flag = f"  ** {len(bets)} value bet(s)!" if bets else ""
+            print(f"  {label:<28} {len(events):>3} fixtures, "
+                  f"{sum(len(e.get('bookmakers',[])) for e in events)//max(len(events),1):>2} avg books"
+                  f"{flag}")
+            if bets:
+                sport_summary.append(f"{label}: {len(bets)} bet(s)")
+        except Exception as e:
+            print(f"  {label:<28} ERROR: {e}")
+
+    print(f"\nAPI quota remaining: {quota_remaining}")
+    print(f"Total value bets (>= 3% edge): {len(all_bets)}\n")
+
+    if not all_bets:
+        print("No value bets found today across all sports.")
+        notify("Bets - No value today", f"Scanned {len(all_sports)} sports. No edge >= 3% found.", priority="low")
         return
 
-    # Print full detail to stdout (visible in routines UI)
-    for vb in bets:
+    # Print full detail
+    side_labels = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
+    current_sport = None
+    for vb in sorted(all_bets, key=lambda x: (x["sport"], -x["edge"])):
+        if vb["sport"] != current_sport:
+            current_sport = vb["sport"]
+            print(f"--- {current_sport} ---")
         dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
         kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
         stake = round(kelly * BANKROLL, 2)
-        print(f"BET: {vb['home']} vs {vb['away']} [{SIDE_LABEL[vb['side']]}]")
-        print(f"  Bookmaker : {vb['book']} @ {vb['odds']}")
-        print(f"  Edge      : {vb['edge']:.1%}  (consensus {vb['cons']:.1%} vs implied {vb['impl']:.1%})")
-        print(f"  Kick-off  : {dt}")
-        print(f"  Stake     : £{stake}  (half-Kelly, £{BANKROLL:.0f} bankroll)")
-        print()
+        side = side_labels.get(vb["side"], vb["side"])
+        print(f"  {vb['home']} vs {vb['away']} [{side}]")
+        print(f"    {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
+              f"Consensus {vb['cons']:.1%} | Stake £{stake} | {dt}")
+    print()
 
-    # Push notification — title shows count, body lists all bets
-    title = f"EPL Bets - {len(bets)} value bet{'s' if len(bets) > 1 else ''} today"
-    message = "\n\n".join(format_bet(vb) for vb in bets)
+    # Push notification
+    n = len(all_bets)
+    title = f"Bets - {n} value bet{'s' if n > 1 else ''} ({', '.join(sport_summary)})"
+    message = "\n\n".join(format_bet_line(vb) for vb in all_bets[:10])  # cap at 10 for readability
+    if n > 10:
+        message += f"\n\n...and {n - 10} more. Check routines for full list."
     notify(title=title, message=message, priority="high")
 
 
