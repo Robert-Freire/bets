@@ -89,7 +89,7 @@ def get_active_tennis_sports() -> list[tuple[str, str, int]]:
 def fetch_odds(sport_key: str) -> tuple[list, str]:
     data, remaining = api_get(
         f"/sports/{sport_key}/odds/",
-        {"regions": "uk,eu,us", "markets": "h2h", "oddsFormat": "decimal"},
+        {"regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"},
     )
     return data, remaining
 
