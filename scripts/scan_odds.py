@@ -23,6 +23,31 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 MIN_EDGE = 0.03
 BANKROLL = 1000.0
 
+# Bookmakers with a UK Gambling Commission licence — the only ones usable from the UK.
+# Consensus is still computed across ALL books (better signal), but value bets are
+# only flagged when a UK-licensed book is the one offering the edge.
+UK_LICENSED_BOOKS = {
+    "betfair_ex_uk",   # Betfair Exchange
+    "betfair_sb_uk",   # Betfair Sportsbook
+    "smarkets",        # Smarkets Exchange
+    "matchbook",       # Matchbook Exchange
+    "betfred_uk",      # Betfred
+    "williamhill",     # William Hill
+    "coral",           # Coral
+    "ladbrokes_uk",    # Ladbrokes
+    "skybet",          # Sky Bet
+    "paddypower",      # Paddy Power
+    "boylesports",     # BoyleSports
+    "betvictor",       # BetVictor
+    "betway",          # Betway
+    "leovegas",        # LeoVegas
+    "casumo",          # Casumo
+    "virginbet",       # Virgin Bet
+    "livescorebet",    # LiveScore Bet
+    "sport888",        # 888Sport
+    "grosvenor",       # Grosvenor
+}
+
 # Fixed sports to always scan
 FIXED_SPORTS = [
     ("soccer_epl",                "EPL",          20),   # min_books
@@ -105,6 +130,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
         cons = {s: statistics.mean(vals) for s, vals in impl.items()}
 
         for b in book_list:
+            if b["book"] not in UK_LICENSED_BOOKS:
+                continue  # consensus uses all books, but only flag UK-accessible ones
             for side, odds in b.items():
                 if side == "book" or side not in cons:
                     continue
