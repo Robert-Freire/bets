@@ -1,6 +1,6 @@
 """
-Daily EPL value bet scanner.
-Reads ODDS_API_KEY from environment. Run with:
+Daily EPL value bet scanner with ntfy.sh push notifications.
+Run with:
     ODDS_API_KEY=xxx python3 scripts/scan_odds.py
 """
 
@@ -8,6 +8,7 @@ import json
 import os
 import urllib.request
 import urllib.parse
+import urllib.error
 import statistics
 from datetime import datetime, timezone
 
@@ -15,11 +16,16 @@ API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
 
+NTFY_TOPIC = "robert-epl-bets-m4x9k"  # your private ntfy.sh topic
+NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "soccer_epl"
 MIN_EDGE = 0.03
 MIN_BOOKS = 5
 BANKROLL = 1000.0
+
+SIDE_LABEL = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
 
 
 def fetch_odds():
@@ -84,6 +90,35 @@ def find_value_bets(events):
     return out
 
 
+def notify(title: str, message: str, priority: str = "default"):
+    try:
+        req = urllib.request.Request(
+            NTFY_URL,
+            data=message.encode("utf-8"),
+            headers={
+                "Title": title,
+                "Priority": priority,
+                "Tags": "soccer,money_with_wings",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print(f"[ntfy] Notification sent to topic '{NTFY_TOPIC}'")
+    except urllib.error.URLError as e:
+        print(f"[ntfy] Failed to send notification: {e}")
+
+
+def format_bet(vb: dict) -> str:
+    dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
+    kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
+    stake = round(kelly * BANKROLL, 2)
+    return (
+        f"{vb['home']} vs {vb['away']} [{SIDE_LABEL[vb['side']]}]\n"
+        f"  {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | Stake £{stake}\n"
+        f"  {dt}"
+    )
+
+
 def main():
     events, remaining = fetch_odds()
     bets = find_value_bets(events)
@@ -98,19 +133,29 @@ def main():
 
     if not bets:
         print("No value bets today.")
+        notify(
+            title="EPL Bets - No value today",
+            message=f"Scanned {len(events)} fixtures across {avg_books} bookmakers. No edge >= 3% found.",
+            priority="low",
+        )
         return
 
-    side_label = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
+    # Print full detail to stdout (visible in routines UI)
     for vb in bets:
         dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
         kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
         stake = round(kelly * BANKROLL, 2)
-        print(f"BET: {vb['home']} vs {vb['away']} [{side_label[vb['side']]}]")
+        print(f"BET: {vb['home']} vs {vb['away']} [{SIDE_LABEL[vb['side']]}]")
         print(f"  Bookmaker : {vb['book']} @ {vb['odds']}")
         print(f"  Edge      : {vb['edge']:.1%}  (consensus {vb['cons']:.1%} vs implied {vb['impl']:.1%})")
         print(f"  Kick-off  : {dt}")
         print(f"  Stake     : £{stake}  (half-Kelly, £{BANKROLL:.0f} bankroll)")
         print()
+
+    # Push notification — title shows count, body lists all bets
+    title = f"EPL Bets - {len(bets)} value bet{'s' if len(bets) > 1 else ''} today"
+    message = "\n\n".join(format_bet(vb) for vb in bets)
+    notify(title=title, message=message, priority="high")
 
 
 if __name__ == "__main__":
