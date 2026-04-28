@@ -108,9 +108,12 @@ def update(bet_id: int):
 
     result = request.form.get("result", "").strip().upper()
     actual_stake = request.form.get("actual_stake", "").strip()
+    odds = request.form.get("odds", "").strip()
 
     bets[bet_id]["result"] = result
     bets[bet_id]["actual_stake"] = actual_stake
+    if odds:
+        bets[bet_id]["odds"] = odds
     bets[bet_id]["pnl"] = calc_pnl(result, actual_stake, bets[bet_id].get("odds", ""))
 
     save_bets(bets)

@@ -75,7 +75,26 @@
     .fixture { font-weight: 500; }
     .meta { font-size: .75rem; color: #64748b; }
     .edge { color: #a78bfa; }
+    a.book-link { color: #94a3b8; text-decoration: none; border-bottom: 1px dotted #475569; }
+    a.book-link:hover { color: #e2e8f0; }
+    a.result-link { font-size: .7rem; color: #6366f1; text-decoration: none; white-space: nowrap; }
+    a.result-link:hover { color: #a5b4fc; }
   </style>
+  <script>
+    const BOOK_URLS = {
+      betfair_ex_uk: "https://www.betfair.com/exchange/plus/football",
+      betfred_uk:    "https://www.betfred.com/sports/football",
+      casumo:        "https://www.casumo.com/en-gb/sports/",
+      coral:         "https://www.coral.co.uk/sports/football",
+      matchbook:     "https://www.matchbook.com/sports/football",
+      smarkets:      "https://smarkets.com/sport/football",
+    };
+    function bookUrl(book) { return BOOK_URLS[book] || "https://www.google.com/search?q=" + encodeURIComponent(book + " betting"); }
+    function resultUrl(home, away) {
+      const q = encodeURIComponent(home + " vs " + away);
+      return "https://www.flashscore.com/search/#" + encodeURIComponent(home + " " + away);
+    }
+  </script>
 </head>
 <body>
 
@@ -132,9 +151,9 @@
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
-        <td class="fixture">{{ b.home }} vs {{ b.away }}</td>
+        <td class="fixture">{{ b.home }} vs {{ b.away }}<br><a class="result-link" href="{{ '#' }}" onclick="window.open(resultUrl('{{ b.home }}','{{ b.away }}'),'_blank');return false;">results ↗</a></td>
         <td class="side-{{ b.side }}">{{ b.side }}</td>
-        <td class="meta">{{ b.book }}</td>
+        <td class="meta"><a class="book-link" href="{{ '#' }}" onclick="window.open(bookUrl('{{ b.book }}'),'_blank');return false;" title="{{ b.book }}">{{ b.book }}</a></td>
         <td>{{ b.odds }}</td>
         <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
         <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
@@ -143,7 +162,8 @@
         <td>
           <form action="/update/{{ b.id }}" method="post">
             <div class="form-row">
-              <input type="number" name="actual_stake" value="{{ b.actual_stake }}" step="0.01" min="0" style="width:60px">
+              <input type="number" name="odds" value="{{ b.odds }}" step="0.01" min="1" style="width:60px" title="Odds">
+              <input type="number" name="actual_stake" value="{{ b.actual_stake }}" step="0.01" min="0" style="width:60px" title="Stake">
               <select name="result">
                 <option value="">--</option>
                 <option value="W">Won</option>
@@ -175,9 +195,9 @@
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
-        <td class="fixture">{{ b.home }} vs {{ b.away }}</td>
+        <td class="fixture">{{ b.home }} vs {{ b.away }}<br><a class="result-link" href="{{ '#' }}" onclick="window.open(resultUrl('{{ b.home }}','{{ b.away }}'),'_blank');return false;">results ↗</a></td>
         <td class="side-{{ b.side }}">{{ b.side }}</td>
-        <td class="meta">{{ b.book }}</td>
+        <td class="meta"><a class="book-link" href="{{ '#' }}" onclick="window.open(bookUrl('{{ b.book }}'),'_blank');return false;" title="{{ b.book }}">{{ b.book }}</a></td>
         <td>{{ b.odds }}</td>
         <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
         <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
@@ -185,7 +205,8 @@
         <td>
           <form action="/update/{{ b.id }}" method="post">
             <div class="form-row">
-              <input type="number" name="actual_stake" placeholder="£ bet" step="0.01" min="0">
+              <input type="number" name="odds" value="{{ b.odds }}" step="0.01" min="1" style="width:60px" title="Odds">
+              <input type="number" name="actual_stake" placeholder="£ bet" step="0.01" min="0" title="Stake">
               <select name="result">
                 <option value="">--</option>
                 <option value="W">Won</option>
@@ -232,9 +253,9 @@
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
-        <td class="fixture">{{ b.home }} vs {{ b.away }}</td>
+        <td class="fixture">{{ b.home }} vs {{ b.away }}<br><a class="result-link" href="{{ '#' }}" onclick="window.open(resultUrl('{{ b.home }}','{{ b.away }}'),'_blank');return false;">results ↗</a></td>
         <td class="side-{{ b.side }}">{{ b.side }}</td>
-        <td class="meta">{{ b.book }}</td>
+        <td class="meta"><a class="book-link" href="{{ '#' }}" onclick="window.open(bookUrl('{{ b.book }}'),'_blank');return false;" title="{{ b.book }}">{{ b.book }}</a></td>
         <td>{{ b.odds }}</td>
         <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
         <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
@@ -247,7 +268,8 @@
         <td>
           <form action="/update/{{ b.id }}" method="post">
             <div class="form-row">
-              <input type="number" name="actual_stake" value="{{ b.actual_stake }}" placeholder="£" step="0.01" min="0" style="width:60px">
+              <input type="number" name="odds" value="{{ b.odds }}" step="0.01" min="1" style="width:60px" title="Odds">
+              <input type="number" name="actual_stake" value="{{ b.actual_stake }}" placeholder="£" step="0.01" min="0" style="width:60px" title="Stake">
               <select name="result">
                 <option value="">--</option>
                 <option value="W" {% if b.result == 'W' %}selected{% endif %}>Won</option>

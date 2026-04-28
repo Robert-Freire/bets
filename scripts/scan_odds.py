@@ -4,6 +4,7 @@ Reads ODDS_API_KEY from environment. Run with:
     ODDS_API_KEY=xxx python3 scripts/scan_odds.py
 """
 
+import argparse
 import csv
 import json
 import os
@@ -75,7 +76,7 @@ def api_get(path: str, params: dict) -> tuple[list | dict, str]:
         return json.loads(r.read()), remaining
 
 
-def get_active_tennis_sports() -> list[tuple[str, str, int]]:
+def get_active_tennis_sports(max_tournaments: int = 99) -> list[tuple[str, str, int]]:
     """Fetch active tennis tournaments dynamically (free call — no quota cost)."""
     data, _ = api_get("/sports/", {"all": "false"})
     tennis = []
@@ -83,7 +84,7 @@ def get_active_tennis_sports() -> list[tuple[str, str, int]]:
         if s.get("active") and s["key"].startswith("tennis_"):
             label = s.get("title", s["key"])
             tennis.append((s["key"], label, 15))
-    return tennis
+    return tennis[:max_tournaments]
 
 
 def fetch_odds(sport_key: str) -> tuple[list, str]:
@@ -196,13 +197,43 @@ def notify(title: str, message: str, priority: str = "default"):
         print(f"[ntfy] Failed: {e}")
 
 
-def main():
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    print(f"=== Multi-Sport Value Bet Scanner === {now}\n")
+SPORT_GROUPS = {
+    "football": {s[0] for s in FIXED_SPORTS if s[0].startswith("soccer_")},
+    "nba":      {"basketball_nba"},
+    "tennis":   set(),  # populated dynamically
+}
 
-    # Build sport list: fixed + dynamic tennis
-    tennis_sports = get_active_tennis_sports()
+
+def build_sport_list(filter_group: str | None, max_tennis: int = 99) -> list[tuple[str, str, int]]:
+    tennis_sports = get_active_tennis_sports(max_tennis)
     all_sports = FIXED_SPORTS + tennis_sports
+
+    if not filter_group:
+        return all_sports
+
+    group = filter_group.lower()
+    if group == "tennis":
+        return get_active_tennis_sports(max_tennis)
+    if group in SPORT_GROUPS:
+        keys = SPORT_GROUPS[group]
+        return [s for s in all_sports if s[0] in keys]
+    # treat as a specific sport key
+    return [s for s in all_sports if s[0] == group]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sports", default=None,
+                        help="Limit scan to: football, tennis, nba, or a specific sport key")
+    parser.add_argument("--max-tennis", type=int, default=99,
+                        help="Cap number of active tennis tournaments to scan (saves API quota)")
+    args = parser.parse_args()
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    label = f" [{args.sports}]" if args.sports else ""
+    print(f"=== Multi-Sport Value Bet Scanner{label} === {now}\n")
+
+    all_sports = build_sport_list(args.sports, args.max_tennis)
 
     quota_remaining = "?"
     all_bets: list[dict] = []
