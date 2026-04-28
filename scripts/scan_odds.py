@@ -50,10 +50,13 @@ UK_LICENSED_BOOKS = {
 
 # Fixed sports to always scan
 FIXED_SPORTS = [
-    ("soccer_epl",                "EPL",        20),   # min_books
-    ("soccer_germany_bundesliga", "Bundesliga", 20),
-    ("soccer_italy_serie_a",      "Serie A",    20),
-    ("basketball_nba",            "NBA",        20),
+    ("soccer_epl",                "EPL",          20),   # min_books
+    ("soccer_germany_bundesliga", "Bundesliga",   20),
+    ("soccer_italy_serie_a",      "Serie A",      20),
+    ("soccer_efl_champ",          "Championship", 25),
+    ("soccer_france_ligue_one",   "Ligue 1",      20),
+    ("soccer_germany_bundesliga2","Bundesliga 2", 20),
+    ("basketball_nba",            "NBA",          20),
 ]
 
 # Min books per sport — below this the consensus is unreliable
