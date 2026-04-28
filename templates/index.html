@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Betting Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+    h1 { font-size: 1.4rem; font-weight: 600; }
+    h2 { font-size: 1rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: #94a3b8; margin-bottom: 1rem; }
+
+    /* Header */
+    .header { background: #1e2130; border-bottom: 1px solid #2d3148; padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+    .header span { font-size: .85rem; color: #64748b; }
+
+    /* Stats bar */
+    .stats { display: flex; gap: 1rem; padding: 1rem 1.5rem; background: #161824; border-bottom: 1px solid #2d3148; flex-wrap: wrap; }
+    .stat { background: #1e2130; border-radius: 8px; padding: .7rem 1.2rem; flex: 1; min-width: 110px; }
+    .stat-label { font-size: .7rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
+    .stat-value { font-size: 1.3rem; font-weight: 700; margin-top: .2rem; }
+    .stat-value.pos { color: #22c55e; }
+    .stat-value.neg { color: #ef4444; }
+    .stat-value.neu { color: #e2e8f0; }
+
+    /* Sections */
+    .section { padding: 1.5rem; }
+    .section + .section { border-top: 1px solid #2d3148; }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th { text-align: left; padding: .5rem .75rem; color: #64748b; font-weight: 500; border-bottom: 1px solid #2d3148; white-space: nowrap; }
+    td { padding: .55rem .75rem; border-bottom: 1px solid #1e2130; vertical-align: middle; }
+    tr:hover td { background: #1e2130; }
+
+    /* Confidence badges */
+    .badge { display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-size: .7rem; font-weight: 700; letter-spacing: .04em; }
+    .HIGH { background: #14532d; color: #4ade80; }
+    .MED  { background: #713f12; color: #fbbf24; }
+    .LOW  { background: #1e1b4b; color: #a5b4fc; }
+
+    /* Side badges */
+    .side-HOME { color: #60a5fa; }
+    .side-DRAW { color: #94a3b8; }
+    .side-AWAY { color: #f472b6; }
+
+    /* Result badges */
+    .res-W { color: #22c55e; font-weight: 700; }
+    .res-L { color: #ef4444; font-weight: 700; }
+    .res-V { color: #94a3b8; font-weight: 700; }
+
+    /* Form */
+    .form-row { display: flex; gap: .4rem; align-items: center; }
+    input[type="number"] {
+      width: 70px; background: #0f1117; border: 1px solid #2d3148; color: #e2e8f0;
+      border-radius: 4px; padding: .3rem .5rem; font-size: .8rem;
+    }
+    input[type="number"]:focus { outline: none; border-color: #6366f1; }
+    select {
+      background: #0f1117; border: 1px solid #2d3148; color: #e2e8f0;
+      border-radius: 4px; padding: .3rem .5rem; font-size: .8rem;
+    }
+    select:focus { outline: none; border-color: #6366f1; }
+    button[type="submit"] {
+      background: #6366f1; color: #fff; border: none; border-radius: 4px;
+      padding: .3rem .65rem; font-size: .8rem; cursor: pointer; font-weight: 600;
+    }
+    button[type="submit"]:hover { background: #4f46e5; }
+
+    /* PnL colouring */
+    .pnl-pos { color: #22c55e; }
+    .pnl-neg { color: #ef4444; }
+
+    .no-bets { color: #475569; font-size: .9rem; padding: 1rem 0; }
+    .fixture { font-weight: 500; }
+    .meta { font-size: .75rem; color: #64748b; }
+    .edge { color: #a78bfa; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Betting Dashboard</h1>
+  <span>{{ (pending|length) }} pending &nbsp;·&nbsp; {{ (done|length) }} settled</span>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-label">Bets placed</div>
+    <div class="stat-value neu">{{ stats.n }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Won / Lost / Void</div>
+    <div class="stat-value neu">{{ stats.won }} / {{ stats.lost }} / {{ stats.void }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Total staked</div>
+    <div class="stat-value neu">£{{ stats.staked }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">P&L</div>
+    <div class="stat-value {% if stats.pnl > 0 %}pos{% elif stats.pnl < 0 %}neg{% else %}neu{% endif %}">
+      £{{ stats.pnl if stats.pnl else 0 }}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">ROI</div>
+    <div class="stat-value {% if stats.roi > 0 %}pos{% elif stats.roi < 0 %}neg{% else %}neu{% endif %}">
+      {{ stats.roi }}%
+    </div>
+  </div>
+</div>
+
+<!-- Pending bets -->
+<div class="section">
+  <h2>Pending ({{ pending|length }})</h2>
+  {% if pending %}
+  <table>
+    <thead>
+      <tr>
+        <th>Kick-off</th>
+        <th>Sport</th>
+        <th>Fixture</th>
+        <th>Side</th>
+        <th>Book</th>
+        <th>Odds</th>
+        <th>Edge</th>
+        <th>Conf</th>
+        <th>Suggested £</th>
+        <th>Log bet</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for b in pending %}
+      <tr>
+        <td class="meta">{{ b.kickoff }}</td>
+        <td class="meta">{{ b.sport }}</td>
+        <td class="fixture">{{ b.home }} vs {{ b.away }}</td>
+        <td class="side-{{ b.side }}">{{ b.side }}</td>
+        <td class="meta">{{ b.book }}</td>
+        <td>{{ b.odds }}</td>
+        <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
+        <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
+        <td class="meta">£{{ b.stake }}</td>
+        <td>
+          <form action="/update/{{ b.id }}" method="post">
+            <div class="form-row">
+              <input type="number" name="actual_stake" placeholder="£ bet" step="0.01" min="0">
+              <select name="result">
+                <option value="">--</option>
+                <option value="W">Won</option>
+                <option value="L">Lost</option>
+                <option value="V">Void</option>
+              </select>
+              <button type="submit">Save</button>
+            </div>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="no-bets">No pending bets — next scan will populate this.</p>
+  {% endif %}
+</div>
+
+<!-- Settled bets -->
+<div class="section">
+  <h2>Settled ({{ done|length }})</h2>
+  {% if done %}
+  <table>
+    <thead>
+      <tr>
+        <th>Kick-off</th>
+        <th>Sport</th>
+        <th>Fixture</th>
+        <th>Side</th>
+        <th>Book</th>
+        <th>Odds</th>
+        <th>Edge</th>
+        <th>Conf</th>
+        <th>Suggested £</th>
+        <th>Placed £</th>
+        <th>Result</th>
+        <th>P&L</th>
+        <th>Edit</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for b in done %}
+      <tr>
+        <td class="meta">{{ b.kickoff }}</td>
+        <td class="meta">{{ b.sport }}</td>
+        <td class="fixture">{{ b.home }} vs {{ b.away }}</td>
+        <td class="side-{{ b.side }}">{{ b.side }}</td>
+        <td class="meta">{{ b.book }}</td>
+        <td>{{ b.odds }}</td>
+        <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
+        <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
+        <td class="meta">£{{ b.stake }}</td>
+        <td>£{{ b.actual_stake }}</td>
+        <td class="res-{{ b.result }}">{{ b.result }}</td>
+        <td class="{% if b.pnl and b.pnl|float > 0 %}pnl-pos{% elif b.pnl and b.pnl|float < 0 %}pnl-neg{% endif %}">
+          {% if b.pnl %}£{{ b.pnl }}{% endif %}
+        </td>
+        <td>
+          <form action="/update/{{ b.id }}" method="post">
+            <div class="form-row">
+              <input type="number" name="actual_stake" value="{{ b.actual_stake }}" placeholder="£" step="0.01" min="0" style="width:60px">
+              <select name="result">
+                <option value="">--</option>
+                <option value="W" {% if b.result == 'W' %}selected{% endif %}>Won</option>
+                <option value="L" {% if b.result == 'L' %}selected{% endif %}>Lost</option>
+                <option value="V" {% if b.result == 'V' %}selected{% endif %}>Void</option>
+              </select>
+              <button type="submit">Save</button>
+            </div>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="no-bets">No settled bets yet.</p>
+  {% endif %}
+</div>
+
+</body>
+</html>
