@@ -114,25 +114,64 @@
 
 <!-- Pending bets -->
 <div class="section">
-  <h2>Pending ({{ pending|length }})</h2>
-  {% if pending %}
-  <table>
+  {% set placed_pending = pending | selectattr("actual_stake") | list %}
+  {% set not_placed = pending | rejectattr("actual_stake") | list %}
+
+  {% if placed_pending %}
+  <h2>Placed — awaiting result ({{ placed_pending|length }})</h2>
+  <table style="margin-bottom:1.5rem">
     <thead>
       <tr>
-        <th>Kick-off</th>
-        <th>Sport</th>
-        <th>Fixture</th>
-        <th>Side</th>
-        <th>Book</th>
-        <th>Odds</th>
-        <th>Edge</th>
-        <th>Conf</th>
-        <th>Suggested £</th>
-        <th>Log bet</th>
+        <th>Kick-off</th><th>Sport</th><th>Fixture</th><th>Side</th>
+        <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th>
+        <th>Suggested £</th><th>Placed £</th><th>Settle</th>
       </tr>
     </thead>
     <tbody>
-    {% for b in pending %}
+    {% for b in placed_pending %}
+      <tr>
+        <td class="meta">{{ b.kickoff }}</td>
+        <td class="meta">{{ b.sport }}</td>
+        <td class="fixture">{{ b.home }} vs {{ b.away }}</td>
+        <td class="side-{{ b.side }}">{{ b.side }}</td>
+        <td class="meta">{{ b.book }}</td>
+        <td>{{ b.odds }}</td>
+        <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
+        <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
+        <td class="meta">£{{ b.stake }}</td>
+        <td style="color:#22c55e;font-weight:600">£{{ b.actual_stake }}</td>
+        <td>
+          <form action="/update/{{ b.id }}" method="post">
+            <div class="form-row">
+              <input type="number" name="actual_stake" value="{{ b.actual_stake }}" step="0.01" min="0" style="width:60px">
+              <select name="result">
+                <option value="">--</option>
+                <option value="W">Won</option>
+                <option value="L">Lost</option>
+                <option value="V">Void</option>
+              </select>
+              <button type="submit">Save</button>
+            </div>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Suggested — not yet placed ({{ not_placed|length }})</h2>
+  {% if not_placed %}
+  <table>
+    <thead>
+      <tr>
+        <th>Kick-off</th><th>Sport</th><th>Fixture</th><th>Side</th>
+        <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th>
+        <th>Suggested £</th><th>Log bet</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for b in not_placed %}
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
@@ -162,7 +201,7 @@
     </tbody>
   </table>
   {% else %}
-    <p class="no-bets">No pending bets — next scan will populate this.</p>
+    <p class="no-bets">No unplaced suggestions — all caught up.</p>
   {% endif %}
 </div>
 
