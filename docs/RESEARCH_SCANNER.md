@@ -21,7 +21,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 
 | Phase | Title | Status | Branch / SHA | Notes |
 |---|---|---|---|---|
-| 11.0 | Cron-auth smoke test (no code) | pending | — | Spike. Output is a doc section. |
+| 11.0 | Cron-auth smoke test (no code) | done | main / — | CLAUDE_CMD verified; median 3.7s; model=claude-opus-4-7; PATH needs /home/rfreire/.local/bin |
 | 11.1 | Source list + queries (data only) | pending | — | Two new committed `.md` files. |
 | 11.2 | Fetcher module | pending | — | URL → cleaned text + hash. |
 | 11.3 | Dedup state + pending-file builder | pending | — | `research_seen.json` + assembler. |
@@ -255,6 +255,46 @@ Be terse. Skip filler.
 
 **Reviewer focus.** I will re-run `CLAUDE_CMD` myself before signing off. Watch for: hidden interactive prompts, model-not-available errors, anything that requires a TTY.
 
+### Cron-auth findings (verified 2026-04-29)
+
+**`CLAUDE_CMD`**
+
+```sh
+env -i HOME=$HOME PATH=/usr/bin:/bin:/home/rfreire/.local/bin \
+  claude -p --model claude-opus-4-7 --output-format text
+```
+
+Single-liner (paste into cron or shell script):
+
+```sh
+env -i HOME=$HOME PATH=/usr/bin:/bin:/home/rfreire/.local/bin claude -p --model claude-opus-4-7 --output-format text
+```
+
+**Required env vars**
+
+| Var | Why |
+|---|---|
+| `HOME` | Auth config lives at `~/.claude/` — claude reads it via `$HOME`. |
+| `PATH` | Must include `/home/rfreire/.local/bin` (where `claude` is installed). `/usr/bin:/bin` alone is not enough. |
+
+**Model note.** The spec draft said `--model opus`; the working model ID is `claude-opus-4-7`. Use the full ID in all later phases to avoid ambiguity as new Opus versions ship.
+
+**Median latency observed**
+
+| Run | Wall time |
+|---|---|
+| 1 | 3 678 ms |
+| 2 | 3 689 ms |
+| 3 | 2 980 ms |
+| **Median** | **3 678 ms** |
+
+All three runs returned `READY`. No TTY required, no interactive prompts, exit 0.
+
+**Acceptance checklist**
+- [x] Cron-auth findings subsection added, all required fields filled.
+- [x] `CLAUDE_CMD` returned "READY" ≥3 consecutive times.
+- [x] Median latency < 30s (actual: ~3.7s).
+
 ---
 
 ## Phase 11.1 — Source list + queries (data only, ~30 min)
@@ -298,7 +338,7 @@ Be terse. Skip filler.
 
 **Acceptance.**
 - [ ] Both files committed.
-- [ ] `grep -c '^- http' docs/research_sources.md` returns **40** (28 Tier-A + 12 Tier-B).
+- [ ] `grep -c '^- http' docs/research_sources.md` returns **37** (25 Tier-A + 12 Tier-B). (Spec said 28 Tier-A but only 25 are listed in the Reference section and confirmed in REVIEW.md.)
 - [ ] `grep -cv '^#\|^$' docs/research_queries.md` returns **7**.
 - [ ] Header comments in both files reference back to RESEARCH_SCANNER.md.
 
