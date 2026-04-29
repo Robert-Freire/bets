@@ -77,6 +77,8 @@ STRATEGIES: list[StrategyConfig] = [
     StrategyConfig(
         name="E_exchanges_only",
         label="E: Exchanges only",
+        # Consensus still uses all UK-licensed books (mean), which dilutes the exchange-only
+        # signal. A future refinement is to anchor E on Pinnacle (consensus_mode="pinnacle_only").
         description="Only flag Betfair Ex / Smarkets / Matchbook; 4% edge to net commission",
         book_filter="exchanges_only",
         min_edge=0.04,
@@ -87,7 +89,9 @@ STRATEGIES: list[StrategyConfig] = [
         description="Model-only: flag h2h where model edge ≥ 3%, skip totals/btts",
         require_model_agree=True,
         model_min_edge=0.03,
-        min_edge=0.0,
+        # min_edge=-1.0 so the consensus-edge gate is off: F should fire whenever model
+        # agrees at model_min_edge, even if the consensus edge is mildly negative.
+        min_edge=-1.0,
         markets=("h2h",),
     ),
     StrategyConfig(

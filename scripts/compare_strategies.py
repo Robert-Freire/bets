@@ -46,8 +46,11 @@ def _stats(rows: list[dict]) -> dict:
 
     edge_values = []
     for r in rows:
+        v = r.get("edge")
+        if v in ("", None):
+            continue
         try:
-            edge_values.append(float(r.get("edge", r.get("consensus", 0)) or 0))
+            edge_values.append(float(v))
         except (ValueError, TypeError):
             pass
     avg_edge = sum(edge_values) / len(edge_values) if edge_values else None
@@ -81,12 +84,7 @@ def _fmt(val, fmt=".2%", fallback="—") -> str:
 def build_report() -> str:
     entries = []
 
-    # Production bets.csv — strategy name "production"
-    prod_rows = _read_csv(BETS_CSV)
-    if prod_rows:
-        entries.append(("production", prod_rows))
-
-    # Paper strategy CSVs
+    # Paper strategy CSVs (A_production is the canonical proxy for production)
     if PAPER_DIR.exists():
         for path in sorted(PAPER_DIR.glob("*.csv")):
             rows = _read_csv(path)

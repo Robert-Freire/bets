@@ -327,15 +327,18 @@ def main():
 
     # Group by sport to minimise API calls (one call per sport, not per fixture)
     by_sport: dict[str, list[dict]] = {}
+    _skipped_sports: dict[str, int] = {}
     for bet in all_active:
         sport_key = LABEL_TO_KEY.get(bet.get("sport", ""))
         if not sport_key:
-            # Tennis labels are dynamic (API title field) and not in LABEL_TO_KEY.
-            # Tennis bets produce no CLV/drift until sport_key is stored in bets.csv (Phase 6).
-            if bet not in extra_paper:  # only warn once (from production bets)
-                print(f"  [skip] {bet.get('sport','?')} — no sport_key mapping for CLV (tennis excluded)")
+            label = bet.get("sport", "?")
+            _skipped_sports[label] = _skipped_sports.get(label, 0) + 1
             continue
         by_sport.setdefault(sport_key, []).append(bet)
+    if _skipped_sports:
+        # Tennis labels are dynamic and not in LABEL_TO_KEY; CLV excluded until Phase 6.
+        for label, count in _skipped_sports.items():
+            print(f"  [skip] {label} ({count} bet(s)) — no sport_key mapping for CLV (tennis excluded)")
 
     closing_rows: list[dict] = []
     drift_rows:   list[dict] = []

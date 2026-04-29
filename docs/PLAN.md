@@ -28,7 +28,7 @@ This is a phased plan to roll the recommendations from the review into the syste
 | 4.5 | Test scaffolding (pytest, devig/risk/keys) | ~2h | Low |
 | 5 | New markets: totals, BTTS | ~3h | Low |
 | 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done | Low |
-| 5.6 | Phase 5.5 bugfix sweep (P0/P1 from code review) | ~3h | Low |
+| 5.6 | Phase 5.5 bugfix sweep (P0/P1 from code review) | ✅ Done | Low |
 | 5.7 | Commission-aware edges (per-book commission collection) | ~3h | Low |
 | 6 | Storage: SQLite + UUIDs + `sport_key` (closes tennis CLV gap) | ~5h | Medium |
 | 7 | Model overhaul: calibration, daily refresh, ensemble | ~8h | Medium |

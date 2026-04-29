@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def test_drift_key_includes_market_and_line():
+def test_drift_key_includes_market_and_line(tmp_path):
     """app.py load_drift keys must be 6-tuples ending in (market, line)."""
     import app as _app
 
@@ -35,12 +35,12 @@ def test_drift_key_includes_market_and_line():
     writer.writerows(rows)
     buf.seek(0)
 
-    # Patch DRIFT_CSV to our in-memory data
+    # Patch DRIFT_CSV to a temp file so we don't touch the real logs/
+    tmp = tmp_path / "drift_test.csv"
+    tmp.write_text(buf.getvalue())
     original = _app.DRIFT_CSV
+    _app.DRIFT_CSV = tmp
     try:
-        tmp = ROOT / "logs" / "_test_drift_tmp.csv"
-        tmp.write_text(buf.getvalue())
-        _app.DRIFT_CSV = tmp
         drift = _app.load_drift()
         keys = list(drift.keys())
         # Each key must be a 6-tuple
@@ -50,25 +50,21 @@ def test_drift_key_includes_market_and_line():
         assert len(keys) == 2
     finally:
         _app.DRIFT_CSV = original
-        if tmp.exists():
-            tmp.unlink()
 
 
-def test_closing_line_key_matches_drift_key():
-    """closing_line.py drift dedup key is 7-tuple (home, away, kickoff, side, t_label, market, line).
-    Verify the shape matches the pattern used in closing_line.py without importing it
-    (the module raises RuntimeError on import when ODDS_API_KEY is absent).
+def test_closing_line_key_matches_drift_key(tmp_path):
+    """closing_line.py drift key is 7-tuple (home, away, kickoff, side, t_label, market, line).
+    The app.py lookup key is the same 7-tuple minus t_label at index 4.
+    Verify the relationship with a real equality check, not just length asserts.
     """
-    # Matches closing_line.py line ~327: dk = (home, away, kickoff_str, side, str(t_label), market, line_val)
     home, away, kickoff, side, t_label, market, line = (
-        "Arsenal", "Chelsea", "2026-05-10T15:00:00Z", "H", "60", "h2h", ""
+        "Arsenal", "Chelsea", "2026-05-10T15:00:00Z", "H", "60", "h2x", ""
     )
-    dk = (home, away, kickoff, side, str(t_label), market, line)
-    assert len(dk) == 7
+    dk = (home, away, kickoff, side, str(t_label), market, line)  # 7-tuple as in closing_line.py
+    lk = (home, away, kickoff, side, market, line)                 # 6-tuple as in app.py
 
-    # The app.py lookup key is 6-tuple (drops t_label)
-    lk = (home, away, kickoff, side, market, line)
-    assert len(lk) == 6
+    # Lookup key must equal the drift key with t_label (index 4) removed
+    assert lk == dk[:4] + dk[5:], f"lk={lk!r} != dk without t_label {dk[:4] + dk[5:]!r}"
 
 
 def test_bets_csv_dedup_key_matches():

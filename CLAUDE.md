@@ -180,9 +180,10 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 1 | Shin de-vigging + Pinnacle anchor | ✅ Done |
 | 2 | Risk management (rounding, caps, drawdown) | ✅ Done |
 | 3 | CLV + drift diagnostics | ✅ Done |
-| 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done |
+| 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done (dispersion/outlier via strategies.py; notification dedupe pending Phase 4.4) |
 | 5 | New markets: totals, BTTS | ✅ Done |
 | 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done |
+| 5.6 | Phase 5.5 bugfix sweep (P0/P1) | ✅ Done |
 | 6 | SQLite + UUIDs | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |

@@ -579,7 +579,7 @@ _PAPER_FIELDNAMES = [
     "scanned_at", "strategy", "sport", "market", "line", "home", "away", "kickoff",
     "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
     "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-    "pinnacle_close_prob", "clv_pct",
+    "stake", "pinnacle_close_prob", "clv_pct",
 ]
 
 _H2H_SIDE = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
@@ -636,6 +636,8 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "model_signal": vb.get("model_signal", "?"),
             "dispersion": round(vb.get("dispersion", 0.0), 4),
             "outlier_z": round(vb.get("outlier_z", 0.0), 3),
+            # Per-bet half-Kelly stake (no fixture/portfolio cap — paper is hypothetical)
+            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], BANKROLL), 2),
             "pinnacle_close_prob": "",
             "clv_pct": "",
         })
