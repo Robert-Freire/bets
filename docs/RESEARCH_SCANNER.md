@@ -26,7 +26,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.2 | Fetcher module | done | main / 1f1c1b1 → b911df9 | FetchResult + 6 handlers; review fixed: github topic parser broken on real HTML, 4xx silently parsed, Wikipedia nav cruft, 501 missing. 21/21 fetch tests pass. |
 | 11.3 | Dedup state + pending-file builder | done | main / HEAD | `load_seen/save_seen/is_changed/update_seen/assemble_pending`; 19/19 tests pass; atomic write + 200 KB batching verified. |
 | 11.4 | Claude subprocess wrapper | done | main / HEAD | call_claude + call_claude_batched; 8/8 tests; real smoke returned findings; PROMPT_TEMPLATE byte-for-byte match; log line confirmed. |
-| 11.5 | Feed writer | pending | — | Prepends to `RESEARCH_FEED.md`. |
+| 11.5 | Feed writer | done | main / HEAD | `write_findings`; 13/13 tests pass; atomic write, banner-once, newest-first verified. |
 | 11.6 | Top-level CLI + bootstrap mode | pending | — | First end-to-end run. |
 | 11.7 | Open-search backends | pending | — | Independent of 11.8. |
 | 11.8 | Dashboard tile | pending | — | Independent of 11.7. |
@@ -524,9 +524,9 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 5. Tests: empty file, existing file with prior runs, count regex correctness.
 
 **Acceptance.**
-- [ ] Tests pass.
-- [ ] After two writes, file has banner once + two `## Run` sections, newest first.
-- [ ] Returned count matches actual STRATEGY/EVIDENCE/RISK lines.
+- [x] Tests pass (13/13).
+- [x] After two writes, file has banner once + two `## Run` sections, newest first.
+- [x] Returned count matches actual STRATEGY/EVIDENCE/RISK lines.
 
 **Reviewer focus.** That `RESEARCH_FEED.md` stays grep-able: `grep -A1 "STRATEGY" RESEARCH_FEED.md` should produce a clean list across runs.
 
