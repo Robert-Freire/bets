@@ -22,7 +22,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | Phase | Title | Status | Branch / SHA | Notes |
 |---|---|---|---|---|
 | 11.0 | Cron-auth smoke test (no code) | done | main / — | CLAUDE_CMD verified; median 3.7s; model=claude-opus-4-7; PATH needs /home/rfreire/.local/bin |
-| 11.1 | Source list + queries (data only) | pending | — | Two new committed `.md` files. |
+| 11.1 | Source list + queries (data only) | done | main / c670a5e | 37 URLs (25 Tier-A + 12 Tier-B); 7 queries; spec URL count corrected 28→25. |
 | 11.2 | Fetcher module | pending | — | URL → cleaned text + hash. |
 | 11.3 | Dedup state + pending-file builder | pending | — | `research_seen.json` + assembler. |
 | 11.4 | Claude subprocess wrapper | pending | — | Depends on 11.0 + 11.3. |
@@ -337,10 +337,10 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 3. Copy URLs/queries verbatim from this doc's Reference section.
 
 **Acceptance.**
-- [ ] Both files committed.
-- [ ] `grep -c '^- http' docs/research_sources.md` returns **37** (25 Tier-A + 12 Tier-B). (Spec said 28 Tier-A but only 25 are listed in the Reference section and confirmed in REVIEW.md.)
-- [ ] `grep -cv '^#\|^$' docs/research_queries.md` returns **7**.
-- [ ] Header comments in both files reference back to RESEARCH_SCANNER.md.
+- [x] Both files committed.
+- [x] `grep -c '^- http' docs/research_sources.md` returns **37** (25 Tier-A + 12 Tier-B). (Spec said 28 Tier-A but only 25 are listed in the Reference section and confirmed in REVIEW.md.)
+- [x] `grep -cv '^#\|^$' docs/research_queries.md` returns **7**.
+- [x] Header comments in both files reference back to RESEARCH_SCANNER.md.
 
 **Reviewer focus.** Cross-check the URL count against this doc — silent truncation kills the corpus.
 
