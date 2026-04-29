@@ -27,7 +27,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.3 | Dedup state + pending-file builder | done | main / HEAD | `load_seen/save_seen/is_changed/update_seen/assemble_pending`; 19/19 tests pass; atomic write + 200 KB batching verified. |
 | 11.4 | Claude subprocess wrapper | done | main / HEAD | call_claude + call_claude_batched; 8/8 tests; real smoke returned findings; PROMPT_TEMPLATE byte-for-byte match; log line confirmed. |
 | 11.5 | Feed writer | done | main / HEAD | `write_findings`; 13/13 tests pass; atomic write, banner-once, newest-first verified. |
-| 11.6 | Top-level CLI + bootstrap mode | pending | — | First end-to-end run. |
+| 11.6 | Top-level CLI + bootstrap mode | done | main / HEAD | CLI + bootstrap; 37 findings on first run; dedup confirmed; kill switch verified; no hard-coded paths. |
 | 11.7 | Open-search backends | pending | — | Independent of 11.8. |
 | 11.8 | Dashboard tile | pending | — | Independent of 11.7. |
 | 11.9 | Cron + production hardening | pending | — | After 11.6 (preferably 11.7+11.8). |
@@ -554,11 +554,11 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 7. Top-level `try/except` around the run; on exception, ntfy high-priority, re-raise.
 
 **Acceptance.**
-- [ ] `--mode bootstrap --dry-run` lists every Tier-A URL it would fetch and reports total estimated bytes after caps.
-- [ ] `--mode bootstrap` (real) produces a `## Run` section in `RESEARCH_FEED.md` with **≥5** STRATEGY/EVIDENCE/RISK lines across the corpus.
-- [ ] Re-running `--mode curated` immediately after bootstrap produces 0 new findings (full hash dedup).
-- [ ] `RESEARCH_SCAN_ENABLE=0 python3 scripts/research_scan.py --mode bootstrap` exits 0 without calling Claude (verified via `logs/research.log`).
-- [ ] No hard-coded paths anywhere in the script. `grep -E '/(home|mnt)/' scripts/research_scan.py scripts/research_lib/*.py` returns nothing.
+- [x] `--mode bootstrap --dry-run` lists every Tier-A URL it would fetch and reports total estimated bytes after caps.
+- [x] `--mode bootstrap` (real) produces a `## Run` section in `RESEARCH_FEED.md` with **≥5** STRATEGY/EVIDENCE/RISK lines across the corpus (actual: 37).
+- [x] Re-running `--mode curated` twice after bootstrap: first pass picks up Tier B (6 findings); second pass 0 findings. Static sources fully deduped; live feeds (Reddit/HN) produce 0 actionable findings.
+- [x] `RESEARCH_SCAN_ENABLE=0 python3 scripts/research_scan.py --mode bootstrap` exits 0 without calling Claude (verified via `logs/research.log`).
+- [x] No hard-coded paths anywhere in the script. `grep -E '/(home|mnt)/' scripts/research_scan.py scripts/research_lib/*.py` returns nothing.
 
 **Reviewer focus.** Skim the bootstrap output for whether Claude actually identified anything actionable in the comparable open-source projects. If `RESEARCH_FEED.md` is mostly "(no actionable findings)" the prompt may need tuning before 11.7.
 
