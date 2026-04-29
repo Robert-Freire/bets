@@ -6,7 +6,9 @@ __pycache__/
 *.pyo
 .pytest_cache/
 *.egg-info/
-logs/scan.log
-logs/app.log
+logs/*.log
 logs/sports_cache.json
+logs/bankroll.json
+logs/notified.json
+logs/scan_state.json
 todo.md
