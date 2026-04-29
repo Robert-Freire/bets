@@ -5,6 +5,7 @@ Then open: http://localhost:5000
 """
 
 import csv
+import fcntl
 import os
 from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, jsonify
@@ -24,6 +25,7 @@ def load_bets() -> list[dict]:
     if not BETS_CSV.exists():
         return []
     with open(BETS_CSV, newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_SH)
         reader = csv.DictReader(f)
         bets = []
         for i, row in enumerate(reader):
@@ -45,10 +47,13 @@ def save_bets(bets: list[dict]):
         if f not in fieldnames and f != "id":
             fieldnames.append(f)
 
-    with open(BETS_CSV, "w", newline="") as f:
+    tmp = BETS_CSV.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(bets)
+    os.replace(tmp, BETS_CSV)
 
 
 def calc_pnl(result: str, actual_stake: str, odds: str) -> str:

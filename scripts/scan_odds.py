@@ -6,6 +6,7 @@ Reads ODDS_API_KEY from environment. Run with:
 
 import argparse
 import csv
+import fcntl
 import json
 import os
 import statistics
@@ -336,7 +337,8 @@ SPORT_GROUPS = {
 }
 
 
-def build_sport_list(filter_group: str | None, max_tennis: int = 99) -> list[tuple[str, str, int]]:
+def build_sport_list(filter_group: str | None, max_tennis: int = 8) -> list[tuple[str, str, int]]:
+    # max_tennis=8: caps API calls to ~16/run (8 tournaments × 2 regions); avoids burning monthly quota on low-liquidity events
     tennis_sports = get_active_tennis_sports(max_tennis)
     all_sports = FIXED_SPORTS + tennis_sports
 
@@ -351,6 +353,34 @@ def build_sport_list(filter_group: str | None, max_tennis: int = 99) -> list[tup
         return [s for s in all_sports if s[0] in keys]
     # treat as a specific sport key
     return [s for s in all_sports if s[0] == group]
+
+
+_SCAN_STATE_PATH = Path(__file__).parent.parent / "logs" / "scan_state.json"
+
+
+def _maybe_notify_no_bets(n_sports: int):
+    """Send a no-bets push at most once per 6-hour window to avoid notification spam."""
+    state: dict = {}
+    if _SCAN_STATE_PATH.exists():
+        try:
+            state = json.loads(_SCAN_STATE_PATH.read_text())
+        except Exception:
+            pass
+
+    last_str = state.get("last_no_bets_at")
+    if last_str:
+        last_dt = datetime.fromisoformat(last_str)
+        age_hours = (datetime.now(timezone.utc) - last_dt).total_seconds() / 3600
+        if age_hours < 6:
+            print(f"[ntfy] Skipping no-bets notification (last sent {age_hours:.1f}h ago)")
+            return
+
+    notify("Bets - No value today",
+           f"Scanned {n_sports} sports. No edge ≥ 2% with model agreement.",
+           priority="low")
+
+    state["last_no_bets_at"] = datetime.now(timezone.utc).isoformat()
+    _SCAN_STATE_PATH.write_text(json.dumps(state, indent=2))
 
 
 def main():
@@ -396,7 +426,7 @@ def main():
 
     if not output_bets:
         print("No value bets found today across all sports.")
-        notify("Bets - No value today", f"Scanned {len(all_sports)} sports. No edge ≥ 2% with model agreement.", priority="low")
+        _maybe_notify_no_bets(len(all_sports))
         return
 
     # Print full detail
@@ -425,10 +455,53 @@ def main():
                   f"{ms_label} | Stake £{stake} | {dt}")
     print()
 
-    # Write bets to CSV log
+    # Write bets to CSV log — deduped against same-day entries
     log_file = Path(__file__).parent.parent / "logs" / "bets.csv"
+    scan_date = now[:10]  # "YYYY-MM-DD"
+    existing_keys: set = set()
+    if log_file.exists():
+        with open(log_file, newline="") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            for row in csv.DictReader(f):
+                row_date = row.get("scanned_at", "")[:10]
+                if row_date == scan_date:
+                    existing_keys.add((
+                        row.get("kickoff", ""),
+                        row.get("home", ""),
+                        row.get("away", ""),
+                        row.get("side", ""),
+                        row.get("book", ""),
+                    ))
+
+    new_rows = []
+    for vb in output_bets:
+        dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        side = {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
+        key = (dt, vb["home"], vb["away"], side, vb["book"])
+        if key in existing_keys:
+            continue
+        kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
+        new_rows.append({
+            "scanned_at": now,
+            "sport": vb["sport"],
+            "home": vb["home"],
+            "away": vb["away"],
+            "kickoff": dt,
+            "side": side,
+            "book": vb["book"],
+            "odds": vb["odds"],
+            "edge": round(vb["edge"], 4),
+            "consensus": round(vb["cons"], 4),
+            "n_books": vb["n_books"],
+            "confidence": vb["confidence"],
+            "model_signal": vb.get("model_signal", "?"),
+            "stake": round(kelly * BANKROLL, 2),
+            "result": "",
+        })
+
     write_header = not log_file.exists()
     with open(log_file, "a", newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=[
             "scanned_at", "sport", "home", "away", "kickoff",
             "side", "book", "odds", "edge", "consensus", "n_books", "confidence",
@@ -436,27 +509,10 @@ def main():
         ])
         if write_header:
             writer.writeheader()
-        for vb in output_bets:
-            dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
-            kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
-            writer.writerow({
-                "scanned_at": now,
-                "sport": vb["sport"],
-                "home": vb["home"],
-                "away": vb["away"],
-                "kickoff": dt,
-                "side": {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"]),
-                "book": vb["book"],
-                "odds": vb["odds"],
-                "edge": round(vb["edge"], 4),
-                "consensus": round(vb["cons"], 4),
-                "n_books": vb["n_books"],
-                "confidence": vb["confidence"],
-                "model_signal": vb.get("model_signal", "?"),
-                "stake": round(kelly * BANKROLL, 2),
-                "result": "",
-            })
-    print(f"[log] {len(output_bets)} bets appended to logs/bets.csv")
+        writer.writerows(new_rows)
+    skipped = len(output_bets) - len(new_rows)
+    print(f"[log] {len(new_rows)} bets appended to logs/bets.csv"
+          + (f" ({skipped} duplicate(s) skipped)" if skipped else ""))
 
     # Kaunitz bets (≥3%): notify by confidence tier
     high = [vb for vb in kaunitz_bets if vb["confidence"] == "HIGH"]
