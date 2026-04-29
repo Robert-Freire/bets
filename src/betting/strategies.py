@@ -247,11 +247,13 @@ def _flag_bets(
 
             fair_side = b["fair"].get(side, 1.0 / odds)
             edge_gross = cons[side] - fair_side
-            # Commission shrinks effective payout → raises effective implied prob → reduces edge
+            # Commission shrinks effective payout → raises effective implied prob → reduces edge.
+            # Filter on gross edge (Shin-devigged, consistent with production find_value_bets).
+            # Net edge is stored for Kelly sizing and display; commission only affects payout.
             eff_implied = _effective_implied_prob(odds, b["book"])
             edge = cons[side] - eff_implied
 
-            if edge < strategy.min_edge:
+            if edge_gross < strategy.min_edge:
                 continue
 
             # Outlier-book check
@@ -266,16 +268,17 @@ def _flag_bets(
                 if abs(z) > OUTLIER_Z_MAX:
                     continue
 
-            ip = round(eff_implied, 4)
+            impl_raw       = round(1.0 / odds, 4)
+            impl_effective = round(eff_implied, 4)
 
-            # Model signal (h2h only)
+            # Model signal always vs raw implied (commission is a payout adjustment, not prob)
             ms = "?"
             if market == "h2h":
                 h = api_to_fd.get(home, home)
                 a = api_to_fd.get(away, away)
                 sig = model_signals.get(f"{sport_key}:{h}|{a}")
                 if sig is not None:
-                    ms_edge = sig.get(side, 0.0) - ip
+                    ms_edge = sig.get(side, 0.0) - impl_raw
                     ms = f"{ms_edge:+.3f}"
 
                 if strategy.require_model_agree:
@@ -294,7 +297,8 @@ def _flag_bets(
                 "side": side,
                 "book": b["book"],
                 "odds": odds,
-                "impl": ip,
+                "impl_raw": impl_raw,
+                "impl_effective": impl_effective,
                 "cons": round(cons[side], 4),
                 "edge": round(edge, 4),
                 "edge_gross": round(edge_gross, 4),

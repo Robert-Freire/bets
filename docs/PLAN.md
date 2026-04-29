@@ -30,6 +30,7 @@ This is a phased plan to roll the recommendations from the review into the syste
 | 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done | Low |
 | 5.6 | Phase 5.5 bugfix sweep (P0/P1 from code review) | ✅ Done | Low |
 | 5.7 | Commission-aware edges (per-book commission collection) | ✅ Done | Low |
+| 5.8 | Post-5.7 review fixes (schema reset, per-row CLV, impl_raw, tennis throttle) | ✅ Done | Low |
 | 6 | Storage: SQLite + UUIDs + `sport_key` (closes tennis CLV gap) | ~5h | Medium |
 | 7 | Model overhaul: calibration, daily refresh, ensemble | ~8h | Medium |
 | 8 | Auto-placement: Betfair API + dry-run | ~12h | High |
@@ -66,6 +67,9 @@ Post-implementation review of phases 0–3 (live) and the partial Phase 5 work t
 - `closing_line.py` market+line keys are consistent across reads/writes.
 - Atomic writes via `os.replace` and `fcntl.flock` are correct.
 - Dedup-on-append in `scan_odds.py:611–630` correctly includes market+line.
+
+### External risk watch — UK Remote Betting Duty hike (2027-04-01)
+HM Treasury is raising UK Remote Betting Duty from 15% to 25% on **1 April 2027**. Punter winnings remain tax-free (so no direct math change), but operators will almost certainly pass the duty through as wider over-rounds at UK-licensed books. Expect average CLV against Pinnacle (non-UK) to decay through Q2 2027 even if the model is unchanged — *attribute decay carefully before declaring the strategy broken.* If it bites, two mitigations: (a) down-weight UK books and tilt toward exchanges (Smarkets, Betfair) and EU books; (b) re-examine the per-book commission map in Phase 5.7 to see if effective margin assumptions need refresh. Watchlist item only — no code change required pre-2027.
 
 ---
 
@@ -713,7 +717,7 @@ Create `docs/COMMISSIONS.md` listing each book's commission rate with a citation
 
 ---
 
-## Phase 5.8 — Post-5.7 review fixes (~2h)
+## Phase 5.8 — Post-5.7 review fixes (~2h) ✅ Done
 
 Code review of 5.6 + 5.7 (2026-04-29 evening, all 31 tests pass) surfaced 7 follow-ups. Items 5.8.1 and 5.8.3 are P0 — must land before the weekend smoke scan.
 

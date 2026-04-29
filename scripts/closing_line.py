@@ -231,7 +231,11 @@ def _extract_snapshot(event: dict, home: str, away: str, side: str, book: str,
 
 
 def update_csv_clv(path: "Path", updates: dict):
-    """Write pinnacle_close_prob + clv_pct back into any bets CSV for matching rows."""
+    """Write pinnacle_close_prob + clv_pct back into any bets CSV for matching rows.
+
+    CLV is recomputed per-row using that row's book and odds, so paper variants
+    flagging different books for the same fixture get honest per-book CLV.
+    """
     if not updates or not path.exists():
         return
 
@@ -250,8 +254,15 @@ def update_csv_clv(path: "Path", updates: dict):
         key = (row.get("home"), row.get("away"), row.get("kickoff"), row.get("side"),
                row.get("market", "h2h"), row.get("line", ""))
         if key in updates and not row.get("pinnacle_close_prob"):
-            row["pinnacle_close_prob"] = updates[key]["pinnacle_close_prob"]
-            row["clv_pct"] = updates[key]["clv_pct"]
+            pin_prob = float(updates[key]["pinnacle_close_prob"])
+            row_book = row.get("book", "")
+            try:
+                row_odds = float(row.get("odds") or 0)
+            except ValueError:
+                row_odds = 0.0
+            eff = _effective_odds(row_odds, row_book) if row_odds else 0.0
+            row["pinnacle_close_prob"] = str(pin_prob)
+            row["clv_pct"] = str(round(eff * pin_prob - 1, 6)) if eff else ""
             changed = True
 
     if not changed:
@@ -344,8 +355,8 @@ def main():
         by_sport.setdefault(sport_key, []).append(bet)
     if _skipped_sports:
         # Tennis labels are dynamic and not in LABEL_TO_KEY; CLV excluded until Phase 6.
-        for label, count in _skipped_sports.items():
-            print(f"  [skip] {label} ({count} bet(s)) — no sport_key mapping for CLV (tennis excluded)")
+        n_skipped = sum(_skipped_sports.values())
+        print(f"  [skip] {n_skipped} bet(s) with no sport_key mapping (tennis excluded until Phase 6)")
 
     closing_rows: list[dict] = []
     drift_rows:   list[dict] = []

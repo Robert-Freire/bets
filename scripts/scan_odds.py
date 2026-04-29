@@ -264,10 +264,33 @@ def get_active_tennis_sports(max_tournaments: int = 99) -> list[tuple[str, str, 
 
 
 def fetch_odds(sport_key: str) -> tuple[list, str]:
+    # btts is not available on the free tier; request h2h+totals and attempt btts separately.
     data, remaining = api_get(
         f"/sports/{sport_key}/odds/",
-        {"regions": "uk,eu", "markets": "h2h,totals,btts", "oddsFormat": "decimal"},
+        {"regions": "uk,eu", "markets": "h2h,totals", "oddsFormat": "decimal"},
     )
+    # Merge btts outcomes into the same event dicts when available
+    try:
+        btts_data, remaining = api_get(
+            f"/sports/{sport_key}/odds/",
+            {"regions": "uk,eu", "markets": "btts", "oddsFormat": "decimal"},
+        )
+        btts_by_id = {ev["id"]: ev for ev in btts_data}
+        for ev in data:
+            btts_ev = btts_by_id.get(ev["id"])
+            if not btts_ev:
+                continue
+            for bm in btts_ev.get("bookmakers", []):
+                # Inject btts markets into matching bookmaker entries
+                existing = {b["key"]: b for b in ev.get("bookmakers", [])}
+                if bm["key"] in existing:
+                    existing[bm["key"]].setdefault("markets", []).extend(
+                        [m for m in bm.get("markets", []) if m["key"] == "btts"]
+                    )
+                else:
+                    ev.setdefault("bookmakers", []).append(bm)
+    except Exception:
+        pass  # btts unavailable on this tier — h2h and totals still processed
     return data, remaining
 
 
@@ -337,16 +360,18 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             z = 0.0
                         if abs(z) > OUTLIER_Z_THRESHOLD:
                             continue
-                        ip = round(1.0 / odds, 4)
+                        impl_raw = round(1.0 / odds, 4)
                         bets.append({
                             "market": "h2h", "line": "",
                             "commence": commence, "home": home, "away": away,
                             "side": side, "book": b["book"], "odds": odds,
-                            "impl": ip, "cons": round(cons[side], 4),
+                            "impl_raw": impl_raw,
+                            "impl_effective": round(_effective_implied_prob(odds, b["book"]), 4),
+                            "cons": round(cons[side], 4),
                             "edge": round(edge, 4),
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
-                            "model_signal": _model_signal(home, away, sport_key, ip, side),
+                            "model_signal": _model_signal(home, away, sport_key, impl_raw, side),
                             "dispersion": round(disp.get(side, 0.0), 4),
                             "outlier_z": round(z, 3),
                         })
@@ -403,12 +428,14 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             z = 0.0
                         if abs(z) > OUTLIER_Z_THRESHOLD:
                             continue
-                        ip = round(1.0 / odds, 4)
+                        impl_raw = round(1.0 / odds, 4)
                         bets.append({
                             "market": "totals", "line": pt,
                             "commence": commence, "home": home, "away": away,
                             "side": side, "book": b["book"], "odds": odds,
-                            "impl": ip, "cons": round(cons[side], 4),
+                            "impl_raw": impl_raw,
+                            "impl_effective": round(_effective_implied_prob(odds, b["book"]), 4),
+                            "cons": round(cons[side], 4),
                             "edge": round(edge, 4),
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
@@ -460,12 +487,14 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             z = 0.0
                         if abs(z) > OUTLIER_Z_THRESHOLD:
                             continue
-                        ip = round(1.0 / odds, 4)
+                        impl_raw = round(1.0 / odds, 4)
                         bets.append({
                             "market": "btts", "line": "",
                             "commence": commence, "home": home, "away": away,
                             "side": side, "book": b["book"], "odds": odds,
-                            "impl": ip, "cons": round(cons[side], 4),
+                            "impl_raw": impl_raw,
+                            "impl_effective": round(_effective_implied_prob(odds, b["book"]), 4),
+                            "cons": round(cons[side], 4),
                             "edge": round(edge, 4),
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
@@ -590,8 +619,8 @@ _PAPER_DIR = Path(__file__).parent.parent / "logs" / "paper"
 
 _PAPER_FIELDNAMES = [
     "scanned_at", "strategy", "sport", "market", "line", "home", "away", "kickoff",
-    "side", "book", "odds", "edge", "edge_gross", "effective_odds", "commission_rate",
-    "consensus", "pinnacle_cons",
+    "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
+    "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
     "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
     "stake", "pinnacle_close_prob", "clv_pct",
 ]
@@ -600,7 +629,7 @@ _H2H_SIDE = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
 
 
 def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
-                      sport_label: str, now: str, scan_date: str):
+                      sport_label: str, now: str, scan_date: str, bankroll: float = 1000.0):
     """Write paper strategy bets to logs/paper/<strategy_name>.csv."""
     if not paper_bets:
         return
@@ -642,6 +671,8 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "side": side,
             "book": vb["book"],
             "odds": vb["odds"],
+            "impl_raw": round(vb.get("impl_raw", 1.0 / vb["odds"]), 4),
+            "impl_effective": round(vb.get("impl_effective", _effective_implied_prob(vb["odds"], vb["book"])), 4),
             "edge": round(vb["edge"], 4),
             "edge_gross": round(vb.get("edge_gross", vb["edge"]), 4),
             "effective_odds": round(vb.get("effective_odds", vb["odds"]), 4),
@@ -654,7 +685,7 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "dispersion": round(vb.get("dispersion", 0.0), 4),
             "outlier_z": round(vb.get("outlier_z", 0.0), 3),
             # Per-bet half-Kelly stake using effective odds (commission-adjusted)
-            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], BANKROLL, vb["book"]), 2),
+            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], bankroll, vb["book"]), 2),
             "pinnacle_close_prob": "",
             "clv_pct": "",
         })
@@ -770,7 +801,8 @@ def main():
                             api_to_fd=_API_TO_FD,
                         )
                         _append_paper_csv(strategy.name, paper_bets,
-                                          sport_label=label, now=now, scan_date=scan_date)
+                                          sport_label=label, now=now, scan_date=scan_date,
+                                          bankroll=BANKROLL)
                     except Exception as pe:
                         print(f"[paper:{strategy.name}] ERROR for {label}: {pe}")
         except Exception as e:
@@ -879,6 +911,8 @@ def main():
             "side": side,
             "book": vb["book"],
             "odds": vb["odds"],
+            "impl_raw": round(1.0 / vb["odds"], 4),
+            "impl_effective": round(_effective_implied_prob(vb["odds"], vb["book"]), 4),
             # net edge: consensus prob minus effective implied prob (after commission deduction)
             "edge": round(vb["cons"] - _effective_implied_prob(vb["odds"], vb["book"]), 4),
             "edge_gross": round(vb["edge"], 4),
@@ -898,7 +932,8 @@ def main():
         fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=[
             "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-            "side", "book", "odds", "edge", "edge_gross", "effective_odds", "commission_rate",
+            "side", "book", "odds", "impl_raw", "impl_effective",
+            "edge", "edge_gross", "effective_odds", "commission_rate",
             "consensus", "pinnacle_cons",
             "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
             "stake", "result"

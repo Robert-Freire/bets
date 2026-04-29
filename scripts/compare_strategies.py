@@ -21,6 +21,17 @@ BETS_CSV  = _ROOT / "logs" / "bets.csv"
 PAPER_DIR = _ROOT / "logs" / "paper"
 OUT_DOC   = _ROOT / "docs" / "STRATEGY_COMPARISON.md"
 
+# Buckets for favourite-longshot bias slice. Bounds are [lo, hi).
+# The top bucket uses 1.01 to keep prob=1.0 inclusive.
+PROB_BUCKETS: list[tuple[float, float, str]] = [
+    (0.00, 0.20, "0–20% (longshots)"),
+    (0.20, 0.35, "20–35%"),
+    (0.35, 0.50, "35–50%"),
+    (0.50, 0.65, "50–65%"),
+    (0.65, 0.80, "65–80%"),
+    (0.80, 1.01, "80%+ (favourites)"),
+]
+
 
 def _read_csv(path: Path) -> list[dict]:
     if not path.exists():
@@ -46,7 +57,8 @@ def _stats(rows: list[dict]) -> dict:
 
     edge_values = []
     for r in rows:
-        v = r.get("edge")
+        # Prefer edge_gross (Kaunitz devigged metric, consistent with production filter)
+        v = r.get("edge_gross") or r.get("edge")
         if v in ("", None):
             continue
         try:
@@ -55,8 +67,9 @@ def _stats(rows: list[dict]) -> dict:
             pass
     avg_edge = sum(edge_values) / len(edge_values) if edge_values else None
 
+    # book_dist scoped to CLV rows so the denominator matches avg_clv
     book_counter: Counter = Counter()
-    for r in rows:
+    for r in clv_rows:
         b = r.get("book", "")
         if b:
             book_counter[b] += 1
@@ -79,6 +92,63 @@ def _fmt(val, fmt=".2%", fallback="—") -> str:
         return format(val, fmt)
     except (ValueError, TypeError):
         return fallback
+
+
+def _bucket_for(p: float) -> str | None:
+    for lo, hi, label in PROB_BUCKETS:
+        if lo <= p < hi:
+            return label
+    return None
+
+
+def _bucket_stats(rows: list[dict]) -> list[dict]:
+    """Bucket rows by `consensus` (Shin-fair prob), summarise CLV per bucket."""
+    buckets: dict[str, list[float]] = {label: [] for _, _, label in PROB_BUCKETS}
+
+    for r in rows:
+        cons = r.get("consensus")
+        clv  = r.get("clv_pct")
+        if cons in ("", None) or clv in ("", None):
+            continue
+        try:
+            cons_f = float(cons)
+            clv_f  = float(clv)
+        except (ValueError, TypeError):
+            continue
+        label = _bucket_for(cons_f)
+        if label is not None:
+            buckets[label].append(clv_f)
+
+    out = []
+    for _, _, label in PROB_BUCKETS:
+        vals = buckets[label]
+        n = len(vals)
+        avg = sum(vals) / n if n else None
+        pos = sum(1 for v in vals if v > 0) / n if n else None
+        out.append({"bucket": label, "n": n, "avg_clv": avg, "pos_clv": pos})
+    return out
+
+
+def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
+    """Pool unique bets across all paper strategies (one bet may flag in multiple strategies)."""
+    seen: set[tuple] = set()
+    pooled: list[dict] = []
+    for _, rows in entries:
+        for r in rows:
+            key = (
+                r.get("kickoff", ""),
+                r.get("home", ""),
+                r.get("away", ""),
+                r.get("market", ""),
+                r.get("line", ""),
+                r.get("side", ""),
+                r.get("book", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            pooled.append(r)
+    return pooled
 
 
 def build_report() -> str:
@@ -119,6 +189,28 @@ def build_report() -> str:
             f"| {name}{marker} | {s['n_bets']} | {s['n_with_clv']} | "
             f"{_fmt(s['avg_clv'])} | {_fmt(s['pos_clv'])} | "
             f"{_fmt(s['avg_edge'])} | {s['book_dist'] or '—'} |"
+        )
+
+    # ---- Favourite-longshot bias slice -------------------------------------
+    pooled = _dedupe_pool(entries)
+    bucket_rows = _bucket_stats(pooled)
+    n_pool_with_clv = sum(b["n"] for b in bucket_rows)
+
+    lines += [
+        "",
+        "## CLV by consensus-prob bucket (favourite-longshot bias check)",
+        "",
+        "Pooled across all paper strategies, deduped by `(kickoff, home, away, market, line, side, book)`. "
+        "Bucketed by Shin-devigged consensus probability of the side bet on. "
+        "Persistent negative CLV in a single bucket = favourite-longshot bias signal in our flow.",
+        f"Sample: {n_pool_with_clv} unique bets with CLV.",
+        "",
+        "| Bucket | Bets | Avg CLV | CLV >0 % |",
+        "|---|---|---|---|",
+    ]
+    for b in bucket_rows:
+        lines.append(
+            f"| {b['bucket']} | {b['n']} | {_fmt(b['avg_clv'])} | {_fmt(b['pos_clv'])} |"
         )
 
     lines += ["", f"*Generated: see `logs/paper/` and `logs/bets.csv`.*", ""]

@@ -246,3 +246,58 @@ def test_outlier_book_filter_blocks_outlier():
     assert rogue_bets == [], (
         f"Outlier filter should block betfair_ex_uk HOME (|z|>>2.5); got {rogue_bets}"
     )
+
+
+def test_impl_raw_equals_inverse_odds():
+    """impl_raw must always be 1/odds; impl_effective may differ for exchange books."""
+    from tests.conftest import synthetic_event
+
+    books = {b: (2.1, 3.4, 3.8) for b in list(UK_LICENSED_BOOKS)[:25]}
+    ev = synthetic_event(h2h_prices=books)
+    strategy = StrategyConfig(
+        name="_test_impl",
+        label="",
+        description="",
+        min_edge=0.0,
+    )
+    bets = evaluate_strategy([ev], "soccer_epl", strategy)
+    for b in bets:
+        expected_raw = round(1.0 / b["odds"], 4)
+        assert b["impl_raw"] == expected_raw, (
+            f"impl_raw mismatch for {b['book']}: expected {expected_raw}, got {b['impl_raw']}"
+        )
+        # impl_effective <= impl_raw is only guaranteed for commission > 0 books;
+        # for zero-commission books they're equal
+        if b.get("commission_rate", 0.0) > 0:
+            assert b["impl_effective"] >= b["impl_raw"], (
+                f"Commission should raise effective implied prob for {b['book']}"
+            )
+
+
+def test_edge_filter_uses_gross_edge():
+    """Every flagged bet must have edge_gross >= strategy.min_edge.
+
+    In production, the edge filter is: cons - Shin-devigged fair >= min_edge (gross).
+    strategies.py must use the same gross edge for the flag decision, not the net edge
+    (which uses 1/odds instead of Shin-devigged fair and would be spuriously higher).
+    """
+    from tests.conftest import synthetic_event
+
+    # Build an event with a rogue book at a clearly over-generous price on HOME
+    books = {b: (2.10, 3.30, 3.90) for b in list(UK_LICENSED_BOOKS)[:25]}
+    # williamhill has extreme HOME odds → huge z-score; test without outlier filter
+    books["williamhill"] = (9.9, 3.30, 3.90)
+    ev = synthetic_event(h2h_prices=books)
+
+    no_filter = StrategyConfig(
+        name="_test_gross_edge",
+        label="", description="",
+        min_edge=0.03, drop_outlier_book=False,
+    )
+    bets = evaluate_strategy([ev], "soccer_epl", no_filter)
+
+    # If any bets are flagged, each must satisfy edge_gross >= min_edge
+    for b in bets:
+        assert b["edge_gross"] >= no_filter.min_edge, (
+            f"{b['book']} {b['side']}: edge_gross {b['edge_gross']:.4f} < min_edge {no_filter.min_edge}"
+        )

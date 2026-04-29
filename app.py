@@ -12,54 +12,87 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify
 
 app = Flask(__name__)
 
-BETS_CSV    = Path(__file__).parent / "logs" / "bets.csv"
-DRIFT_CSV   = Path(__file__).parent / "logs" / "drift.csv"
+BETS_CSV        = Path(__file__).parent / "logs" / "bets.csv"
+BETS_LEGACY_CSV = Path(__file__).parent / "logs" / "bets_legacy.csv"
+DRIFT_CSV       = Path(__file__).parent / "logs" / "drift.csv"
 
 FIELDS = [
     "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-    "side", "book", "odds", "edge", "consensus", "n_books",
-    "confidence", "model_signal", "stake", "result", "actual_stake", "pnl",
+    "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
+    "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
+    "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
+    "stake", "result", "actual_stake", "pnl",
     "pinnacle_close_prob", "clv_pct",
 ]
 
 
-def load_bets() -> list[dict]:
-    if not BETS_CSV.exists():
-        return []
-    with open(BETS_CSV, newline="") as f:
+def _normalise_row(row: dict, source: str) -> None:
+    row["_source"] = source
+    row.setdefault("market", "h2h")
+    row.setdefault("line", "")
+    row.setdefault("edge_gross", row.get("edge", ""))
+    row.setdefault("impl_raw", row.get("impl", row.get("odds", "")))
+    row.setdefault("impl_effective", row.get("impl", row.get("odds", "")))
+    row.setdefault("effective_odds", row.get("odds", ""))
+    row.setdefault("commission_rate", "0")
+    row.setdefault("pinnacle_cons", "")
+    row.setdefault("pinnacle_close_prob", "")
+    row.setdefault("clv_pct", "")
+    row.setdefault("actual_stake", "")
+    row.setdefault("pnl", "")
+    row.setdefault("model_signal", "?")
+    row.setdefault("dispersion", "")
+    row.setdefault("outlier_z", "")
+
+
+def _read_csv_file(path: Path, source: str) -> list[dict]:
+    rows = []
+    with open(path, newline="") as f:
         fcntl.flock(f, fcntl.LOCK_SH)
-        reader = csv.DictReader(f)
-        bets = []
-        for i, row in enumerate(reader):
-            row["id"] = i
-            row.setdefault("market", "h2h")
-            row.setdefault("line", "")
-            row.setdefault("actual_stake", "")
-            row.setdefault("pnl", "")
-            row.setdefault("model_signal", "?")
-            row.setdefault("pinnacle_close_prob", "")
-            row.setdefault("clv_pct", "")
-            bets.append(row)
+        for row in csv.DictReader(f):
+            _normalise_row(row, source)
+            rows.append(row)
+    return rows
+
+
+def load_bets() -> list[dict]:
+    bets = []
+    if BETS_LEGACY_CSV.exists():
+        bets.extend(_read_csv_file(BETS_LEGACY_CSV, "legacy"))
+    if BETS_CSV.exists():
+        bets.extend(_read_csv_file(BETS_CSV, "new"))
+    for i, row in enumerate(bets):
+        row["id"] = i
     return bets
 
 
-def save_bets(bets: list[dict]):
+def _save_to_file(path: Path, rows: list[dict]):
+    if not rows:
+        return
     all_keys = set()
-    for b in bets:
-        all_keys.update(b.keys())
-    # Preserve column order, drop internal id
+    for b in rows:
+        all_keys.update(k for k in b.keys() if not k.startswith("_") and k != "id")
     fieldnames = [f for f in FIELDS if f in all_keys]
-    for f in all_keys:
-        if f not in fieldnames and f != "id":
+    for f in sorted(all_keys):
+        if f not in fieldnames:
             fieldnames.append(f)
 
-    tmp = BETS_CSV.with_suffix(".csv.tmp")
+    tmp = path.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(bets)
-    os.replace(tmp, BETS_CSV)
+        writer.writerows(rows)
+    os.replace(tmp, path)
+
+
+def save_bets(bets: list[dict]):
+    legacy_rows = [b for b in bets if b.get("_source") == "legacy"]
+    new_rows    = [b for b in bets if b.get("_source") != "legacy"]
+    if legacy_rows:
+        _save_to_file(BETS_LEGACY_CSV, legacy_rows)
+    if new_rows:
+        _save_to_file(BETS_CSV, new_rows)
 
 
 def calc_pnl(result: str, actual_stake: str, odds: str) -> str:
@@ -89,7 +122,6 @@ def load_drift() -> dict[tuple, list[dict]]:
             key = (row["home"], row["away"], row["kickoff"], row["side"],
                    row.get("market", "h2h"), row.get("line", ""))
             by_bet.setdefault(key, []).append(row)
-    # Sort each bet's drift rows by t_minus_min descending (T-60 first)
     for rows in by_bet.values():
         rows.sort(key=lambda r: _safe_t_minus(r.get("t_minus_min")), reverse=True)
     return by_bet
@@ -111,10 +143,10 @@ def _drift_direction(drift_rows: list[dict]) -> str | None:
     rows_with_pin = [r for r in drift_rows if r.get("pinnacle_odds")]
     if len(rows_with_pin) < 2:
         return None
-    first = float(rows_with_pin[0]["pinnacle_odds"])   # earliest (highest t_minus_min)
-    last  = float(rows_with_pin[-1]["pinnacle_odds"])  # closest to KO
+    first = float(rows_with_pin[0]["pinnacle_odds"])
+    last  = float(rows_with_pin[-1]["pinnacle_odds"])
     if last < first:
-        return "toward"   # odds shortened → market moved in your direction
+        return "toward"
     if last > first:
         return "away"
     return None
@@ -137,7 +169,6 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
     void   = sum(1 for b in placed if b["result"] == "V")
     roi    = (pnl / staked * 100) if staked > 0 else 0
 
-    # CLV stats (settled bets only)
     clv_vals = []
     for b in placed:
         raw = b.get("clv_pct", "")
@@ -150,7 +181,6 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
     clv_pos_rate = round(sum(1 for v in clv_vals if v > 0) / len(clv_vals) * 100) if clv_vals else None
     bets_w_clv   = len(clv_vals)
 
-    # Drift stats
     drift_toward_pct = None
     if drift:
         directions = []
@@ -189,7 +219,6 @@ def index():
     done = [b for b in bets_rev if b.get("result")]
     stats = summary_stats(bets, drift)
 
-    # Attach drift direction to each settled bet for the template
     for b in done:
         key = (b["home"], b["away"], b["kickoff"], b["side"],
                b.get("market", "h2h"), b.get("line", ""))
