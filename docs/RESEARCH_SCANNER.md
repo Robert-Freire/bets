@@ -21,9 +21,9 @@ A scheduled job that surfaces external betting research and similar projects so 
 
 | Phase | Title | Status | Branch / SHA | Notes |
 |---|---|---|---|---|
-| 11.0 | Cron-auth smoke test (no code) | done | main / — | CLAUDE_CMD verified; median 3.7s; model=claude-opus-4-7; PATH needs /home/rfreire/.local/bin |
+| 11.0 | Cron-auth smoke test (no code) | done | main / c670a5e | CLAUDE_CMD verified; median 3.7s; model=claude-opus-4-7; PATH needs /home/rfreire/.local/bin. (Bundled into 11.1's commit.) |
 | 11.1 | Source list + queries (data only) | done | main / c670a5e | 37 URLs (25 Tier-A + 12 Tier-B); 7 queries; spec URL count corrected 28→25. |
-| 11.2 | Fetcher module | done | main / — | FetchResult + 6 handlers + 16 offline tests; 16/16 pass. |
+| 11.2 | Fetcher module | done | main / 1f1c1b1 + follow-up | FetchResult + 6 handlers; review fixed: github topic parser broken on real HTML, 4xx silently parsed, Wikipedia nav cruft, 501 missing. 21/21 fetch tests pass. |
 | 11.3 | Dedup state + pending-file builder | pending | — | `research_seen.json` + assembler. |
 | 11.4 | Claude subprocess wrapper | pending | — | Depends on 11.0 + 11.3. |
 | 11.5 | Feed writer | pending | — | Prepends to `RESEARCH_FEED.md`. |

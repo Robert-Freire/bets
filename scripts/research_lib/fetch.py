@@ -11,12 +11,15 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 
-BODY_CAP = 20 * 1024  # 20 KB
+BODY_CAP = 20 * 1024  # ~20 KB; applied as a character slice on cleaned text
 TIMEOUT = 10
 USER_AGENT = "bets-research-scanner/0.1"
 _GITHUB_API = "https://api.github.com"
 _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
-_SKIP_HTTP = {429, 500, 502, 503, 504}
+_SKIP_HTTP = {429, 500, 501, 502, 503, 504}
+_REPO_PATH_RE = re.compile(r"^/[^/]+/[^/]+/?$")
+_REPO_ABS_RE  = re.compile(r"^https://github\.com/[^/]+/[^/]+/?$")
+_TOPIC_REJECT_PREFIXES = ("/topics/", "/search", "/login", "/signup", "/sponsors", "/marketplace", "/orgs/")
 
 
 @dataclass
@@ -64,6 +67,7 @@ def _get(url: str, headers: dict | None = None, **kwargs) -> requests.Response:
 
 
 def _cap_and_hash(text: str) -> tuple[str, str]:
+    # Slice is character-based; resulting bytes ≈ BODY_CAP for ASCII, slightly larger for multi-byte UTF-8.
     capped = text[:BODY_CAP]
     digest = hashlib.sha256(capped.encode("utf-8", errors="replace")).hexdigest()
     return capped, digest
@@ -172,12 +176,32 @@ def _fetch_github_topic(url: str) -> FetchResult:
     r = _get(url, headers={"Accept": "text/html"})
     if r.status_code in _SKIP_HTTP:
         return _skip(url, f"HTTP {r.status_code}")
+    if r.status_code >= 400:
+        return _skip(url, f"HTTP {r.status_code}")
     soup = BeautifulSoup(r.text, "html.parser")
-    repos = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if href.count("/") == 2 and not href.startswith("/topics/") and not href.startswith("/search"):
-            repos.append(f"https://github.com{href}")
+    repos: list[str] = []
+    seen: set[str] = set()
+    # Repo cards on a GitHub topic page live inside <h3>; feature/nav links don't.
+    # Scoping to <h3> filters /features/*, /resources/*, header/footer noise.
+    # Each repo h3 contains two <a> tags (owner profile + full repo); _REPO_PATH_RE's
+    # two-segment requirement filters out the owner-only link automatically.
+    for h3 in soup.find_all("h3"):
+        for a in h3.find_all("a", href=True):
+            href = a["href"]
+            if "?" in href or "#" in href:
+                continue
+            if _REPO_PATH_RE.match(href):
+                path = href
+            elif _REPO_ABS_RE.match(href):
+                path = href[len("https://github.com"):]
+            else:
+                continue
+            if path.startswith(_TOPIC_REJECT_PREFIXES):
+                continue
+            full = f"https://github.com{path}"
+            if full not in seen:
+                seen.add(full)
+                repos.append(full)
     return _ok(url, "\n".join(repos[:30]))
 
 
@@ -187,7 +211,9 @@ def _fetch_html(url: str) -> FetchResult:
         return _skip(url, "PDF skipped (v1)")
     if r.status_code in _SKIP_HTTP:
         return _skip(url, f"HTTP {r.status_code}")
+    if r.status_code >= 400:
+        return _skip(url, f"HTTP {r.status_code}")
     soup = BeautifulSoup(r.text, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer"]):
+    for tag in soup(["script", "style", "nav", "footer", "aside", "header"]):
         tag.decompose()
     return _ok(url, soup.get_text(separator="\n", strip=True))

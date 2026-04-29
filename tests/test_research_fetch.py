@@ -144,9 +144,34 @@ def test_fetch_github_topic_ok(monkeypatch):
     r = fetch("https://github.com/topics/value-betting")
 
     assert r.status == "ok"
-    assert "BeatTheBookie" in r.body_text
-    assert "georgedouzas" in r.body_text
+    # Real repos are extracted from both relative and absolute hrefs.
+    lines = r.body_text.splitlines()
+    assert "https://github.com/Lisandro79/BeatTheBookie" in lines
+    assert "https://github.com/georgedouzas/sports-betting" in lines
+    assert "https://github.com/konstanzer/online-sports-betting" in lines
+    # Real GitHub h3s contain two anchors (owner + repo); only the two-segment one wins.
+    assert "https://github.com/cengizmandros/odds-arb-scanner" in lines
+    assert "https://github.com/cengizmandros" not in lines
+    # Header/footer noise must not leak through.
+    assert "https://docs.github.com" not in r.body_text
+    assert "https://github.blog" not in r.body_text
+    assert "https://support.github.com" not in r.body_text
+    # No malformed double-prefix concatenations.
+    assert "https://github.comhttps://" not in r.body_text
+    # Excluded path prefixes should be rejected.
+    assert "/topics/sports" not in r.body_text
+    assert "/orgs/anthropic" not in r.body_text
+    assert "/marketplace" not in r.body_text
+    # Duplicates from multiple <a> tags should be deduped.
+    assert lines.count("https://github.com/Lisandro79/BeatTheBookie") == 1
     assert len(r.body_text) <= BODY_CAP
+
+
+def test_fetch_github_topic_404(monkeypatch):
+    monkeypatch.setattr(fetch_mod.requests, "get", _make_get({"github.com/topics/": _Resp(status_code=404)}))
+    r = fetch("https://github.com/topics/nonexistent-topic")
+    assert r.status == "skip"
+    assert "404" in r.error
 
 
 # ── Default HTML ──────────────────────────────────────────────────────────────
@@ -181,6 +206,35 @@ def test_fetch_html_503(monkeypatch):
     r = fetch("https://example.com/down")
     assert r.status == "skip"
     assert "503" in r.error
+
+
+def test_fetch_html_404_skip(monkeypatch):
+    # 4xx other than 429 wasn't handled before — error pages were silently parsed as content.
+    monkeypatch.setattr(
+        fetch_mod.requests, "get",
+        _make_get({"example.com": _Resp(text="<html><body>Not found</body></html>", status_code=404)}),
+    )
+    r = fetch("https://example.com/missing")
+    assert r.status == "skip"
+    assert "404" in r.error
+
+
+def test_fetch_html_strips_aside_and_header(monkeypatch):
+    html = """
+    <html><body>
+    <header><nav>Top nav</nav></header>
+    <aside>Sidebar with promos</aside>
+    <main><p>The actual content about CLV</p></main>
+    <footer>Copyright</footer>
+    </body></html>
+    """
+    monkeypatch.setattr(fetch_mod.requests, "get", _make_get({"example.com": _Resp(text=html)}))
+    r = fetch("https://example.com/article")
+    assert r.status == "ok"
+    assert "actual content about CLV" in r.body_text
+    assert "Top nav" not in r.body_text
+    assert "Sidebar with promos" not in r.body_text
+    assert "Copyright" not in r.body_text
 
 
 # ── Body cap ──────────────────────────────────────────────────────────────────
