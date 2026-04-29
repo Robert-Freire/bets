@@ -8,6 +8,7 @@ __pycache__/
 *.egg-info/
 logs/*.log
 logs/sports_cache.json
+logs/research_seen.json
 logs/bankroll.json
 logs/notified.json
 logs/scan_state.json

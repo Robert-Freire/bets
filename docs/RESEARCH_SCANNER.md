@@ -92,8 +92,7 @@ docs/research_queries.md      Open-search queries (committed; source of truth)
 docs/RESEARCH_FEED.md         Output: findings, newest first, sectioned by run date
 scripts/research_scan.py      Main entry point (--mode bootstrap|curated|open|all)
 scripts/research_lib/         Modules: fetch, state, claude_call, feed, search
-logs/research_seen.json       URL → body hash (dedup state)
-logs/research_pending.md      Transient: new content gathered in current run
+logs/research_seen.json       URL → body hash (dedup state; gitignored)
 logs/research.log             Script output
 tests/test_research_*.py      Offline tests with canned fixtures
 ```
@@ -513,7 +512,7 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
    ```
 2. New section format:
    ```
-   ## Run YYYY-MM-DD (mode: <mode>) — <N> findings
+   ## Run YYYY-MM-DD HH:MM UTC (mode: <mode>) — <N> findings
 
    <claude_output verbatim>
 
@@ -611,7 +610,7 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 - `templates/index.html`: new tile in the stats bar.
 
 **Tasks.**
-1. Helper reads `docs/RESEARCH_FEED.md`, finds first `## Run YYYY-MM-DD (mode: ...) — N findings` heading, parses fields. Returns `(None, 0, "")` on missing/unparseable file.
+1. Helper reads `docs/RESEARCH_FEED.md`, finds first `## Run YYYY-MM-DD HH:MM UTC (mode: ...) — N findings` heading, parses fields. Returns `(None, 0, "")` on missing/unparseable file.
 2. Inject into Flask template context.
 3. New tile: label "Research", value "N", subtext "<mode> · <date>".
 4. No click-through in v1.

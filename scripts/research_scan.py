@@ -22,6 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 LOG = ROOT / "logs" / "research.log"
 SOURCES_PATH = ROOT / "docs" / "research_sources.md"
 
+# Add scripts/ to path once at module level so research_lib imports work everywhere.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 NTFY_URL = "https://ntfy.sh/robert-epl-bets-m4x9k"
 
 logging.basicConfig(
@@ -62,41 +65,48 @@ def _parse_sources(path: Path) -> tuple[list[str], list[str]]:
 
 def _run(
     urls: list[str],
-    mode: str,
     seen: dict,
     force: bool,
     dry_run: bool,
     max_sources: int | None,
 ) -> tuple[list, int]:
-    """Fetch URLs, filter by change, return (changed_results, total_bytes)."""
-    sys.path.insert(0, str(ROOT / "scripts"))
+    """Fetch all URLs; return (all_results, total_bytes).
+
+    Logs and prints [CHANGED]/[skip] per URL but does NOT filter — callers
+    decide which results to send to Claude. This lets update_seen be called
+    for every fetched URL, keeping fetched_at fresh even for unchanged sources.
+    """
     from research_lib.fetch import fetch
     from research_lib.state import is_changed
 
     if max_sources is not None:
         urls = urls[:max_sources]
 
-    results = []
+    all_results = []
     total_bytes = 0
     for url in urls:
         r = fetch(url)
         total_bytes += len(r.body_text.encode("utf-8"))
-        if force or is_changed(url, r.body_hash, seen):
-            results.append(r)
-            _log.info("changed url=%s status=%s bytes=%d", url, r.status, len(r.body_text))
-        else:
-            _log.info("unchanged url=%s", url)
+        changed = force or is_changed(url, r.body_hash, seen)
+        all_results.append(r)
+        _log.info(
+            "%s url=%s status=%s bytes=%d",
+            "changed" if changed else "unchanged",
+            url, r.status, len(r.body_text),
+        )
         if dry_run:
-            changed_marker = "[CHANGED]" if (force or is_changed(url, r.body_hash, seen)) else "[skip]"
-            print(f"  {changed_marker} {url}  ({len(r.body_text)} bytes)")
+            print(f"  {'[CHANGED]' if changed else '[skip]'} {url}  ({len(r.body_text)} bytes)")
 
-    return results, total_bytes
+    return all_results, total_bytes
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Research scanner")
     parser.add_argument("--mode", choices=["bootstrap", "curated", "open", "all"], required=True)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Fetch URLs and report byte counts, but skip Claude and feed write.",
+    )
     parser.add_argument("--max-sources", type=int, default=None)
     args = parser.parse_args()
 
@@ -106,10 +116,9 @@ def main() -> None:
         print("RESEARCH_SCAN_ENABLE not set to 1 — skipping scan.")
         sys.exit(0)
 
-    sys.path.insert(0, str(ROOT / "scripts"))
     from research_lib.claude_call import call_claude_batched
     from research_lib.feed import write_findings
-    from research_lib.state import assemble_pending, load_seen, save_seen, update_seen
+    from research_lib.state import assemble_pending, is_changed, load_seen, save_seen, update_seen
 
     tier_a, tier_b = _parse_sources(SOURCES_PATH)
 
@@ -127,30 +136,35 @@ def main() -> None:
         urls = tier_a + tier_b
         force = False
 
+    if args.max_sources is not None:
+        urls = urls[:args.max_sources]
+
     seen = load_seen()
 
     if args.dry_run:
         print(f"Dry-run mode={args.mode} force={force} sources={len(urls)}")
-        _, total_bytes = _run(urls, args.mode, seen, force=force, dry_run=True, max_sources=args.max_sources)
+        _, total_bytes = _run(urls, seen, force=force, dry_run=True, max_sources=None)
         print(f"\nTotal estimated bytes (after 20 KB/source cap): {total_bytes:,}")
         return
 
     try:
         run_at = datetime.now(tz=timezone.utc)
-        results, _ = _run(urls, args.mode, seen, force=force, dry_run=False, max_sources=args.max_sources)
+        all_results, _ = _run(urls, seen, force=force, dry_run=False, max_sources=None)
 
-        ok_results = [r for r in results if r.status == "ok"]
-        for r in results:
+        changed_results = [r for r in all_results if force or is_changed(r.url, r.body_hash, seen)]
+        ok_changed = [r for r in changed_results if r.status == "ok"]
+
+        for r in all_results:
             update_seen(seen, r)
         save_seen(seen)
 
-        if not ok_results:
+        if not ok_changed:
             _log.info("mode=%s — no changed sources, nothing to send to Claude", args.mode)
             print("No changed sources — feed unchanged.")
             _ntfy("Research scan", "0 new findings", priority="low")
             return
 
-        segments = assemble_pending(ok_results)
+        segments = assemble_pending(ok_changed)
         claude_output = call_claude_batched(segments)
         count = write_findings(claude_output, args.mode, run_at)
 

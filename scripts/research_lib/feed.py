@@ -31,7 +31,7 @@ def write_findings(
     feed_path: Path = FEED_PATH,
 ) -> int:
     count = _count_findings(claude_output)
-    date_str = run_at.strftime("%Y-%m-%d")
+    date_str = run_at.strftime("%Y-%m-%d %H:%M UTC")
     new_section = (
         f"## Run {date_str} (mode: {mode}) — {count} findings\n\n"
         f"{claude_output}\n\n"

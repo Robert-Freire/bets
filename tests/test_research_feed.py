@@ -51,7 +51,7 @@ class TestWriteFindings:
         text = feed.read_text()
         assert "# Research Feed" in text
         assert "Auto-generated" in text
-        assert "## Run 2026-04-29 (mode: bootstrap)" in text
+        assert "## Run 2026-04-29 10:00 UTC (mode: bootstrap)" in text
         assert count == 3
 
     def test_banner_appears_once_after_two_writes(self, tmp_path):
