@@ -179,6 +179,8 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 BASE_URL = "https://api.the-odds-api.com/v4"
 MIN_EDGE = 0.03        # Kaunitz-only threshold (no model required)
 MODEL_MIN_EDGE = 0.02  # lower threshold — only shown when model agrees
+MAX_DISPERSION = 0.04  # reject market if stdev of fair probs across books exceeds this
+OUTLIER_Z_THRESHOLD = 2.5  # reject flagged book if its z-score vs the rest exceeds this
 
 # Bookmakers with a UK Gambling Commission licence — the only ones usable from the UK.
 # Consensus is still computed across ALL books (better signal), but value bets are
@@ -292,6 +294,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
 
         if len(h2h_books) >= min_books:
             cons = {s: statistics.mean(v) for s, v in h2h_impl.items()}
+            disp = {s: (statistics.stdev(v) if len(v) >= 2 else 0.0) for s, v in h2h_impl.items()}
             n = len(h2h_books)
             conf = "HIGH" if n >= 30 else ("MED" if n >= 20 else "LOW")
             pin_fair = next((b["fair"] for b in h2h_books if b["book"] == "pinnacle"), {})
@@ -301,8 +304,19 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                 for side, odds in b.items():
                     if side in ("book", "fair") or side not in cons:
                         continue
+                    if disp.get(side, 0.0) > MAX_DISPERSION:
+                        continue
                     edge = cons[side] - b["fair"].get(side, 1.0 / odds)
                     if edge >= min_edge and 1.2 <= odds <= 15.0:
+                        other_probs = [b2["fair"][side] for b2 in h2h_books
+                                       if b2["book"] != b["book"] and side in b2["fair"]]
+                        if len(other_probs) >= 2:
+                            om, os_ = statistics.mean(other_probs), statistics.stdev(other_probs)
+                            z = (b["fair"][side] - om) / os_ if os_ > 0 else 0.0
+                        else:
+                            z = 0.0
+                        if abs(z) > OUTLIER_Z_THRESHOLD:
+                            continue
                         ip = round(1.0 / odds, 4)
                         bets.append({
                             "market": "h2h", "line": "",
@@ -313,6 +327,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
                             "model_signal": _model_signal(home, away, sport_key, ip, side),
+                            "dispersion": round(disp.get(side, 0.0), 4),
+                            "outlier_z": round(z, 3),
                         })
 
         # --- Totals market (group by line point) ---
@@ -343,6 +359,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
             if len(data["books"]) < min_books:
                 continue
             cons = {s: statistics.mean(v) for s, v in data["impl"].items()}
+            disp = {s: (statistics.stdev(v) if len(v) >= 2 else 0.0) for s, v in data["impl"].items()}
             n = len(data["books"])
             conf = "HIGH" if n >= 30 else ("MED" if n >= 20 else "LOW")
             pin_fair = next((b["fair"] for b in data["books"] if b["book"] == "pinnacle"), {})
@@ -353,8 +370,19 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                     odds = b.get(side)
                     if not odds or side not in cons:
                         continue
+                    if disp.get(side, 0.0) > MAX_DISPERSION:
+                        continue
                     edge = cons[side] - b["fair"].get(side, 1.0 / odds)
                     if edge >= min_edge and 1.2 <= odds <= 15.0:
+                        other_probs = [b2["fair"][side] for b2 in data["books"]
+                                       if b2["book"] != b["book"] and side in b2["fair"]]
+                        if len(other_probs) >= 2:
+                            om, os_ = statistics.mean(other_probs), statistics.stdev(other_probs)
+                            z = (b["fair"][side] - om) / os_ if os_ > 0 else 0.0
+                        else:
+                            z = 0.0
+                        if abs(z) > OUTLIER_Z_THRESHOLD:
+                            continue
                         ip = round(1.0 / odds, 4)
                         bets.append({
                             "market": "totals", "line": pt,
@@ -365,6 +393,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
                             "model_signal": "?",
+                            "dispersion": round(disp.get(side, 0.0), 4),
+                            "outlier_z": round(z, 3),
                         })
 
         # --- BTTS market ---
@@ -386,6 +416,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
 
         if len(btts_books) >= min_books:
             cons = {s: statistics.mean(v) for s, v in btts_impl.items()}
+            disp = {s: (statistics.stdev(v) if len(v) >= 2 else 0.0) for s, v in btts_impl.items()}
             n = len(btts_books)
             conf = "HIGH" if n >= 30 else ("MED" if n >= 20 else "LOW")
             pin_fair = next((b["fair"] for b in btts_books if b["book"] == "pinnacle"), {})
@@ -396,8 +427,19 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                     odds = b.get(side)
                     if not odds or side not in cons:
                         continue
+                    if disp.get(side, 0.0) > MAX_DISPERSION:
+                        continue
                     edge = cons[side] - b["fair"].get(side, 1.0 / odds)
                     if edge >= min_edge and 1.2 <= odds <= 15.0:
+                        other_probs = [b2["fair"][side] for b2 in btts_books
+                                       if b2["book"] != b["book"] and side in b2["fair"]]
+                        if len(other_probs) >= 2:
+                            om, os_ = statistics.mean(other_probs), statistics.stdev(other_probs)
+                            z = (b["fair"][side] - om) / os_ if os_ > 0 else 0.0
+                        else:
+                            z = 0.0
+                        if abs(z) > OUTLIER_Z_THRESHOLD:
+                            continue
                         ip = round(1.0 / odds, 4)
                         bets.append({
                             "market": "btts", "line": "",
@@ -408,6 +450,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
                             "model_signal": "?",
+                            "dispersion": round(disp.get(side, 0.0), 4),
+                            "outlier_z": round(z, 3),
                         })
 
     # Deduplicate: best edge per (fixture, market, line, side)
@@ -729,8 +773,9 @@ def main():
         writer = csv.DictWriter(f, fieldnames=[
             "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
             "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
-            "n_books", "confidence", "model_signal", "stake", "result"
-        ])
+            "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
+            "stake", "result"
+        ], extrasaction="ignore")
         if write_header:
             writer.writeheader()
         writer.writerows(new_rows)
