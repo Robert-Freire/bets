@@ -30,18 +30,23 @@ SIDES = ["H", "D", "A"]
 SIDE_TO_IDX = {"H": 0, "D": 1, "A": 2}
 
 
-def compute_consensus(matches: pd.DataFrame) -> pd.DataFrame:
+def compute_consensus(
+    matches: pd.DataFrame, consensus_method: str = "raw"
+) -> pd.DataFrame:
     """
-    For each match, compute the consensus implied probability (raw average, margin NOT removed)
-    across all available bookmakers.
+    For each match, compute the consensus implied probability across all available bookmakers.
 
-    Kaunitz et al. use the raw average implied prob as the market consensus signal.
-    A bookmaker offers value when its implied prob is LOWER than consensus (= better odds).
+    consensus_method:
+        "raw"  — average raw implied probs including margin (original Kaunitz approach)
+        "shin" — de-vig each book's triplet with Shin (1993) before averaging
 
     Returns matches with added columns:
-        consensus_prob_H, consensus_prob_D, consensus_prob_A  (raw, with margin)
+        consensus_prob_H, consensus_prob_D, consensus_prob_A
         n_books_used
     """
+    if consensus_method == "shin":
+        from src.betting.devig import shin as _shin, proportional as _proportional
+
     matches = matches.copy()
     prob_h, prob_d, prob_a, n_books = [], [], [], []
 
@@ -55,10 +60,20 @@ def compute_consensus(matches: pd.DataFrame) -> pd.DataFrame:
                 continue
             if oh <= 1.0 or od <= 1.0 or oa <= 1.0:
                 continue
-            # Raw implied probs (still contain margin, intentional — Kaunitz approach)
-            book_probs["H"].append(1 / oh)
-            book_probs["D"].append(1 / od)
-            book_probs["A"].append(1 / oa)
+
+            if consensus_method == "shin":
+                try:
+                    fair = _shin([1 / oh, 1 / od, 1 / oa])
+                except Exception:
+                    fair = _proportional([1 / oh, 1 / od, 1 / oa])
+                book_probs["H"].append(fair[0])
+                book_probs["D"].append(fair[1])
+                book_probs["A"].append(fair[2])
+            else:
+                # Raw implied probs (still contain margin, intentional — Kaunitz approach)
+                book_probs["H"].append(1 / oh)
+                book_probs["D"].append(1 / od)
+                book_probs["A"].append(1 / oa)
 
         if book_probs["H"]:
             prob_h.append(np.mean(book_probs["H"]))
@@ -84,21 +99,26 @@ def find_consensus_bets(
     min_odds: float = 1.5,
     max_odds: float = 15.0,
     min_books: int = 3,
+    consensus_method: str = "raw",
 ) -> pd.DataFrame:
     """
     Find bets where a single bookmaker's odds exceed the consensus implied probability.
 
     For each match and outcome, check every bookmaker individually against consensus.
     Returns rows where:
-        bookmaker_fair_prob > consensus_prob + min_edge
+        consensus_prob − book_fair_prob >= min_edge
 
     Parameters
     ----------
     min_edge : minimum edge over consensus to flag a bet
     min_books : minimum number of books required for a reliable consensus
+    consensus_method : "raw" (original) or "shin" (de-vigged, more honest)
     """
     if "consensus_prob_H" not in matches.columns:
-        matches = compute_consensus(matches)
+        matches = compute_consensus(matches, consensus_method=consensus_method)
+
+    if consensus_method == "shin":
+        from src.betting.devig import shin as _shin, proportional as _proportional
 
     results = []
     for _, row in matches.iterrows():
@@ -123,13 +143,19 @@ def find_consensus_bets(
                 continue
 
             book_odds = {"H": oh, "D": od, "A": oa}
-            # Raw implied prob per bookmaker (with margin)
-            book_impl = {"H": 1/oh, "D": 1/od, "A": 1/oa}
+
+            if consensus_method == "shin":
+                try:
+                    fair = _shin([1 / oh, 1 / od, 1 / oa])
+                except Exception:
+                    fair = _proportional([1 / oh, 1 / od, 1 / oa])
+                book_fair = dict(zip(["H", "D", "A"], fair))
+            else:
+                book_fair = {"H": 1 / oh, "D": 1 / od, "A": 1 / oa}
 
             for side in SIDES:
                 best_odds = book_odds[side]
-                # Value: bookmaker's implied prob is LOWER than consensus = better odds offered
-                edge = consensus[side] - book_impl[side]
+                edge = consensus[side] - book_fair[side]
                 if edge >= min_edge and min_odds <= best_odds <= max_odds:
                     results.append({
                         "match_idx": row.name,
@@ -139,7 +165,8 @@ def find_consensus_bets(
                         "bookmaker": book,
                         "bet_side": side,
                         "book_odds": round(best_odds, 2),
-                        "book_impl_prob": round(book_impl[side], 4),
+                        "book_impl_prob": round(1 / best_odds, 4),
+                        "book_fair_prob": round(book_fair[side], 4),
                         "consensus_prob": round(consensus[side], 4),
                         "edge": round(edge, 4),
                         "result": row.get("FTR"),
@@ -158,12 +185,16 @@ def backtest_consensus(
     bankroll: float = 1000.0,
     kelly_multiplier: float = 0.5,
     min_books: int = 3,
+    consensus_method: str = "raw",
 ) -> dict:
     """Full backtest of the Kaunitz consensus strategy."""
     from src.betting.kelly import kelly_fraction
 
-    matches = compute_consensus(matches)
-    bets = find_consensus_bets(matches, min_edge=min_edge, min_books=min_books)
+    matches = compute_consensus(matches, consensus_method=consensus_method)
+    bets = find_consensus_bets(
+        matches, min_edge=min_edge, min_books=min_books,
+        consensus_method=consensus_method,
+    )
 
     if bets.empty:
         return {"n_bets": 0, "roi": 0.0}
@@ -173,6 +204,7 @@ def backtest_consensus(
     n_won = 0
 
     for _, bet in bets.iterrows():
+        # Kelly uses de-vigged consensus prob as our probability estimate
         f = kelly_multiplier * kelly_fraction(bet["consensus_prob"], bet["book_odds"])
         f = max(0.0, min(f, 0.05))
         stake = f * bankroll
@@ -203,6 +235,7 @@ def backtest_combined(
     bankroll: float = 1000.0,
     kelly_multiplier: float = 0.5,
     min_books: int = 3,
+    consensus_method: str = "raw",
 ) -> dict:
     """
     Dual-filter strategy: bet only when Kaunitz consensus AND CatBoost model both see value.
@@ -216,9 +249,10 @@ def backtest_combined(
     """
     from src.betting.kelly import kelly_fraction
 
-    matches_with_consensus = compute_consensus(matches)
+    matches_with_consensus = compute_consensus(matches, consensus_method=consensus_method)
     consensus_bets = find_consensus_bets(
-        matches_with_consensus, min_edge=min_kaunitz_edge, min_books=min_books
+        matches_with_consensus, min_edge=min_kaunitz_edge, min_books=min_books,
+        consensus_method=consensus_method,
     )
 
     if consensus_bets.empty or model_probs.empty:

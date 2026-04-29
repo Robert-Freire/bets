@@ -50,20 +50,25 @@ def run_pipeline(since_season: str = "1415", bankroll: float = 1000.0):
     print("\n" + "="*55)
     print("STRATEGY 1: Kaunitz Consensus (bookmaker deviation)")
     print("="*55)
-    matches = compute_consensus(matches)
 
-    print(f"\n{'Edge':>8}  {'Bets':>6}  {'Win%':>6}  {'ROI':>8}  {'P&L':>8}")
-    print("-" * 42)
-    for edge in [0.01, 0.02, 0.03, 0.04, 0.05]:
-        r = backtest_consensus(matches, min_edge=edge, bankroll=bankroll)
-        if r["n_bets"] > 0:
-            print(f"{edge:>8.0%}  {r['n_bets']:>6}  {r['win_rate']:>5.1%}  "
-                  f"{r['roi']:>+8.2%}  {r['total_pnl']:>+8.0f}")
+    for method in ["raw", "shin"]:
+        label = "Raw (original)" if method == "raw" else "Shin de-vig (Phase 1)"
+        print(f"\n  Method: {label}")
+        print(f"  {'Edge':>8}  {'Bets':>6}  {'Win%':>6}  {'ROI':>8}  {'P&L':>8}")
+        print("  " + "-" * 42)
+        for edge in [0.01, 0.02, 0.03, 0.04, 0.05]:
+            r = backtest_consensus(matches, min_edge=edge, bankroll=bankroll,
+                                   consensus_method=method)
+            if r["n_bets"] > 0:
+                print(f"  {edge:>8.0%}  {r['n_bets']:>6}  {r['win_rate']:>5.1%}  "
+                      f"{r['roi']:>+8.2%}  {r['total_pnl']:>+8.0f}")
+
+    matches = compute_consensus(matches, consensus_method="raw")
 
     # Best threshold detail
     best = find_consensus_bets(matches, min_edge=0.02)
     if not best.empty:
-        print(f"\nTop 5 consensus bets found (edge >= 2%):")
+        print(f"\nTop 5 consensus bets found (raw, edge >= 2%):")
         print(best[["date", "home_team", "away_team", "bookmaker", "bet_side",
                      "book_odds", "consensus_prob", "edge", "result"]].head(5).to_string(index=False))
 

@@ -10,11 +10,23 @@ import fcntl
 import json
 import os
 import statistics
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Allow importing from src/ regardless of working directory
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+try:
+    from src.betting.devig import shin as _shin_devig, proportional as _proportional_devig
+    _DEVIG = True
+except ImportError:
+    _DEVIG = False
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
@@ -226,6 +238,23 @@ def fetch_odds(sport_key: str) -> tuple[list, str]:
     return data, remaining
 
 
+def _devig_triplet(entries: dict) -> dict[str, float]:
+    """
+    De-vig a book's odds dict using Shin (1993). Returns fair probs keyed by side.
+    Falls back to proportional if Shin fails, raw 1/odds if devig unavailable.
+    """
+    sides = list(entries.keys())
+    raw = [1.0 / entries[s] for s in sides]
+    if _DEVIG:
+        try:
+            fair = _shin_devig(raw)
+        except Exception:
+            fair = _proportional_devig(raw)
+    else:
+        fair = [r / sum(raw) for r in raw]
+    return dict(zip(sides, fair))
+
+
 def find_value_bets(events: list, sport_key: str) -> list[dict]:
     min_books = SPORT_MIN_BOOKS.get(sport_key, DEFAULT_MIN_BOOKS)
     min_edge = SPORT_MIN_EDGE.get(sport_key, MODEL_MIN_EDGE)  # scan at 2% to catch model bets
@@ -233,6 +262,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
 
     for ev in events:
         home, away, commence = ev["home_team"], ev["away_team"], ev["commence_time"]
+        # impl now accumulates Shin fair probs (not raw 1/odds)
         impl: dict[str, list] = {}
         book_list = []
 
@@ -241,10 +271,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                 if m["key"] != "h2h":
                     continue
                 oc = {o["name"]: o["price"] for o in m["outcomes"]}
-                entries = {
-                    "H": oc.get(home),
-                    "A": oc.get(away),
-                }
+                entries: dict[str, float] = {"H": oc.get(home), "A": oc.get(away)}
                 draw = oc.get("Draw")
                 if draw:
                     entries["D"] = draw
@@ -252,26 +279,35 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                 if not all(v and v > 1.0 for v in entries.values()):
                     continue
 
-                for side, odds in entries.items():
-                    impl.setdefault(side, []).append(1 / odds)
-                book_list.append({"book": b["key"], **entries})
+                fair = _devig_triplet(entries)
+                for side, fp in fair.items():
+                    impl.setdefault(side, []).append(fp)
+                book_list.append({"book": b["key"], "fair": fair, **entries})
 
         if len(book_list) < min_books:
             continue
 
+        # Consensus = mean of Shin-devigged fair probs across all books
         cons = {s: statistics.mean(vals) for s, vals in impl.items()}
         n_books = len(book_list)
         confidence = "HIGH" if n_books >= 30 else ("MED" if n_books >= 20 else "LOW")
+
+        # Pinnacle's devigged prob, used as a sharp-book anchor signal
+        pinnacle_fair: dict[str, float] = next(
+            (b["fair"] for b in book_list if b["book"] == "pinnacle"), {}
+        )
 
         for b in book_list:
             if b["book"] not in UK_LICENSED_BOOKS:
                 continue  # consensus uses all books, but only flag UK-accessible ones
             for side, odds in b.items():
-                if side == "book" or side not in cons:
+                if side in ("book", "fair") or side not in cons:
                     continue
-                edge = cons[side] - 1 / odds
+                # Edge: how much better does the consensus think this side is vs this book's own fair prob?
+                fair_book_side = b["fair"].get(side, 1.0 / odds)
+                edge = cons[side] - fair_book_side
                 if edge >= min_edge and 1.2 <= odds <= 15.0:
-                    impl_prob = round(1 / odds, 4)
+                    impl_prob = round(1.0 / odds, 4)
                     bets.append({
                         "commence": commence,
                         "home": home,
@@ -282,6 +318,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                         "impl": impl_prob,
                         "cons": round(cons[side], 4),
                         "edge": round(edge, 4),
+                        "pinnacle_cons": round(pinnacle_fair.get(side, 0.0), 4),
                         "n_books": n_books,
                         "confidence": confidence,
                         "model_signal": _model_signal(home, away, sport_key, impl_prob, side),
@@ -492,6 +529,7 @@ def main():
             "odds": vb["odds"],
             "edge": round(vb["edge"], 4),
             "consensus": round(vb["cons"], 4),
+            "pinnacle_cons": round(vb.get("pinnacle_cons", 0.0), 4),
             "n_books": vb["n_books"],
             "confidence": vb["confidence"],
             "model_signal": vb.get("model_signal", "?"),
@@ -504,8 +542,8 @@ def main():
         fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=[
             "scanned_at", "sport", "home", "away", "kickoff",
-            "side", "book", "odds", "edge", "consensus", "n_books", "confidence",
-            "model_signal", "stake", "result"
+            "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
+            "n_books", "confidence", "model_signal", "stake", "result"
         ])
         if write_header:
             writer.writeheader()
