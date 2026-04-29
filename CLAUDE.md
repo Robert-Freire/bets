@@ -184,6 +184,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 5 | New markets: totals, BTTS | ✅ Done |
 | 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done |
 | 5.6 | Phase 5.5 bugfix sweep (P0/P1) | ✅ Done |
+| 5.7 | Commission-aware edges (per-book commission, net Kelly) | ✅ Done |
 | 6 | SQLite + UUIDs | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |

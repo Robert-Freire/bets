@@ -35,6 +35,13 @@ try:
 except ImportError:
     _DEVIG = False
 
+try:
+    from src.betting.commissions import effective_odds as _effective_odds
+    _COMMISSIONS = True
+except ImportError:
+    _COMMISSIONS = False
+    def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
+
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
@@ -407,7 +414,9 @@ def main():
                     # Use T-1 re-fetched price if available; it reflects actually-tradable odds.
                     # Fall back to originally flagged odds only if the book is no longer quoted.
                     close_odds = your_book_odds if your_book_odds else flagged_odds
-                    clv = round(close_odds * pin_prob - 1, 6) if close_odds else ""
+                    # Apply commission so CLV reflects what actually lands in the pocket
+                    eff_close = _effective_odds(close_odds, book) if close_odds else 0
+                    clv = round(eff_close * pin_prob - 1, 6) if eff_close else ""
                     closing_rows.append({
                         "captured_at":            captured,
                         "home":                   home,

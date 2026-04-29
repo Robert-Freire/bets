@@ -14,6 +14,19 @@ try:
 except ImportError:
     _DEVIG = False
 
+try:
+    from src.betting.commissions import (
+        commission_rate as _commission_rate,
+        effective_odds as _effective_odds,
+        effective_implied_prob as _effective_implied_prob,
+    )
+    _COMMISSIONS = True
+except ImportError:
+    _COMMISSIONS = False
+    def _commission_rate(book: str) -> float: return 0.0  # noqa: E704
+    def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
+    def _effective_implied_prob(odds: float, book: str) -> float: return 1.0 / odds  # noqa: E704
+
 # ── book sets ────────────────────────────────────────────────────────────────
 
 UK_LICENSED_BOOKS = {
@@ -79,9 +92,9 @@ STRATEGIES: list[StrategyConfig] = [
         label="E: Exchanges only",
         # Consensus still uses all UK-licensed books (mean), which dilutes the exchange-only
         # signal. A future refinement is to anchor E on Pinnacle (consensus_mode="pinnacle_only").
-        description="Only flag Betfair Ex / Smarkets / Matchbook; 4% edge to net commission",
+        description="Restrict to Betfair Ex / Smarkets / Matchbook; commission auto-applied via commissions.py",
         book_filter="exchanges_only",
-        min_edge=0.04,
+        min_edge=0.03,  # commission now applied globally; no longer needs to compensate manually
     ),
     StrategyConfig(
         name="F_model_primary",
@@ -233,7 +246,10 @@ def _flag_bets(
                     continue
 
             fair_side = b["fair"].get(side, 1.0 / odds)
-            edge = cons[side] - fair_side
+            edge_gross = cons[side] - fair_side
+            # Commission shrinks effective payout → raises effective implied prob → reduces edge
+            eff_implied = _effective_implied_prob(odds, b["book"])
+            edge = cons[side] - eff_implied
 
             if edge < strategy.min_edge:
                 continue
@@ -250,7 +266,7 @@ def _flag_bets(
                 if abs(z) > OUTLIER_Z_MAX:
                     continue
 
-            ip = round(1.0 / odds, 4)
+            ip = round(eff_implied, 4)
 
             # Model signal (h2h only)
             ms = "?"
@@ -281,6 +297,9 @@ def _flag_bets(
                 "impl": ip,
                 "cons": round(cons[side], 4),
                 "edge": round(edge, 4),
+                "edge_gross": round(edge_gross, 4),
+                "effective_odds": round(_effective_odds(odds, b["book"]), 4),
+                "commission_rate": round(_commission_rate(b["book"]), 4),
                 "pinnacle_cons": round(pinnacle_fair.get(side, 0.0), 4),
                 "n_books": n,
                 "confidence": conf,

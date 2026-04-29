@@ -47,6 +47,19 @@ except ImportError:
     _STRATEGIES = False
     STRATEGIES = []
 
+try:
+    from src.betting.commissions import (
+        commission_rate as _commission_rate,
+        effective_odds as _effective_odds,
+        effective_implied_prob as _effective_implied_prob,
+    )
+    _COMMISSIONS = True
+except ImportError:
+    _COMMISSIONS = False
+    def _commission_rate(book: str) -> float: return 0.0  # noqa: E704
+    def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
+    def _effective_implied_prob(odds: float, book: str) -> float: return 1.0 / odds  # noqa: E704
+
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
@@ -577,7 +590,8 @@ _PAPER_DIR = Path(__file__).parent.parent / "logs" / "paper"
 
 _PAPER_FIELDNAMES = [
     "scanned_at", "strategy", "sport", "market", "line", "home", "away", "kickoff",
-    "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
+    "side", "book", "odds", "edge", "edge_gross", "effective_odds", "commission_rate",
+    "consensus", "pinnacle_cons",
     "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
     "stake", "pinnacle_close_prob", "clv_pct",
 ]
@@ -629,6 +643,9 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "book": vb["book"],
             "odds": vb["odds"],
             "edge": round(vb["edge"], 4),
+            "edge_gross": round(vb.get("edge_gross", vb["edge"]), 4),
+            "effective_odds": round(vb.get("effective_odds", vb["odds"]), 4),
+            "commission_rate": round(vb.get("commission_rate", 0.0), 4),
             "consensus": round(vb["cons"], 4),
             "pinnacle_cons": round(vb.get("pinnacle_cons", 0.0), 4),
             "n_books": vb["n_books"],
@@ -636,8 +653,8 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "model_signal": vb.get("model_signal", "?"),
             "dispersion": round(vb.get("dispersion", 0.0), 4),
             "outlier_z": round(vb.get("outlier_z", 0.0), 3),
-            # Per-bet half-Kelly stake (no fixture/portfolio cap — paper is hypothetical)
-            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], BANKROLL), 2),
+            # Per-bet half-Kelly stake using effective odds (commission-adjusted)
+            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], BANKROLL, vb["book"]), 2),
             "pinnacle_close_prob": "",
             "clv_pct": "",
         })
@@ -780,9 +797,11 @@ def main():
 
     # Compute raw stakes then apply full risk pipeline
     for vb in output_bets:
-        vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL) if _RISK else (
-            max(0.0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05)) * BANKROLL
-        )
+        if _RISK:
+            vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL, vb["book"])
+        else:
+            eff = _effective_odds(vb["odds"], vb["book"])
+            vb["stake"] = max(0.0, min(0.5 * (vb["cons"] * eff - 1) / (eff - 1), 0.05)) * BANKROLL
 
     dd_mult = 1.0
     if _RISK:
@@ -860,7 +879,11 @@ def main():
             "side": side,
             "book": vb["book"],
             "odds": vb["odds"],
-            "edge": round(vb["edge"], 4),
+            # net edge: consensus prob minus effective implied prob (after commission deduction)
+            "edge": round(vb["cons"] - _effective_implied_prob(vb["odds"], vb["book"]), 4),
+            "edge_gross": round(vb["edge"], 4),
+            "effective_odds": round(_effective_odds(vb["odds"], vb["book"]), 4),
+            "commission_rate": round(_commission_rate(vb["book"]), 4),
             "consensus": round(vb["cons"], 4),
             "pinnacle_cons": round(vb.get("pinnacle_cons", 0.0), 4),
             "n_books": vb["n_books"],
@@ -875,7 +898,8 @@ def main():
         fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=[
             "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-            "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
+            "side", "book", "odds", "edge", "edge_gross", "effective_odds", "commission_rate",
+            "consensus", "pinnacle_cons",
             "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
             "stake", "result"
         ], extrasaction="ignore")

@@ -29,7 +29,7 @@ This is a phased plan to roll the recommendations from the review into the syste
 | 5 | New markets: totals, BTTS | ~3h | Low |
 | 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done | Low |
 | 5.6 | Phase 5.5 bugfix sweep (P0/P1 from code review) | ✅ Done | Low |
-| 5.7 | Commission-aware edges (per-book commission collection) | ~3h | Low |
+| 5.7 | Commission-aware edges (per-book commission collection) | ✅ Done | Low |
 | 6 | Storage: SQLite + UUIDs + `sport_key` (closes tennis CLV gap) | ~5h | Medium |
 | 7 | Model overhaul: calibration, daily refresh, ensemble | ~8h | Medium |
 | 8 | Auto-placement: Betfair API + dry-run | ~12h | High |
@@ -565,7 +565,7 @@ The 10 required tests (verbatim from 4.5.4 — do not abridge):
 
 ---
 
-## Phase 5.7 — Commission-aware edges (~3h, ship with 5.6)
+## Phase 5.7 — Commission-aware edges (~3h, ship with 5.6) ✅ Done
 
 Replaces "Strategy E uses min_edge=0.04 to compensate for commission" with a global commission table, so **every strategy reports honest net edges** and Kelly stakes correctly account for what each book actually pays out.
 
@@ -710,6 +710,181 @@ Create `docs/COMMISSIONS.md` listing each book's commission rate with a citation
 - [ ] After re-running a scan, paper CSVs show `commission_rate=0.05` for Betfair rows, `0.02` for Smarkets/Matchbook, `0` for sportsbooks.
 - [ ] `edge` in CSV is now net edge; sanity-check that exchange bets show `edge_gross > edge` and sportsbook bets show `edge_gross == edge`.
 - [ ] `compare_strategies.py` reflects net edges; the `Avg Edge` column should now be lower for variants that flag exchange bets heavily.
+
+---
+
+## Phase 5.8 — Post-5.7 review fixes (~2h)
+
+Code review of 5.6 + 5.7 (2026-04-29 evening, all 31 tests pass) surfaced 7 follow-ups. Items 5.8.1 and 5.8.3 are P0 — must land before the weekend smoke scan.
+
+### 5.8.1 — Reset `bets.csv` schema while preserving legacy bets in the dashboard (P0)
+
+The current `logs/bets.csv` header is the pre-5.7 schema (17 columns). The scanner now writes 21 columns (`edge_gross`, `effective_odds`, `commission_rate`, `market`, `line`, `pinnacle_cons`). Appending without a header rewrite produces a malformed file: `csv.DictReader` keys against the old header and silently drops the new columns.
+
+**Approach**: don't migrate-in-place. Archive the legacy file, start fresh, and teach the dashboard to read both.
+
+Steps for the bot:
+
+1. **Archive existing data** (one shell op):
+   ```bash
+   mv logs/bets.csv logs/bets_legacy.csv
+   ```
+   Bets the user has placed manually live in here — must be preserved for ROI tracking on the dashboard.
+
+2. **Start a new `bets.csv` with the full new schema header** — happens automatically on the next scan since `scan_odds.py:905` writes the header when the file doesn't exist. No code change needed for that.
+
+3. **Update `app.py:load_bets()` to read both files** and normalise legacy rows. Concrete:
+   ```python
+   BETS_CSV        = Path(__file__).parent / "logs" / "bets.csv"
+   BETS_LEGACY_CSV = Path(__file__).parent / "logs" / "bets_legacy.csv"
+
+   def load_bets() -> list[dict]:
+       bets = []
+       # Legacy first (older bets at the top after reverse(); user's settled bets stay visible)
+       if BETS_LEGACY_CSV.exists():
+           with open(BETS_LEGACY_CSV, newline="") as f:
+               fcntl.flock(f, fcntl.LOCK_SH)
+               for row in csv.DictReader(f):
+                   _normalise_row(row, source="legacy")
+                   bets.append(row)
+       if BETS_CSV.exists():
+           with open(BETS_CSV, newline="") as f:
+               fcntl.flock(f, fcntl.LOCK_SH)
+               for row in csv.DictReader(f):
+                   _normalise_row(row, source="new")
+                   bets.append(row)
+       for i, row in enumerate(bets):
+           row["id"] = i
+       return bets
+
+   def _normalise_row(row: dict, source: str) -> None:
+       row["_source"] = source
+       # Defaults for fields missing in legacy rows
+       row.setdefault("market", "h2h")
+       row.setdefault("line", "")
+       row.setdefault("edge_gross", row.get("edge", ""))     # legacy edge was already gross
+       row.setdefault("effective_odds", row.get("odds", ""))
+       row.setdefault("commission_rate", "0")                # treat unknown legacy as no-commission
+       row.setdefault("pinnacle_cons", "")
+       row.setdefault("pinnacle_close_prob", "")
+       row.setdefault("clv_pct", "")
+       row.setdefault("actual_stake", "")
+       row.setdefault("pnl", "")
+       row.setdefault("model_signal", "?")
+   ```
+
+4. **`save_bets()` writes only to `BETS_CSV`** — never to legacy. Updates to legacy bets (manual stake/result edits in the dashboard) are stored back to the legacy file: in `update()` route, dispatch by `row.get("_source")` to the right CSV. Concrete: split into two save functions, `save_legacy(bets)` and `save_new(bets)`, each writing only the rows from its source file.
+
+5. **Dashboard hint**: optionally render a small `(legacy)` badge next to bets where `b._source == "legacy"` so it's clear they're pre-5.7 data without commission/CLV columns.
+
+**Acceptance**:
+- `mv` archives the old CSV.
+- `python3 scripts/scan_odds.py --sports football` produces a fresh `logs/bets.csv` with the new 21-column header.
+- Dashboard at `localhost:5000` shows both legacy and new bets; legacy bets show empty CLV/dispersion columns gracefully (not "—" everywhere).
+- Editing a legacy bet's result via the form persists to `bets_legacy.csv`, not `bets.csv`.
+- New tests `tests/test_app_legacy.py`: legacy-only file → loads; legacy + new → loads both; updating a legacy row writes to `bets_legacy.csv`.
+
+### 5.8.2 — Smoke scan validation (P0, do this last)
+
+Per 5.6.2 acceptance: `logs/paper/` doesn't exist yet. After 5.8.1 + 5.8.3 land, run:
+
+```bash
+export $(cat .env)
+mkdir -p logs/paper
+python3 scripts/scan_odds.py --sports football
+ls -la logs/paper/                        # expect 8 CSVs
+head -1 logs/paper/A_production.csv       # confirm new 24-column header
+python3 scripts/compare_strategies.py     # report runs, no double-count
+pytest                                    # 31+ green
+```
+
+If any variant produces 0 rows on a Friday-evening scan, debug before Saturday — likely `min_books`, `max_dispersion`, or `consensus_mode` filtering everything out.
+
+### 5.8.3 — Per-row CLV recomputation in `update_csv_clv` (P0)
+
+Bug: `closing_line.py:230–260` writes the same `clv_pct` from `updates[key]` to every CSV row matching `(home, away, kickoff, side, market, line)`. Different paper variants may flag the same side at different books; different book → different commission → different effective odds → different CLV. Currently they all share the production bet's CLV — wrong.
+
+**Fix in `closing_line.py:update_csv_clv`**:
+```python
+from src.betting.commissions import effective_odds
+
+for row in rows:
+    key = (row.get("home"), row.get("away"), row.get("kickoff"),
+           row.get("side"), row.get("market", "h2h"), row.get("line", ""))
+    if key in updates and not row.get("pinnacle_close_prob"):
+        pin_prob = float(updates[key]["pinnacle_close_prob"])
+        row_book = row.get("book", "")
+        try:
+            row_odds = float(row.get("odds") or 0)
+        except ValueError:
+            row_odds = 0.0
+        eff = effective_odds(row_odds, row_book) if row_odds else 0.0
+        row["pinnacle_close_prob"] = str(pin_prob)
+        row["clv_pct"] = str(round(eff * pin_prob - 1, 6)) if eff else ""
+        changed = True
+```
+
+`updates[key]` keeps `pinnacle_close_prob` (book-independent truth) but no longer carries a precomputed `clv_pct` — every consumer recomputes per-row.
+
+**Acceptance**: write a test that populates two paper CSVs (`A_production.csv` flagging williamhill, `E_exchanges_only.csv` flagging betfair_ex_uk) for the same side and runs `update_csv_clv` with a single Pinnacle-close update; the two rows must have *different* `clv_pct` values, with E's smaller (commission shrinks effective odds).
+
+### 5.8.4 — Model-signal baseline consistency (P1)
+
+Production `scan_odds.py:_model_signal` compares model prob to **raw** `1/odds`. Paper `strategies.py:278` compares to **effective** implied prob. Same fixture/book/side gets a different `model_signal` value in production vs paper.
+
+Decision: **model_signal should always be vs raw `1/odds`**. The model predicts a probability; commission is a payout adjustment, not a probability adjustment. The `edge` and Kelly stake are where commission belongs.
+
+**Fix in `strategies.py:_flag_bets`** — separate the variable used for model-signal from the variable used for `edge`:
+```python
+fair_side = b["fair"].get(side, 1.0 / odds)
+edge_gross = cons[side] - fair_side
+edge = cons[side] - _effective_implied_prob(odds, b["book"])  # net of commission
+raw_implied = round(1.0 / odds, 4)                            # for model_signal only
+# ... in the model-signal branch:
+ms_edge = sig.get(side, 0.0) - raw_implied
+```
+
+Drop the `ip = round(eff_implied, 4)` rebinding entirely. Store `impl_raw = round(1/odds, 4)` and `impl_effective = round(eff_implied, 4)` as separate fields on the bet dict.
+
+### 5.8.5 — `impl` field rename (P1)
+
+Currently the bet dict's `impl` field changed semantics in 5.7 from raw to effective. Anything reading `impl` downstream (compare_strategies, future analytics) silently sees a different number than before.
+
+Rename: replace `impl` with two explicit fields, `impl_raw` and `impl_effective`. Update:
+- `strategies.py:_flag_bets` (where the bet dict is built)
+- `scan_odds.py:find_value_bets` (production path)
+- `_PAPER_FIELDNAMES` and the bets.csv writer field list
+- Any place in `app.py` or templates that reads `impl` (search-and-grep)
+
+Tests: a regression test in `test_strategies.py` asserting `bet["impl_raw"] == round(1/bet["odds"], 4)` for every flagged bet.
+
+### 5.8.6 — Tennis-skip log throttling (P2)
+
+`closing_line.py:336` prints one "tennis excluded" line per tennis bet. Throttle:
+```python
+n_tennis_skipped = 0
+for bet in all_active:
+    sport_key = LABEL_TO_KEY.get(bet.get("sport", ""))
+    if not sport_key:
+        n_tennis_skipped += 1
+        continue
+    ...
+if n_tennis_skipped:
+    print(f"  [skip] {n_tennis_skipped} tennis bet(s) — no sport_key mapping (resolved in Phase 6)")
+```
+
+### 5.8.7 — `compare_strategies.py:_stats` `book_dist` scope (P2)
+
+`book_dist` counts all bets; `avg_clv` counts only CLV-eligible. Either scope `book_dist` to CLV rows for consistency, or add a column header note: `Top books (all flagged)`. Either fix is fine.
+
+### Acceptance checklist for 5.8 as a whole
+
+- [ ] `logs/bets_legacy.csv` exists with the user's pre-reset bets; new `logs/bets.csv` has the new schema.
+- [ ] Dashboard renders both legacy and new bets; result-edit form correctly routes to the right CSV.
+- [ ] One smoke scan produces 8 paper CSVs, all 31+ tests pass.
+- [ ] Per-row CLV test in `tests/test_clv.py` (new) shows different CLV per book on the same fixture.
+- [ ] `model_signal` value is identical between production and variant A on the sample event.
+- [ ] No occurrence of bare `impl` field in any CSV header or bet dict.
 
 ---
 

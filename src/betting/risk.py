@@ -6,6 +6,11 @@ import json
 import os
 from pathlib import Path
 
+try:
+    from src.betting.commissions import effective_odds as _effective_odds
+except ImportError:
+    def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
+
 _LOGS_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 _BANKROLL_STATE = _LOGS_DIR / "bankroll.json"
 _BETS_CSV = _LOGS_DIR / "bets.csv"
@@ -31,10 +36,11 @@ def get_bankroll() -> float:
     return 1000.0
 
 
-def compute_raw_stake(cons: float, odds: float, bankroll: float) -> float:
+def compute_raw_stake(cons: float, odds: float, bankroll: float, book: str = "") -> float:
     """Half-Kelly stake, hard-capped at 5% bankroll before risk adjustments.
     At typical edges (3–8%) the 5% cap dominates — Kelly rarely reaches it."""
-    kelly = max(0.0, min(0.5 * (cons * odds - 1) / (odds - 1), 0.05))
+    eff = _effective_odds(odds, book) if book else odds
+    kelly = max(0.0, min(0.5 * (cons * eff - 1) / (eff - 1), 0.05))
     return kelly * bankroll
 
 
