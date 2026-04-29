@@ -1,0 +1,20 @@
+[
+  {
+    "sha": "abc1234567890",
+    "commit": {
+      "message": "Add Kelly criterion bet sizing\n\nImplements half-Kelly for bankroll management."
+    }
+  },
+  {
+    "sha": "def9876543210",
+    "commit": {
+      "message": "Fix Shin devigging calculation"
+    }
+  },
+  {
+    "sha": "ghi1111111111",
+    "commit": {
+      "message": "Add closing line value tracker"
+    }
+  }
+]

@@ -23,7 +23,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 |---|---|---|---|---|
 | 11.0 | Cron-auth smoke test (no code) | done | main / — | CLAUDE_CMD verified; median 3.7s; model=claude-opus-4-7; PATH needs /home/rfreire/.local/bin |
 | 11.1 | Source list + queries (data only) | done | main / c670a5e | 37 URLs (25 Tier-A + 12 Tier-B); 7 queries; spec URL count corrected 28→25. |
-| 11.2 | Fetcher module | pending | — | URL → cleaned text + hash. |
+| 11.2 | Fetcher module | done | main / — | FetchResult + 6 handlers + 16 offline tests; 16/16 pass. |
 | 11.3 | Dedup state + pending-file builder | pending | — | `research_seen.json` + assembler. |
 | 11.4 | Claude subprocess wrapper | pending | — | Depends on 11.0 + 11.3. |
 | 11.5 | Feed writer | pending | — | Prepends to `RESEARCH_FEED.md`. |
@@ -389,10 +389,10 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
    - Verify hash is deterministic.
 
 **Acceptance.**
-- [ ] `pytest tests/test_research_fetch.py` passes.
-- [ ] Manual smoke: `python3 -c "from scripts.research_lib.fetch import fetch; r = fetch('https://arxiv.org/abs/1710.02824'); print(r.status, len(r.body_text))"` returns `ok` and 1000 < len < 20000.
-- [ ] Body cap holds: a fixture with 100 KB input yields ≤ 20 KB output.
-- [ ] Tests run with no network (verified by running with `pytest -p no:cacheprovider tests/test_research_fetch.py` after disconnecting WiFi, or stubbing).
+- [x] `pytest tests/test_research_fetch.py` passes (16/16).
+- [x] Manual smoke: `python3 -c "from scripts.research_lib.fetch import fetch; r = fetch('https://arxiv.org/abs/1710.02824'); print(r.status, len(r.body_text))"` returns `ok 1508` (1000 < 1508 < 20000).
+- [x] Body cap holds: a fixture with 100 KB input yields ≤ 20 KB output.
+- [x] Tests run with no network — all calls monkeypatched; no real network in test suite.
 
 **Reviewer focus.** HTML→text cleaning quality. I will manually fetch one Tier-A URL and read the cleaned output. Garbage-in here destroys downstream signal.
 

@@ -1,0 +1,29 @@
+[
+  {
+    "data": {
+      "children": [
+        {
+          "data": {
+            "title": "Value betting guide: closing line value explained",
+            "selftext": "CLV is the most reliable metric for evaluating edge in sports betting. If your odds are consistently better than Pinnacle closing odds, you have real edge.",
+            "url": "https://example.com/clv"
+          }
+        },
+        {
+          "data": {
+            "title": "Kaunitz strategy replication results",
+            "selftext": "I replicated the Kaunitz 2017 paper and found similar results over 2k bets. Key: use consensus from 30+ books.",
+            "url": "https://example.com/kaunitz"
+          }
+        },
+        {
+          "data": {
+            "title": "Which devig method is best?",
+            "selftext": "Tested Shin, proportional, and power devig. Shin performs best on liquid markets.",
+            "url": "https://example.com/devig"
+          }
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/1710.02824v3</id>
+    <title>Beating the bookies with their own numbers - and how the online sports betting market is rigged</title>
+    <summary>We present a sports betting strategy that beats the bookmakers' odds at their own game. Using the consensus (average) of bookmaker odds as a proxy for the true probability, we identify bets with positive expected value and show that following a simple Kelly criterion results in sustained profit over thousands of bets.</summary>
+  </entry>
+</feed>
