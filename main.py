@@ -2,7 +2,7 @@
 End-to-end pipeline: download data → fit model → evaluate → find value bets.
 
 Two strategies:
-  1. Statistical model (Dixon-Coles / XGBoost) — predict true probabilities
+  1. Statistical model (Dixon-Coles / CatBoost) — predict true probabilities
   2. Consensus strategy (Kaunitz 2017) — bet when one bookmaker deviates from market
 
 Usage:
@@ -23,11 +23,11 @@ from src.data.understat import download_xg, load_xg
 from src.data.features import build_feature_matrix
 from src.ratings.pi_ratings import build_rolling_ratings
 from src.model.dixon_coles import DixonColesModel
-from src.model.xgboost_model import MatchPredictor
+from src.model.catboost_model import MatchPredictor
 from src.model.calibration import evaluate
 from src.betting.value import find_value_bets
 from src.betting.kelly import size_bets, simulate_bankroll
-from src.betting.consensus import compute_consensus, backtest_consensus, find_consensus_bets
+from src.betting.consensus import compute_consensus, backtest_consensus, find_consensus_bets, backtest_combined
 
 
 def run_pipeline(since_season: str = "1415", bankroll: float = 1000.0):
@@ -67,9 +67,9 @@ def run_pipeline(since_season: str = "1415", bankroll: float = 1000.0):
         print(best[["date", "home_team", "away_team", "bookmaker", "bet_side",
                      "book_odds", "consensus_prob", "edge", "result"]].head(5).to_string(index=False))
 
-    # ── Strategy 2: XGBoost Walk-Forward ───────────────────────────────────
+    # ── Strategy 2: CatBoost Walk-Forward ───────────────────────────────────
     print("\n" + "="*55)
-    print("STRATEGY 2: XGBoost + xG features (walk-forward)")
+    print("STRATEGY 2: CatBoost + xG features (walk-forward)")
     print("="*55)
 
     seasons = sorted(matches["season"].unique())
@@ -96,8 +96,9 @@ def run_pipeline(since_season: str = "1415", bankroll: float = 1000.0):
         all_tests.append(test_valid)
 
     if all_preds:
-        all_preds_df = pd.concat(all_preds, ignore_index=True)
-        all_test_df = pd.concat(all_tests, ignore_index=True)
+        # Preserve original match indices — needed for combined strategy and find_value_bets
+        all_preds_df = pd.concat(all_preds)
+        all_test_df = pd.concat(all_tests)
 
         print("\nEvaluation vs bookmaker:")
         result = evaluate(all_preds_df, all_test_df)
@@ -126,6 +127,38 @@ def run_pipeline(since_season: str = "1415", bankroll: float = 1000.0):
             print(fi.head(10).to_string(index=False))
         except Exception:
             pass
+
+    # ── Strategy 3: Combined (Kaunitz consensus + CatBoost dual filter) ─────
+    print("\n" + "="*55)
+    print("STRATEGY 3: Combined Kaunitz + CatBoost dual filter")
+    print("="*55)
+    print("(Only bets where BOTH consensus edge AND model agree)")
+
+    if all_preds:
+        # all_preds_df and all_test_df share original match indices from walk-forward
+        covered_matches = all_test_df
+
+        print(f"\n{'K-Edge':>8}  {'M-Edge':>8}  {'Bets':>6}  {'Win%':>6}  {'ROI':>8}  {'P&L':>8}")
+        print("-" * 58)
+
+        # Baseline: pure Kaunitz on the same covered subset, for apples-to-apples comparison
+        for k_edge in [0.02, 0.03, 0.04]:
+            r = backtest_consensus(covered_matches, min_edge=k_edge, bankroll=bankroll)
+            if r["n_bets"] > 0:
+                print(f"{k_edge:>8.0%}  {'(kaunitz)':>8}  {r['n_bets']:>6}  "
+                      f"{r['win_rate']:>5.1%}  {r['roi']:>+8.2%}  {r['total_pnl']:>+8.0f}")
+
+        print()
+        for k_edge in [0.02, 0.03, 0.04]:
+            for m_edge in [0.0, 0.02, 0.05]:
+                r = backtest_combined(
+                    covered_matches, all_preds_df,
+                    min_kaunitz_edge=k_edge, min_model_edge=m_edge,
+                    bankroll=bankroll,
+                )
+                if r["n_bets"] > 0:
+                    print(f"{k_edge:>8.0%}  {m_edge:>8.0%}  {r['n_bets']:>6}  "
+                          f"{r['win_rate']:>5.1%}  {r['roi']:>+8.2%}  {r['total_pnl']:>+8.0f}")
 
     print("\n=== Done ===")
 

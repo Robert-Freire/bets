@@ -1,8 +1,8 @@
 """
-XGBoost/CatBoost W/D/L classifier on top of pi-ratings + rolling xG features.
+CatBoost W/D/L classifier on top of pi-ratings + rolling xG features.
 Based on Yeung et al. (2023) and Hubáček et al. (2019).
 
-Uses CatBoost when available (handles NaN natively), falls back to XGBoost.
+Uses CatBoost (handles NaN natively). Falls back to XGBoost if CatBoost is not installed.
 """
 
 import numpy as np

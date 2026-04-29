@@ -71,6 +71,11 @@
     .pnl-pos { color: #22c55e; }
     .pnl-neg { color: #ef4444; }
 
+    /* CatBoost model signal badges */
+    .model-agree    { background: #14532d; color: #4ade80; }
+    .model-disagree { background: #450a0a; color: #f87171; }
+    .model-unknown  { background: #1e293b; color: #94a3b8; }
+
     .no-bets { color: #475569; font-size: .9rem; padding: 1rem 0; }
     .fixture { font-weight: 500; }
     .meta { font-size: .75rem; color: #64748b; }
@@ -142,7 +147,7 @@
     <thead>
       <tr>
         <th>Kick-off</th><th>Sport</th><th>Fixture</th><th>Side</th>
-        <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th>
+        <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th><th>Model</th>
         <th>Suggested £</th><th>Placed £</th><th>Settle</th>
       </tr>
     </thead>
@@ -157,6 +162,17 @@
         <td>{{ b.odds }}</td>
         <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
         <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
+        {% set ms = b.model_signal | default('?') %}
+        {% if ms != '?' %}
+          {% set ms_f = ms | float(none) %}
+          {% if ms_f is not none %}
+            <td style="color:{{ '#4ade80' if ms_f > 0 else '#f87171' }};font-weight:600;font-size:.8rem;white-space:nowrap" title="CatBoost model edge vs book implied">{{ '+' if ms_f > 0 else '' }}{{ (ms_f * 100) | round(1) }}%</td>
+          {% else %}
+            <td><span class="badge model-{{ 'agree' if ms == 'agree' else ('disagree' if ms == 'disagree' else 'unknown') }}" title="CatBoost signal">{{ '✓' if ms == 'agree' else ('✗' if ms == 'disagree' else ms) }}</span></td>
+          {% endif %}
+        {% else %}
+          <td style="color:#475569;font-size:.75rem">?</td>
+        {% endif %}
         <td class="meta">£{{ b.stake }}</td>
         <td style="color:#22c55e;font-weight:600">£{{ b.actual_stake }}</td>
         <td>
@@ -186,7 +202,7 @@
     <thead>
       <tr>
         <th>Kick-off</th><th>Sport</th><th>Fixture</th><th>Side</th>
-        <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th>
+        <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th><th>Model</th>
         <th>Suggested £</th><th>Log bet</th>
       </tr>
     </thead>
@@ -201,6 +217,17 @@
         <td>{{ b.odds }}</td>
         <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
         <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
+        {% set ms = b.model_signal | default('?') %}
+        {% if ms != '?' %}
+          {% set ms_f = ms | float(none) %}
+          {% if ms_f is not none %}
+            <td style="color:{{ '#4ade80' if ms_f > 0 else '#f87171' }};font-weight:600;font-size:.8rem;white-space:nowrap" title="CatBoost model edge vs book implied">{{ '+' if ms_f > 0 else '' }}{{ (ms_f * 100) | round(1) }}%</td>
+          {% else %}
+            <td><span class="badge model-{{ 'agree' if ms == 'agree' else ('disagree' if ms == 'disagree' else 'unknown') }}" title="CatBoost signal">{{ '✓' if ms == 'agree' else ('✗' if ms == 'disagree' else ms) }}</span></td>
+          {% endif %}
+        {% else %}
+          <td style="color:#475569;font-size:.75rem">?</td>
+        {% endif %}
         <td class="meta">£{{ b.stake }}</td>
         <td>
           <form action="/update/{{ b.id }}" method="post">
@@ -241,6 +268,7 @@
         <th>Odds</th>
         <th>Edge</th>
         <th>Conf</th>
+        <th>Model</th>
         <th>Suggested £</th>
         <th>Placed £</th>
         <th>Result</th>
@@ -259,6 +287,17 @@
         <td>{{ b.odds }}</td>
         <td class="edge">{{ "%.1f"|format(b.edge|float * 100) }}%</td>
         <td><span class="badge {{ b.confidence }}">{{ b.confidence }}</span></td>
+        {% set ms = b.model_signal | default('?') %}
+        {% if ms != '?' %}
+          {% set ms_f = ms | float(none) %}
+          {% if ms_f is not none %}
+            <td style="color:{{ '#4ade80' if ms_f > 0 else '#f87171' }};font-weight:600;font-size:.8rem;white-space:nowrap" title="CatBoost model edge vs book implied">{{ '+' if ms_f > 0 else '' }}{{ (ms_f * 100) | round(1) }}%</td>
+          {% else %}
+            <td><span class="badge model-{{ 'agree' if ms == 'agree' else ('disagree' if ms == 'disagree' else 'unknown') }}" title="CatBoost signal">{{ '✓' if ms == 'agree' else ('✗' if ms == 'disagree' else ms) }}</span></td>
+          {% endif %}
+        {% else %}
+          <td style="color:#475569;font-size:.75rem">?</td>
+        {% endif %}
         <td class="meta">£{{ b.stake }}</td>
         <td>£{{ b.actual_stake }}</td>
         <td class="res-{{ b.result }}">{{ b.result }}</td>

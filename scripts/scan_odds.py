@@ -19,11 +19,141 @@ API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
 
+# CatBoost model signals cache — populated by scripts/model_signals.py
+_SIGNALS_PATH = Path(__file__).parent.parent / "logs" / "model_signals.json"
+_MODEL_SIGNALS: dict = {}
+try:
+    with open(_SIGNALS_PATH) as _f:
+        _cache = json.load(_f)
+        _MODEL_SIGNALS = _cache.get("signals", {})
+    print(f"[model] Loaded {len(_MODEL_SIGNALS)} signals from {_SIGNALS_PATH.name} "
+          f"(generated {_cache.get('generated_at', '?')[:10]})")
+except FileNotFoundError:
+    print("[model] No model_signals.json found — run scripts/model_signals.py to enable CatBoost indicator")
+except Exception as _e:
+    print(f"[model] Could not load signals: {_e}")
+
+# Odds API team names → football-data.co.uk names (covers all scanner leagues)
+_API_TO_FD = {
+    # EPL
+    "Manchester City":        "Man City",
+    "Manchester United":      "Man United",
+    "Tottenham Hotspur":      "Tottenham",
+    "Newcastle United":       "Newcastle",
+    "West Ham United":        "West Ham",
+    "Brighton & Hove Albion": "Brighton",
+    "Wolverhampton Wanderers":"Wolves",
+    "Nottingham Forest":      "Nott'm Forest",
+    "Sheffield United":       "Sheffield United",
+    "Leicester City":         "Leicester",
+    "Luton Town":             "Luton",
+    # Bundesliga
+    "Borussia Dortmund":      "Dortmund",
+    "Bayer Leverkusen":       "Leverkusen",
+    "Eintracht Frankfurt":    "Ein Frankfurt",
+    "VfL Wolfsburg":          "Wolfsburg",
+    "1. FC Union Berlin":     "Union Berlin",
+    "SC Freiburg":            "Freiburg",
+    "1. FSV Mainz 05":        "Mainz",
+    "FC Augsburg":            "Augsburg",
+    "VfB Stuttgart":          "Stuttgart",
+    "TSG Hoffenheim":         "Hoffenheim",
+    "SV Werder Bremen":       "Werder Bremen",
+    "1. FC Heidenheim 1846":  "Heidenheim",
+    "1. FC Heidenheim":       "Heidenheim",
+    "VfL Bochum":             "Bochum",
+    "FC St. Pauli":           "St Pauli",
+    "Borussia Mönchengladbach": "M'gladbach",
+    "Borussia Monchengladbach": "M'gladbach",
+    # Bundesliga 2
+    "Hamburger SV":           "Hamburg",
+    "1. FC Kaiserslautern":   "Kaiserslautern",
+    "FC Köln":                "FC Koln",
+    "Fortuna Düsseldorf":     "Fortuna Dusseldorf",
+    "Hertha BSC":             "Hertha",
+    "Hannover 96":            "Hannover",
+    "1. FC Nürnberg":         "Nurnberg",
+    "Karlsruher SC":          "Karlsruhe",
+    "SV Darmstadt 98":        "Darmstadt",
+    "SpVgg Greuther Fürth":   "Greuther Furth",
+    "SV Elversberg":          "Elversberg",
+    "1. FC Magdeburg":        "Magdeburg",
+    "SC Paderborn 07":        "Paderborn",
+    "SSV Ulm 1846":           "Ulm",
+    "Eintracht Braunschweig": "Braunschweig",
+    "SSV Jahn Regensburg":    "Regensburg",
+    # Serie A
+    "AC Milan":               "Milan",
+    "Inter Milan":            "Inter",
+    "AS Roma":                "Roma",
+    "SS Lazio":               "Lazio",
+    "ACF Fiorentina":         "Fiorentina",
+    "Hellas Verona":          "Verona",
+    "US Monza":               "Monza",
+    # Ligue 1
+    "Paris Saint-Germain":    "Paris SG",
+    "Paris Saint Germain":    "Paris SG",
+    "Olympique de Marseille": "Marseille",
+    "Olympique Lyonnais":     "Lyon",
+    "AS Monaco":              "Monaco",
+    "LOSC Lille":             "Lille",
+    "Stade Rennais":          "Rennes",
+    "OGC Nice":               "Nice",
+    "RC Strasbourg":          "Strasbourg",
+    "RC Lens":                "Lens",
+    "FC Nantes":              "Nantes",
+    "Toulouse FC":            "Toulouse",
+    "FC Lorient":             "Lorient",
+    "Stade de Reims":         "Reims",
+    "Clermont Foot":          "Clermont",
+    "Saint-Etienne":          "St Etienne",
+    # Championship
+    "Sheffield Wednesday":    "Sheffield Weds",
+    "West Bromwich Albion":   "West Brom",
+    "Oxford United":          "Oxford",
+    "Preston North End":      "Preston",
+    "Plymouth Argyle":        "Plymouth",
+    "Blackburn Rovers":       "Blackburn",
+    "Norwich City":           "Norwich",
+    "Cardiff City":           "Cardiff",
+    "Stoke City":             "Stoke",
+    "Queens Park Rangers":    "QPR",
+    "Hull City":              "Hull",
+    "Derby County":           "Derby",
+    "Swansea City":           "Swansea",
+    "Coventry City":          "Coventry",
+    "Leeds United":           "Leeds",
+    "Birmingham City":        "Birmingham",
+}
+
+
+def _model_signal(home: str, away: str, sport_key: str, book_impl_prob: float, side: str) -> str:
+    """Return signed model edge as '+0.123'/'-0.051', or '?' if no signal available."""
+    if not _MODEL_SIGNALS:
+        return "?"
+    h = _API_TO_FD.get(home, home)
+    a = _API_TO_FD.get(away, away)
+    probs = _MODEL_SIGNALS.get(f"{sport_key}:{h}|{a}")
+    if probs is None:
+        return "?"
+    edge = probs.get(side, 0.0) - book_impl_prob
+    return f"{edge:+.3f}"
+
+
+def _signal_is_positive(signal: str) -> bool:
+    """True if model signal is a positive numeric edge (model agrees)."""
+    try:
+        return float(signal) > 0
+    except (ValueError, TypeError):
+        return signal == "agree"  # backward compat with old CSV rows
+
+
 NTFY_TOPIC = "robert-epl-bets-m4x9k"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
 BASE_URL = "https://api.the-odds-api.com/v4"
-MIN_EDGE = 0.03
+MIN_EDGE = 0.03        # Kaunitz-only threshold (no model required)
+MODEL_MIN_EDGE = 0.02  # lower threshold — only shown when model agrees
 BANKROLL = 1000.0
 
 # Bookmakers with a UK Gambling Commission licence — the only ones usable from the UK.
@@ -97,7 +227,7 @@ def fetch_odds(sport_key: str) -> tuple[list, str]:
 
 def find_value_bets(events: list, sport_key: str) -> list[dict]:
     min_books = SPORT_MIN_BOOKS.get(sport_key, DEFAULT_MIN_BOOKS)
-    min_edge = SPORT_MIN_EDGE.get(sport_key, MIN_EDGE)
+    min_edge = SPORT_MIN_EDGE.get(sport_key, MODEL_MIN_EDGE)  # scan at 2% to catch model bets
     bets = []
 
     for ev in events:
@@ -140,6 +270,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                     continue
                 edge = cons[side] - 1 / odds
                 if edge >= min_edge and 1.2 <= odds <= 15.0:
+                    impl_prob = round(1 / odds, 4)
                     bets.append({
                         "commence": commence,
                         "home": home,
@@ -147,11 +278,12 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                         "side": side,
                         "book": b["book"],
                         "odds": odds,
-                        "impl": round(1 / odds, 4),
+                        "impl": impl_prob,
                         "cons": round(cons[side], 4),
                         "edge": round(edge, 4),
                         "n_books": n_books,
                         "confidence": confidence,
+                        "model_signal": _model_signal(home, away, sport_key, impl_prob, side),
                     })
 
     # Deduplicate: keep best edge per fixture + side
@@ -253,29 +385,44 @@ def main():
         except Exception as e:
             print(f"  {label:<28} ERROR: {e}")
 
-    print(f"\nAPI quota remaining: {quota_remaining}")
-    print(f"Total value bets (>= 3% edge): {len(all_bets)}\n")
+    # Split into Kaunitz bets (≥3%, shown regardless) and model-filtered bets (2-3%, model agrees)
+    kaunitz_bets = [b for b in all_bets if b["edge"] >= MIN_EDGE]
+    model_bets   = [b for b in all_bets if b["edge"] < MIN_EDGE
+                    and _signal_is_positive(b.get("model_signal", "?"))]
+    output_bets  = kaunitz_bets + model_bets
 
-    if not all_bets:
+    print(f"\nAPI quota remaining: {quota_remaining}")
+    print(f"Kaunitz bets (≥3%): {len(kaunitz_bets)}  |  Model-filtered bets (2-3% + agree): {len(model_bets)}\n")
+
+    if not output_bets:
         print("No value bets found today across all sports.")
-        notify("Bets - No value today", f"Scanned {len(all_sports)} sports. No edge >= 3% found.", priority="low")
+        notify("Bets - No value today", f"Scanned {len(all_sports)} sports. No edge ≥ 2% with model agreement.", priority="low")
         return
 
     # Print full detail
     side_labels = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
-    current_sport = None
-    for vb in sorted(all_bets, key=lambda x: (x["sport"], -x["edge"])):
-        if vb["sport"] != current_sport:
-            current_sport = vb["sport"]
-            print(f"--- {current_sport} ---")
-        dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
-        kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
-        stake = round(kelly * BANKROLL, 2)
-        side = side_labels.get(vb["side"], vb["side"])
-        print(f"  {vb['home']} vs {vb['away']} [{side}]")
-        print(f"    {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
-              f"Consensus {vb['cons']:.1%} | {vb['n_books']} books [{vb['confidence']}] | "
-              f"Stake £{stake} | {dt}")
+    for section, bets in [("≥3% Kaunitz", kaunitz_bets), ("2-3% Model-filtered", model_bets)]:
+        if not bets:
+            continue
+        print(f"=== {section} ===")
+        current_sport = None
+        for vb in sorted(bets, key=lambda x: (x["sport"], -x["edge"])):
+            if vb["sport"] != current_sport:
+                current_sport = vb["sport"]
+                print(f"--- {current_sport} ---")
+            dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
+            kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
+            stake = round(kelly * BANKROLL, 2)
+            side = side_labels.get(vb["side"], vb["side"])
+            ms = vb.get("model_signal", "?")
+            try:
+                ms_label = f"model {float(ms):+.1%}"
+            except (ValueError, TypeError):
+                ms_label = f"model {ms}"
+            print(f"  {vb['home']} vs {vb['away']} [{side}]")
+            print(f"    {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
+                  f"Consensus {vb['cons']:.1%} | {vb['n_books']} books [{vb['confidence']}] | "
+                  f"{ms_label} | Stake £{stake} | {dt}")
     print()
 
     # Write bets to CSV log
@@ -284,11 +431,12 @@ def main():
     with open(log_file, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "scanned_at", "sport", "home", "away", "kickoff",
-            "side", "book", "odds", "edge", "consensus", "n_books", "confidence", "stake", "result"
+            "side", "book", "odds", "edge", "consensus", "n_books", "confidence",
+            "model_signal", "stake", "result"
         ])
         if write_header:
             writer.writeheader()
-        for vb in all_bets:
+        for vb in output_bets:
             dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
             kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
             writer.writerow({
@@ -304,15 +452,16 @@ def main():
                 "consensus": round(vb["cons"], 4),
                 "n_books": vb["n_books"],
                 "confidence": vb["confidence"],
+                "model_signal": vb.get("model_signal", "?"),
                 "stake": round(kelly * BANKROLL, 2),
-                "result": "",  # filled in manually after the match
+                "result": "",
             })
-    print(f"[log] {len(all_bets)} bets appended to logs/bets.csv")
+    print(f"[log] {len(output_bets)} bets appended to logs/bets.csv")
 
-    # Split by confidence and send separate notifications
-    high = [vb for vb in all_bets if vb["confidence"] == "HIGH"]
-    med  = [vb for vb in all_bets if vb["confidence"] == "MED"]
-    low  = [vb for vb in all_bets if vb["confidence"] == "LOW"]
+    # Kaunitz bets (≥3%): notify by confidence tier
+    high = [vb for vb in kaunitz_bets if vb["confidence"] == "HIGH"]
+    med  = [vb for vb in kaunitz_bets if vb["confidence"] == "MED"]
+    low  = [vb for vb in kaunitz_bets if vb["confidence"] == "LOW"]
 
     if high:
         notify(
@@ -330,6 +479,14 @@ def main():
         notify(
             title=f"Bets LOW - {len(low)} bet{'s' if len(low) > 1 else ''} (<20 books)",
             message="\n\n".join(format_bet_line(vb) for vb in low),
+            priority="low",
+        )
+
+    # Model-filtered bets (2-3% + model agrees): single notification, low priority
+    if model_bets:
+        notify(
+            title=f"Bets MODEL - {len(model_bets)} bet{'s' if len(model_bets) > 1 else ''} (2-3% + model agree)",
+            message="\n\n".join(format_bet_line(vb) for vb in model_bets),
             priority="low",
         )
 

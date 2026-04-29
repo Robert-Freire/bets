@@ -16,7 +16,7 @@ BETS_CSV = Path(__file__).parent / "logs" / "bets.csv"
 FIELDS = [
     "scanned_at", "sport", "home", "away", "kickoff",
     "side", "book", "odds", "edge", "consensus", "n_books",
-    "confidence", "stake", "result", "actual_stake", "pnl",
+    "confidence", "model_signal", "stake", "result", "actual_stake", "pnl",
 ]
 
 
@@ -30,6 +30,7 @@ def load_bets() -> list[dict]:
             row["id"] = i
             row.setdefault("actual_stake", "")
             row.setdefault("pnl", "")
+            row.setdefault("model_signal", "?")
             bets.append(row)
     return bets
 

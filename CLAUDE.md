@@ -83,7 +83,7 @@ logs/scan.log               Scanner output
 logs/sports_cache.json      Sports already evaluated
 docs/APPROACH.md            Full research-backed architecture
 docs/papers/                Academic paper summaries
-src/                        Statistical models (Dixon-Coles, pi-ratings, XGBoost)
+src/                        Statistical models (Dixon-Coles, pi-ratings, CatBoost)
 data/raw/                   Football-data.co.uk CSVs + Understat xG
 ```
 
@@ -104,7 +104,7 @@ Three sections:
 Full pipeline in `src/` and `main.py`:
 - `src/ratings/pi_ratings.py` — dynamic team strength (Constantinou 2013)
 - `src/model/dixon_coles.py` — Poisson model with ρ low-score correction
-- `src/model/xgboost_model.py` — CatBoost on pi-ratings + rolling xG features
+- `src/model/catboost_model.py` — CatBoost on pi-ratings + rolling xG features
 - `src/data/understat.py` — xG data from Understat (4,180 EPL matches 2014–2024)
 
 Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Needs better calibration.

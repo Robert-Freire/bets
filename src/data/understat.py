@@ -1,13 +1,11 @@
 """
-Fetch match-level xG data from Understat for the Premier League.
+Fetch match-level xG data from Understat for supported leagues.
 Uses the understat Python package (async, backed by Understat's internal API).
 
 Seasons: 2014 = 2014/15, 2015 = 2015/16, ..., 2024 = 2024/25
 """
 
 import asyncio
-import json
-import time
 from pathlib import Path
 
 import aiohttp
@@ -19,24 +17,32 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data" / "raw" / "xg"
 # Understat uses the start year of the season (2023 = 2023/24)
 UNDERSTAT_SEASONS = list(range(2014, 2025))  # 2014/15 through 2024/25
 
+# Leagues with xG data on Understat, mapped from scanner sport_key
+UNDERSTAT_LEAGUES = {
+    "soccer_epl":               "EPL",
+    "soccer_germany_bundesliga":"Bundesliga",
+    "soccer_italy_serie_a":     "Serie_A",
+    "soccer_france_ligue_one":  "Ligue_1",
+}
 
-async def _fetch_season(session: aiohttp.ClientSession, season: int) -> list[dict]:
+
+async def _fetch_season(session: aiohttp.ClientSession, league: str, season: int) -> list[dict]:
     u = understat_lib.Understat(session)
-    return await u.get_league_results("EPL", season)
+    return await u.get_league_results(league, season)
 
 
-async def _download_seasons(seasons: list[int]) -> dict[int, list[dict]]:
+async def _download_seasons(league: str, seasons: list[int]) -> dict[int, list[dict]]:
     results = {}
     async with aiohttp.ClientSession() as session:
         for season in seasons:
-            print(f"  Fetching {season}/{str(season+1)[-2:]} xG ... ", end="", flush=True)
+            print(f"  [{league}] {season}/{str(season+1)[-2:]} ... ", end="", flush=True)
             try:
-                data = await _fetch_season(session, season)
+                data = await _fetch_season(session, league, season)
                 results[season] = data
                 print(f"{len(data)} matches")
             except Exception as e:
                 print(f"ERROR: {e}")
-            await asyncio.sleep(0.5)  # polite delay
+            await asyncio.sleep(0.5)
     return results
 
 
@@ -59,64 +65,54 @@ def _parse_matches(raw: list[dict], season: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def download_xg(seasons: list[int] | None = None, force: bool = False) -> pd.DataFrame:
+def download_xg(league: str = "EPL", seasons: list[int] | None = None, force: bool = False) -> pd.DataFrame:
     """
-    Download xG data for the given seasons and save to CSV.
+    Download xG data for the given league and seasons, save to CSV.
 
     Parameters
     ----------
-    seasons : list of start years (e.g. [2022, 2023, 2024]). Defaults to all.
-    force : re-download even if cache exists.
+    league   : Understat league key (e.g. "EPL", "Bundesliga", "Serie_A", "Ligue_1")
+    seasons  : list of start years (e.g. [2022, 2023, 2024]). Defaults to all.
+    force    : re-download even if cache exists.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if seasons is None:
         seasons = UNDERSTAT_SEASONS
 
-    to_fetch = []
-    cached = []
+    to_fetch, cached = [], []
     for s in seasons:
-        path = DATA_DIR / f"xg_EPL_{s}.csv"
-        if path.exists() and not force:
-            cached.append(s)
-        else:
-            to_fetch.append(s)
+        path = DATA_DIR / f"xg_{league}_{s}.csv"
+        (cached if (path.exists() and not force) else to_fetch).append(s)
 
-    all_frames = []
-
-    if cached:
-        for s in cached:
-            path = DATA_DIR / f"xg_EPL_{s}.csv"
-            all_frames.append(pd.read_csv(path, parse_dates=["date"]))
+    all_frames = [pd.read_csv(DATA_DIR / f"xg_{league}_{s}.csv", parse_dates=["date"]) for s in cached]
 
     if to_fetch:
-        print(f"Downloading xG for {len(to_fetch)} seasons from Understat...")
-        raw = asyncio.run(_download_seasons(to_fetch))
+        print(f"Downloading xG for {len(to_fetch)} seasons ({league}) from Understat...")
+        raw = asyncio.run(_download_seasons(league, to_fetch))
         for season, data in raw.items():
             df = _parse_matches(data, season)
-            path = DATA_DIR / f"xg_EPL_{season}.csv"
-            df.to_csv(path, index=False)
+            df.to_csv(DATA_DIR / f"xg_{league}_{season}.csv", index=False)
             all_frames.append(df)
 
     if not all_frames:
         return pd.DataFrame()
-
     return pd.concat(all_frames, ignore_index=True).sort_values("date").reset_index(drop=True)
 
 
-def load_xg(since_season: int = 2014) -> pd.DataFrame:
-    """Load cached xG data from disk."""
+def load_xg(league: str = "EPL", since_season: int = 2014) -> pd.DataFrame:
+    """Load cached xG data from disk for a given league."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     frames = []
-    for path in sorted(DATA_DIR.glob("xg_EPL_*.csv")):
+    for path in sorted(DATA_DIR.glob(f"xg_{league}_*.csv")):
         season = int(path.stem.split("_")[-1])
         if season >= since_season:
             frames.append(pd.read_csv(path, parse_dates=["date"]))
     if not frames:
-        raise FileNotFoundError("No xG data found. Run download_xg() first.")
+        raise FileNotFoundError(f"No xG data for {league}. Run download_xg('{league}') first.")
     return pd.concat(frames, ignore_index=True).sort_values("date").reset_index(drop=True)
 
 
 if __name__ == "__main__":
-    df = download_xg()
-    print(f"\nTotal matches with xG: {len(df)}")
-    print(df.tail(5).to_string(index=False))
+    for league in UNDERSTAT_LEAGUES.values():
+        df = download_xg(league)
+        print(f"{league}: {len(df)} matches with xG\n")

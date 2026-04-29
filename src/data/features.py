@@ -1,29 +1,42 @@
 """
 Feature engineering: merge football-data.co.uk match results with Understat xG,
-build rolling team features (form, xG averages) used by the XGBoost model.
+build rolling team features (form, xG averages) used by the CatBoost model.
 """
 
 import pandas as pd
 import numpy as np
 
 
-# Team name mappings between football-data.co.uk and Understat
+# Understat team names → football-data.co.uk team names (for xG merging)
 _NAME_MAP = {
-    "Manchester United": "Man United",
-    "Manchester City": "Man City",
-    "Tottenham Hotspur": "Tottenham",
-    "Newcastle United": "Newcastle",
-    "West Bromwich Albion": "West Brom",
-    "Queens Park Rangers": "QPR",
-    "Wolverhampton Wanderers": "Wolves",
-    "Sheffield United": "Sheffield United",
-    "Nottingham Forest": "Nott'm Forest",
+    # EPL
+    "Manchester United":      "Man United",
+    "Manchester City":        "Man City",
+    "Tottenham Hotspur":      "Tottenham",
+    "Newcastle United":       "Newcastle",
+    "West Bromwich Albion":   "West Brom",
+    "Queens Park Rangers":    "QPR",
+    "Wolverhampton Wanderers":"Wolves",
+    "Nottingham Forest":      "Nott'm Forest",
     "Brighton & Hove Albion": "Brighton",
-    "Huddersfield Town": "Huddersfield",
-    "Cardiff City": "Cardiff",
-    "Watford": "Watford",
-    "Luton Town": "Luton",
-    "Brentford": "Brentford",
+    "Huddersfield Town":      "Huddersfield",
+    "Cardiff City":           "Cardiff",
+    "Luton Town":             "Luton",
+    # Bundesliga
+    "Bayer Leverkusen":       "Leverkusen",
+    "Borussia Dortmund":      "Dortmund",
+    "Borussia M.Gladbach":    "M'gladbach",
+    "Eintracht Frankfurt":    "Ein Frankfurt",
+    "FC Cologne":             "FC Koln",
+    "FC Heidenheim":          "Heidenheim",
+    "Mainz 05":               "Mainz",
+    "RasenBallsport Leipzig": "RB Leipzig",
+    "VfB Stuttgart":          "Stuttgart",
+    # Serie A
+    "AC Milan":               "Milan",
+    # Ligue 1
+    "Clermont Foot":          "Clermont",
+    "Paris Saint Germain":    "Paris SG",
 }
 
 

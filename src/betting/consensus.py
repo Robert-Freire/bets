@@ -132,6 +132,7 @@ def find_consensus_bets(
                 edge = consensus[side] - book_impl[side]
                 if edge >= min_edge and min_odds <= best_odds <= max_odds:
                     results.append({
+                        "match_idx": row.name,
                         "date": row.get("Date"),
                         "home_team": row.get("HomeTeam"),
                         "away_team": row.get("AwayTeam"),
@@ -187,6 +188,78 @@ def backtest_consensus(
         "n_bets": len(bets),
         "n_won": n_won,
         "win_rate": round(n_won / len(bets), 3),
+        "total_staked": round(total_staked, 0),
+        "total_pnl": round(total_pnl, 0),
+        "roi": round(roi, 4),
+        "final_bankroll": round(bankroll + total_pnl, 0),
+    }
+
+
+def backtest_combined(
+    matches: pd.DataFrame,
+    model_probs: pd.DataFrame,
+    min_kaunitz_edge: float = 0.03,
+    min_model_edge: float = 0.0,
+    bankroll: float = 1000.0,
+    kelly_multiplier: float = 0.5,
+    min_books: int = 3,
+) -> dict:
+    """
+    Dual-filter strategy: bet only when Kaunitz consensus AND CatBoost model both see value.
+
+    model_probs must be indexed like matches (subset only), with columns
+    [home_win, draw, away_win]. Only matches covered by the model participate.
+
+    min_kaunitz_edge : minimum consensus edge (same as pure Kaunitz threshold)
+    min_model_edge   : model_prob - book_implied_prob must be >= this (0 = directional
+                       agreement only; positive = model must also see explicit edge)
+    """
+    from src.betting.kelly import kelly_fraction
+
+    matches_with_consensus = compute_consensus(matches)
+    consensus_bets = find_consensus_bets(
+        matches_with_consensus, min_edge=min_kaunitz_edge, min_books=min_books
+    )
+
+    if consensus_bets.empty or model_probs.empty:
+        return {"n_bets": 0, "roi": 0.0, "n_won": 0, "win_rate": 0.0,
+                "total_staked": 0, "total_pnl": 0, "final_bankroll": bankroll}
+
+    side_to_col = {"H": "home_win", "D": "draw", "A": "away_win"}
+    total_staked = 0.0
+    total_pnl = 0.0
+    n_won = 0
+    n_filtered = 0
+
+    for _, bet in consensus_bets.iterrows():
+        idx = bet["match_idx"]
+        if idx not in model_probs.index:
+            continue
+
+        col = side_to_col[bet["bet_side"]]
+        model_p = model_probs.loc[idx, col]
+        if pd.isna(model_p):
+            continue
+
+        if model_p - bet["book_impl_prob"] < min_model_edge:
+            continue
+
+        n_filtered += 1
+        f = kelly_multiplier * kelly_fraction(bet["consensus_prob"], bet["book_odds"])
+        f = max(0.0, min(f, 0.05))
+        stake = f * bankroll
+        won = bet["result"] == bet["bet_side"]
+        pnl = stake * (bet["book_odds"] - 1) if won else -stake
+        total_staked += stake
+        total_pnl += pnl
+        if won:
+            n_won += 1
+
+    roi = total_pnl / total_staked if total_staked > 0 else 0.0
+    return {
+        "n_bets": n_filtered,
+        "n_won": n_won,
+        "win_rate": round(n_won / n_filtered, 3) if n_filtered > 0 else 0.0,
         "total_staked": round(total_staked, 0),
         "total_pnl": round(total_pnl, 0),
         "roi": round(roi, 4),

@@ -160,7 +160,7 @@ bets/
 │   │   └── pi_ratings.py    # Pi-ratings dynamic system
 │   ├── model/
 │   │   ├── dixon_coles.py   # Poisson model + ρ correction
-│   │   ├── xgboost_model.py # XGBoost W/D/L classifier
+│   │   ├── catboost_model.py # CatBoost W/D/L classifier
 │   │   └── calibration.py   # RPS, Platt scaling
 │   └── betting/
 │       ├── value.py         # Value bet detection
@@ -179,7 +179,7 @@ bets/
 4. `src/model/dixon_coles.py` — Poisson model + ρ
 5. `src/model/calibration.py` — RPS evaluation
 6. `src/betting/value.py` + `kelly.py` — Betting logic
-7. `src/model/xgboost_model.py` — ML enhancement layer
+7. `src/model/catboost_model.py` — ML enhancement layer
 
 ---
 
