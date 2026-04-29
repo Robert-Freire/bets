@@ -36,6 +36,35 @@ Total active development: ~50 hours (one focused week, or 4–6 evenings + weeke
 
 ---
 
+## Review findings (2026-04-29) — read this first
+
+Post-implementation review of phases 0–3 (live) and the partial Phase 5 work that's already in `scan_odds.py`. Bugs and risks for the implementer to fix while completing remaining work.
+
+### Doc/code status discrepancies
+- **CLAUDE.md says Phase 4 Done**, but no `dispersion`, `outlier`, `stdev`, `trimmed`, or `notified.json` symbol exists in the repo. Phase 4 is **not** implemented; treat the doc as wrong, not the code.
+- **CLAUDE.md says Phase 5 Pending**, but `scan_odds.py:247` already requests `markets=h2h,totals,btts` and `find_value_bets` processes all three. Backend is done; only the dashboard, drift-key plumbing, and a few edge-cases are left.
+
+### Bugs to fix while completing Phases 4/5
+
+1. **`app.py:89, 150` — drift key drops `market` and `line`.** Currently `(home, away, kickoff, side)`. Must match the `closing_line.py` key `(home, away, kickoff, side, market, line)` or totals/BTTS bets on the same fixture will collide on lookup.
+2. **`scan_odds.py:522` — `--max-tennis` CLI default is `99`** but `build_sport_list`'s default is `8`. CLI invocation overrides to 99, breaking the Phase 0.5 cap. Set CLI default to `8`.
+3. **`scan_odds.py:580–583` — categorisation lost after risk pipeline.** `kaunitz_bets` and `model_bets` are re-derived using only `edge >= MIN_EDGE`. The original "model agrees" condition for the 2–3% bucket is dropped. Rebuild by tagging each bet with its source bucket *before* the risk pipeline runs, then partition by tag afterwards.
+4. **Notification dedupe never landed.** Same bet flagged across 6 daily scans buzzes 6 times. Implement `logs/notified.json` per Phase 4.4 below.
+5. **Tennis bets get no CLV/drift.** `closing_line.py:281` skips because `LABEL_TO_KEY` lacks tennis tournament keys. Either build a dynamic tennis label→key map (mirror what `scan_odds.py` does), or document that tennis is excluded from CLV until further notice.
+6. **`scan_odds.py:367, 410` — totals and BTTS rows always set `model_signal: "?"`.** The 2–3% model-filtered notification path can therefore never include a totals/BTTS bet. This is correct (no model exists for those markets) but the user-facing docs should say so explicitly.
+7. **`risk.py:20` — `get_bankroll()` reads only `BANKROLL` env var.** CLAUDE.md mentions `config.json`, which doesn't exist. Either add `config.json` support or update CLAUDE.md.
+8. **No stale-price check at close.** `closing_line.py` records Pinnacle close but uses the *originally flagged* `bet.odds` for CLV. If the price has shortened between scan and close, CLV is inflated. Add: at T-1, also re-fetch the flagged book's current price and log it as `your_book_close_odds` so `clv_pct` can later be recomputed against actually-tradable prices.
+9. **`compute_raw_stake` cap of 5% dominates** at typical edges (3–8%). Worth a comment in `risk.py` so future readers don't think Kelly is doing the work — the cap is.
+10. **Potential silent miss in `_drift_direction`** (`app.py:97`) — `int(t_minus_min)` will `KeyError`/`ValueError` if a drift row is missing the field. Defensive default needed.
+
+### Things that are solid (don't refactor for sport)
+- `devig.py` Shin implementation has a correct bisection, sensible fallback, and a tol-based exit. Don't touch.
+- `closing_line.py` market+line keys are consistent across reads/writes.
+- Atomic writes via `os.replace` and `fcntl.flock` are correct.
+- Dedup-on-append in `scan_odds.py:611–630` correctly includes market+line.
+
+---
+
 ## Phase 0 — Hygiene & safety net (~3h)
 
 Stop the bleeding before refactoring anything.
@@ -182,54 +211,191 @@ This is the most important diagnostic phase — it tells you whether you have ed
 
 ---
 
-## Phase 4 — Filters: dispersion, outliers, dedup (~4h)
+## Phase 4 — Filters: dispersion, outliers, dedup (~4h) — **NOT YET IMPLEMENTED**
+
+> Status correction: CLAUDE.md says this is done, but no related code exists. All four sub-tasks below remain TODO.
 
 ### 4.1 Cross-book dispersion filter
 
-- Compute `std(1/odds across books)` for the flagged side.
-- Reject bets where dispersion > threshold (start at 0.04, tune empirically).
-- Add column `dispersion` to `bets.csv` so you can analyse rejected vs accepted.
+- In `scan_odds.py:find_value_bets`, after `cons` is computed for a market, also compute `dispersion = stdev(book_fair_probs[side])` across all books for that side.
+- Reject the bet if `dispersion > MAX_DISPERSION` (start at `0.04`; expose as constant near the top of the file).
+- Add `dispersion` to the `bets.csv` schema for both flagged and (optionally) rejected analysis.
+- Apply for **all three markets** (h2h, totals, btts), not just h2h.
+- Acceptance: a contrived event where books split 50/50 between two distant prices does not flag.
 
 ### 4.2 Outlier-book check
 
-- If the flagged book's `1/odds` is itself >2.5σ from the rest, suspect stale/bad data. Skip.
-- Acceptance: a single book quoting 10.0 when others quote 3.0 doesn't trigger a "huge edge".
+- Before flagging book B at price `p`, compute `z = (book_fair[side] − mean(other_books_fair[side])) / stdev(other_books_fair[side])`.
+- If `|z| > 2.5`, skip. The flagged book is itself the outlier — likely stale or wrong.
+- Add `outlier_z` to the bet dict so it's logged for debugging.
+- Acceptance: insert a synthetic event where a single book quotes `10.0` while 30 others quote `3.0` and confirm no flag.
 
-### 4.3 Trimmed mean / median consensus
+### 4.3 Trimmed mean / median consensus *(optional — defer until Phase 5.5 paper data shows it matters)*
 
-- Add option in `devig.py`: drop top/bottom 10% of book probs before averaging.
-- Compare to current performance in shadow mode for a week before switching default.
+- Add `trimmed_mean(values, trim_pct=0.1)` helper and a `consensus_method="trimmed"` option in `devig.py`.
+- Run as a paper variant in Phase 5.5; only promote to default if it beats Shin+mean by avg CLV.
 
 ### 4.4 Notification dedupe
 
-- Maintain `logs/notified.json` keyed on `(kickoff, home, away, side, book)`.
-- Don't re-notify a bet already pushed in last 12h unless its odds have improved by >2%.
-- Acceptance: same Arsenal-Fulham bet flagged at 02:23 and 02:26 only buzzes the phone once.
+- Maintain `logs/notified.json`: `{(kickoff, home, away, side, book, market, line): {"first_notified_at": iso, "last_odds": float}}`.
+- Skip the ntfy push for any bet whose key has been notified in the last 12 h **unless** the odds have improved by ≥2%.
+- Update the entry on every notification (even skipped ones, so the timer resets only when a real notification fires).
+- Acceptance: same Arsenal–Fulham AWAY at the same odds notified at 02:23 does not re-notify at 02:26.
 
 ---
 
-## Phase 5 — New markets: totals, BTTS (~3h)
+## Phase 5 — New markets: totals, BTTS (~1h remaining)
 
-### 5.1 Add markets to API call
+> Status correction: scanner and closing-line backend are already done. Only dashboard polish + a couple of bug fixes remain.
 
-- Change `fetch_odds` to request `markets=h2h,totals,btts`.
-- Verify The Odds API quota cost is per-call, not per-market (it is).
+### 5.1 ✅ Done — `markets=h2h,totals,btts` in `scan_odds.py:247` and `closing_line.py:76`
 
-### 5.2 Generalise `find_value_bets`
+### 5.2 ✅ Done — `find_value_bets` handles all three markets (`scan_odds.py:266–411`)
 
-- Refactor to handle any market with a known set of outcomes.
-- For totals (Over/Under 2.5), outcomes are `OVER` and `UNDER`. For BTTS, `YES` and `NO`.
-- Apply de-vig per market separately.
+### 5.3 ✅ Done — `bets.csv` schema has `market`, `line`, `pinnacle_cons`, `pinnacle_close_prob`, `clv_pct`. Old rows missing these columns are tolerated by `app.py:load_bets` defaults.
 
-### 5.3 Schema additions to `bets.csv`
+### 5.4 Dashboard polish — TODO
 
-- New columns: `market` (h2h, totals, btts), `line` (e.g. 2.5 for totals), `selection` (e.g. OVER).
-- Backfill `market = "h2h"` for all existing rows.
+- `templates/index.html`: add CSS classes for `.side-OVER`, `.side-UNDER`, `.side-YES`, `.side-NO` so non-h2h sides have colour.
+- For non-h2h rows, render a small market tag in front of the side, e.g. `<span class="market-tag">O/U {{ b.line }}</span> OVER` for totals, `<span class="market-tag">BTTS</span> YES` for BTTS.
+- Apply the change to all three sections (placed-pending, not-placed-pending, settled).
+- Acceptance: a totals OVER 2.5 bet shows `O/U 2.5 OVER` in yellow; a BTTS YES bet shows `BTTS YES` in green.
 
-### 5.4 Dashboard updates
+### 5.5 Drift key bugfix — TODO (covered by Review #1 above)
 
-- Group by market on the dashboard.
-- Acceptance: BTTS YES on EPL Fulham–Crystal Palace shows up correctly.
+- In `app.py`, change `load_drift()` and `summary_stats()` drift-key tuples from `(home, away, kickoff, side)` to `(home, away, kickoff, side, market, line)`.
+- Same change in `index()` route at line 185 where `_drift_dir` is attached to settled bets.
+- Acceptance: a fixture flagged at both totals OVER 2.5 and h2h HOME shows independent drift directions.
+
+### 5.6 Document the model-gate scope — TODO
+
+- Add a note to `CLAUDE.md` and `README.md`: the CatBoost model only produces signals for h2h on the four leagues with xG (EPL, Bundesliga, Serie A, Ligue 1). Totals/BTTS bets and Championship/Bundesliga 2/NBA/tennis bets always show `model_signal=?`, so the 2–3% model-filtered path **only ever fires on h2h in those four leagues**.
+
+---
+
+## Phase 5.5 — Paper portfolios (shadow A/B test) (~4h)
+
+**Goal**: run 7 alternative strategy variants alongside production every scan, log their would-be bets, and let CLV after this weekend's matches tell us which configuration extracts the most edge. No real money — pure data.
+
+**Why before Phase 6**: today is Wednesday; matches start Saturday. Building paper portfolios on flat files now gives one weekend of data. Phase 6 (SQLite) is plumbing that can wait until next week — it would eat Thursday and miss the deadline.
+
+**Deliverables**:
+1. `src/betting/strategies.py` — strategy config + a single `evaluate_strategy(events, sport_key, strategy)` entry point.
+2. `scripts/scan_odds.py` — extended to run all paper strategies on the same events fetched for production (no extra API calls).
+3. `logs/paper/<strategy_name>.csv` — one CSV per strategy, same schema as `bets.csv` plus a `strategy` column.
+4. `scripts/closing_line.py` — extended to update CLV columns in every paper CSV that has matching keys.
+5. `scripts/compare_strategies.py` — Markdown report writer.
+6. CLAUDE.md + PLAN.md status updates.
+
+### 5.5.1 `src/betting/strategies.py`
+
+Define the dataclass and 8 variants. The implementer should follow this schema exactly so the comparison script can introspect:
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    name:                str          # "A_production", "B_strict", etc.
+    label:               str          # human-readable
+    description:         str
+    devig:               str = "shin"           # "shin" | "proportional" | "power"
+    consensus_mode:      str = "mean"           # "mean" | "weighted" | "pinnacle_only"
+    pinnacle_weight:     float = 1.0            # used when consensus_mode == "weighted"
+    exclude_pinnacle:    bool = False           # H variant — don't include Pinnacle in consensus
+    book_filter:         str = "uk_licensed"    # "uk_licensed" | "exchanges_only" | "all"
+    min_edge:            float = 0.03
+    min_books:           int = 20
+    max_dispersion:      float | None = None    # std-dev cap; None = off
+    drop_outlier_book:   bool = False           # |z| > 2.5 outlier-flag-skip
+    require_model_agree: bool = False           # F variant — model must agree
+    model_min_edge:      float = 0.0
+    markets:             tuple = ("h2h", "totals", "btts")
+```
+
+**The 8 variants** (define as a `STRATEGIES: list[StrategyConfig]` at module level):
+
+| Code | name | Differences vs production |
+|---|---|---|
+| **A** | `A_production` | Mirrors current production exactly: `shin`, `mean`, all UK-licensed, 3% edge, no model gate, no dispersion, h2h+totals+btts |
+| **B** | `B_strict` | `consensus_mode="weighted"`, `pinnacle_weight=5.0`, `min_edge=0.05`, `max_dispersion=0.04` |
+| **C** | `C_loose` | `min_edge=0.02`, otherwise like A |
+| **D** | `D_pinnacle_only` | `consensus_mode="pinnacle_only"`, `min_edge=0.03` (edge measured vs Pinnacle's de-vigged prob) |
+| **E** | `E_exchanges_only` | `book_filter="exchanges_only"` (Betfair Ex, Smarkets, Matchbook), `min_edge=0.04` to compensate for commission |
+| **F** | `F_model_primary` | `require_model_agree=True`, `model_min_edge=0.03`, `min_edge=0.0` (model-only — bets where model edge over book ≥3% regardless of consensus) |
+| **G** | `G_proportional` | `devig="proportional"`, otherwise like A — tests whether Shin actually beats proportional in practice |
+| **H** | `H_no_pinnacle` | `exclude_pinnacle=True`, otherwise like A — isolates Pinnacle's contribution |
+
+`evaluate_strategy(events, sport_key, strategy) -> list[bet_dict]` should:
+- Build per-book de-vigged fair probs using `strategy.devig`.
+- For `consensus_mode="weighted"`, use `pinnacle_weight` for Pinnacle, 1.0 elsewhere; for `pinnacle_only`, ignore everything except Pinnacle's row.
+- For `exchanges_only`, filter both consensus and flag candidates to `{betfair_ex_uk, smarkets, matchbook}`.
+- For `exclude_pinnacle`, drop Pinnacle from consensus computation (but the bet target can still be a UK book).
+- For `require_model_agree`, only flag h2h bets where `_model_signal(...)` returns a positive numeric value ≥ `model_min_edge`. Skip totals/btts entirely for variants with this flag.
+- Apply `max_dispersion` and `drop_outlier_book` checks (write helpers in `strategies.py`, not `scan_odds.py`).
+
+Acceptance: `python3 -c "from src.betting.strategies import STRATEGIES; print(len(STRATEGIES))"` prints 8.
+
+### 5.5.2 Wire into `scan_odds.py`
+
+After the production `find_value_bets` loop completes for each sport, call `evaluate_strategy(events, sport_key, strategy)` for every strategy in `STRATEGIES`. Append results to `logs/paper/<strategy.name>.csv` with the same dedup/atomic-write logic that `bets.csv` already uses. Schema = `bets.csv` schema + a `strategy` column.
+
+Important: **do not re-fetch odds.** Reuse the `events` list returned by `fetch_odds`. No extra API quota cost.
+
+Acceptance: after one scan, `ls logs/paper/` shows 8 CSVs; `bets.csv` is unchanged in row count vs. previous behaviour; `wc -l logs/paper/A_production.csv` is roughly equal to `wc -l` on the new rows in `bets.csv` for that scan (variant A should match production within a row or two).
+
+### 5.5.3 Extend `closing_line.py`
+
+Currently iterates `bets.csv`. Modify so the active-bet collection loop also iterates every `logs/paper/*.csv`, and `update_bets_csv_clv()` becomes `update_csv_clv(path, updates)` called once per CSV.
+
+Pinnacle close prob lookup happens once per `(home, away, kickoff, side, market, line)` regardless of how many CSVs include that key — cache it in a dict during the loop.
+
+Acceptance: after a closing-line run, every paper CSV has `pinnacle_close_prob` and `clv_pct` populated for any T-1-window matching rows.
+
+### 5.5.4 `scripts/compare_strategies.py`
+
+Reads `logs/paper/*.csv` and `logs/bets.csv`. Prints a Markdown table to stdout and writes `docs/STRATEGY_COMPARISON.md`.
+
+Per strategy, compute (only over rows with non-empty `clv_pct`):
+- `n_bets` — total flagged
+- `n_with_clv` — settled-by-Pinnacle-close
+- `avg_clv_pct`
+- `pos_clv_pct` — % of bets where CLV > 0
+- `avg_edge` — mean reported edge at flag time
+- `book_dist` — top 3 books by share
+
+Sort by `avg_clv_pct` descending. Highlight the row with the most positive CLV.
+
+Acceptance: `python3 scripts/compare_strategies.py` prints a Markdown table and writes the doc; running before any matches close shows zeros across the board (expected).
+
+### 5.5.5 Cron entry
+
+Add to `crontab -e`:
+
+```
+# Paper portfolios run as part of scan_odds.py automatically — no extra cron needed.
+# Comparison report (manual or weekly):
+0 9 * * 1   cd /home/rfreire/projects/bets && python3 scripts/compare_strategies.py >> logs/strategy_compare.log
+```
+
+Closing-line cron is unchanged; it now updates paper CSVs in addition to `bets.csv`.
+
+### 5.5.6 What NOT to touch
+
+- **Don't refactor `scan_odds.py:find_value_bets`** to use the new strategies module. Keep production untouched until at least 2 weekends of paper data prove the abstraction works. Variant A is a parallel implementation that should produce nearly-identical output — divergence is itself a useful debug signal.
+- **Don't gate production bets on paper results.** Paper is read-only: it logs, doesn't influence ntfy or `bets.csv`.
+- **Don't add results / W-L tracking to paper CSVs in this phase.** CLV against Pinnacle close is the metric; ROI requires manual settlement and can be backfilled later.
+
+### 5.5.7 Acceptance checklist for the implementer
+
+- [ ] `src/betting/strategies.py` exists with 8 `StrategyConfig` entries.
+- [ ] `python3 scripts/scan_odds.py --sports football` produces 8 new paper CSVs (or appends to existing) without errors.
+- [ ] `bets.csv` row count for that scan is identical to pre-change behaviour.
+- [ ] No extra API calls beyond what production already makes (verify by inspecting `X-Requests-Remaining` header before/after).
+- [ ] `python3 scripts/closing_line.py` (manually triggered) writes `pinnacle_close_prob` to paper CSVs at T-1.
+- [ ] `python3 scripts/compare_strategies.py` runs without error and produces a Markdown table.
+- [ ] `docs/PLAN.md` Phase 5.5 marked Done; `CLAUDE.md` implementation table updated.
+- [ ] All review-findings bugs (Review #1–#10) are either fixed in this PR or filed as separate issues with code-comment TODOs.
 
 ---
 
