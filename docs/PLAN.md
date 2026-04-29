@@ -25,8 +25,10 @@ This is a phased plan to roll the recommendations from the review into the syste
 | 2 | Risk management | ~3h | Low |
 | 3 | Diagnostics: CLV + drift | ~5h | Low |
 | 4 | Filters: dispersion, outliers, dedup | ~4h | Low |
+| 4.5 | Test scaffolding (pytest, devig/risk/keys) | ~2h | Low |
 | 5 | New markets: totals, BTTS | ~3h | Low |
-| 6 | Storage: SQLite + UUIDs | ~4h | Medium |
+| 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ~4h | Low |
+| 6 | Storage: SQLite + UUIDs + `sport_key` (closes tennis CLV gap) | ~5h | Medium |
 | 7 | Model overhaul: calibration, daily refresh, ensemble | ~8h | Medium |
 | 8 | Auto-placement: Betfair API + dry-run | ~12h | High |
 | 9 | Infrastructure: Pi/Azure migration | ~6h | Medium |
@@ -50,7 +52,7 @@ Post-implementation review of phases 0–3 (live) and the partial Phase 5 work t
 2. **`scan_odds.py:522` — `--max-tennis` CLI default is `99`** but `build_sport_list`'s default is `8`. CLI invocation overrides to 99, breaking the Phase 0.5 cap. Set CLI default to `8`.
 3. **`scan_odds.py:580–583` — categorisation lost after risk pipeline.** `kaunitz_bets` and `model_bets` are re-derived using only `edge >= MIN_EDGE`. The original "model agrees" condition for the 2–3% bucket is dropped. Rebuild by tagging each bet with its source bucket *before* the risk pipeline runs, then partition by tag afterwards.
 4. **Notification dedupe never landed.** Same bet flagged across 6 daily scans buzzes 6 times. Implement `logs/notified.json` per Phase 4.4 below.
-5. **Tennis bets get no CLV/drift.** `closing_line.py:281` skips because `LABEL_TO_KEY` lacks tennis tournament keys. Either build a dynamic tennis label→key map (mirror what `scan_odds.py` does), or document that tennis is excluded from CLV until further notice.
+5. **Tennis bets produce no CLV/drift.** `closing_line.py:281` skips tennis because `LABEL_TO_KEY` is a static dict keyed on the human-readable `title` field, which doesn't include the dynamically-discovered tennis tournaments. Root cause: `bets.csv` stores `sport: "EPL"` (the label) instead of `sport_key: "soccer_epl"` — so the closing-line script has to round-trip back from label to key. **Fix in Phase 6** (schema 6.1.1): store `sport_key` directly. Until then, tennis is excluded from CLV; document in `CLAUDE.md`.
 6. **`scan_odds.py:367, 410` — totals and BTTS rows always set `model_signal: "?"`.** The 2–3% model-filtered notification path can therefore never include a totals/BTTS bet. This is correct (no model exists for those markets) but the user-facing docs should say so explicitly.
 7. **`risk.py:20` — `get_bankroll()` reads only `BANKROLL` env var.** CLAUDE.md mentions `config.json`, which doesn't exist. Either add `config.json` support or update CLAUDE.md.
 8. **No stale-price check at close.** `closing_line.py` records Pinnacle close but uses the *originally flagged* `bet.odds` for CLV. If the price has shortened between scan and close, CLV is inflated. Add: at T-1, also re-fetch the flagged book's current price and log it as `your_book_close_odds` so `clv_pct` can later be recomputed against actually-tradable prices.
@@ -244,6 +246,81 @@ This is the most important diagnostic phase — it tells you whether you have ed
 
 ---
 
+## Phase 4.5 — Test scaffolding (~2h, do before Phase 5.5)
+
+**Why now**: 4 of the 10 bugs surfaced in this review (Review #1, #3, #10, plus the missing dispersion/outlier work in Phase 4) would have been caught by tests. Phase 5.5 introduces 8 strategy variants with overlapping logic — without tests, subtle differences between variants will only surface on Sunday night when results come in. Phases 6 (SQLite migration) and 7 (model overhaul) are high-risk refactors that need a regression net.
+
+**Scope**: pure-function tests only. No Odds API mocking, no ntfy, no Flask. The cost of mocking external systems outweighs the bug-catching value at this stage.
+
+### 4.5.1 Test infrastructure
+
+- Add `pytest` to project deps (no `requirements.txt` exists yet — create one with `pytest` and the existing imports `flask`, `pandas`, `numpy`, `scipy`, `aiohttp`, `understat`, `catboost`).
+- Create `tests/` directory with:
+  - `tests/__init__.py` (empty)
+  - `tests/conftest.py` — shared fixtures.
+  - `tests/fixtures/sample_event.json` — one realistic Odds API event with ~30 bookmakers covering h2h+totals+btts. Capture this from a real API response and scrub the API key.
+- Add `pytest.ini` at repo root: `testpaths = tests`, `pythonpath = .`.
+- Acceptance: `pytest` from repo root runs and finds zero tests initially without errors.
+
+### 4.5.2 `tests/test_devig.py` — pure math, ~6 tests
+
+- `test_shin_no_overround_returns_unchanged`: input probs that already sum to 1.0 → identical output (within `1e-9`).
+- `test_shin_5pct_overround_2way`: e.g. probs `[0.55, 0.50]` (sum 1.05) → fair output sums to 1.0 within `1e-6`.
+- `test_shin_5pct_overround_3way`: 1X2 example → output sums to 1.0, ordering preserved (favourite stays the favourite).
+- `test_shin_falls_back_to_proportional_on_pathological_input`: extreme overround case where bisection fails → returns proportional result, doesn't raise.
+- `test_proportional_normalises_sum`: any positive-sum input → output sums to 1.0.
+- `test_power_two_way_convergence`: 2-way market with known margin → power method converges within `max_iter`.
+
+### 4.5.3 `tests/test_risk.py` — pipeline composition, ~5 tests
+
+- `test_round_stake_below_half_rounding_drops`: stake `£2` with rounding `5` → returns `0.0`.
+- `test_round_stake_to_nearest_5`: `£12.50` → `£10` or `£15` (specify which the implementation chose, lock it down).
+- `test_fixture_cap_scales_within_fixture`: two bets on same `(home, away)` summing to 8% bankroll → scaled to ≤5%; bets on *different* fixtures unaffected.
+- `test_portfolio_cap_scales_uniformly`: 30 bets summing to 30% bankroll → scaled to ≤15%; relative ratios preserved.
+- `test_drawdown_multiplier_halves_when_15pct_below_high_water`: bankroll `£850`, high-water `£1000` → multiplier `0.5`; bankroll `£900` → `1.0`.
+- `test_pipeline_order`: drawdown applied **before** caps, rounding **last**. (Property check via constructed inputs.)
+
+### 4.5.4 `tests/test_strategies.py` — variant behaviour, ~10 tests (write alongside Phase 5.5)
+
+Use `tests/fixtures/sample_event.json`. For each strategy variant A–H, assert:
+
+- `test_variant_A_matches_production_h2h_count`: variant A on the sample event produces ≤1 bet difference vs. the legacy `find_value_bets` output. (Variant A is the regression check on the abstraction.)
+- `test_variant_C_loose_finds_more_bets_than_A`: same fixture, lower edge threshold → equal-or-more bets.
+- `test_variant_E_exchanges_only_no_williamhill`: no flagged bet has `book == "williamhill"`.
+- `test_variant_D_pinnacle_only_uses_pinnacle_devig`: edge is computed against Pinnacle's de-vigged prob, not market mean. Verify by running with a synthetic event where Pinnacle has a deliberately weird price.
+- `test_variant_F_model_primary_skips_totals_btts`: only h2h bets flagged.
+- `test_variant_F_requires_positive_model_edge`: with `_MODEL_SIGNALS = {}`, variant F flags nothing.
+- `test_variant_H_excludes_pinnacle_from_consensus`: with a synthetic event where dropping Pinnacle changes the mean, variant H's consensus differs from variant A's by the expected amount.
+- `test_dispersion_filter_blocks_high_dispersion`: synthetic event where book probs split 50/50 → variant B (max_dispersion 0.04) flags 0 bets, variant A flags ≥1.
+- `test_outlier_book_filter_blocks_outlier`: synthetic event with one rogue book at z>2.5 → no bet flagged AT that book.
+- `test_strategy_count_is_8`: `len(STRATEGIES) == 8` and all `name` values are unique.
+
+### 4.5.5 `tests/test_keys.py` — contract tests, ~3 tests
+
+These guard against the Review #1 bug (drift-key dropping market/line).
+
+- `test_drift_key_includes_market_and_line`: `app.py:load_drift` keys are 6-tuples ending in `(market, line)`. Implementer should expose a `_drift_key(row)` helper to make this testable.
+- `test_closing_line_key_matches_drift_key`: same key shape used by `closing_line.py:load_existing_closing_keys` and `app.py:load_drift`.
+- `test_bets_csv_dedup_key_matches`: `scan_odds.py`'s dedup key on append is the same shape.
+
+### 4.5.6 `tests/test_smoke.py` — one integration check
+
+- `test_app_starts_and_renders_index`: Flask test client GETs `/` with empty `bets.csv` → 200 + non-empty body. Catches template rendering errors after the Phase 5 dashboard polish.
+
+### 4.5.7 CI hook (optional but recommended)
+
+Add a GitHub Action (or local pre-commit) that runs `pytest` on push. If GitHub isn't being used, add `make test` and document running it before each PR.
+
+### 4.5.8 Acceptance checklist
+
+- [ ] `pytest` runs from repo root with zero warnings.
+- [ ] All listed tests pass against current code (excluding strategy tests, which land with Phase 5.5).
+- [ ] At least one test would have caught Review-finding #1 (drift-key collision).
+- [ ] `requirements.txt` exists and lists `pytest`.
+- [ ] `pytest.ini` configures testpaths and pythonpath.
+
+---
+
 ## Phase 5 — New markets: totals, BTTS (~1h remaining)
 
 > Status correction: scanner and closing-line backend are already done. Only dashboard polish + a couple of bug fixes remain.
@@ -394,12 +471,17 @@ Closing-line cron is unchanged; it now updates paper CSVs in addition to `bets.c
 - [ ] No extra API calls beyond what production already makes (verify by inspecting `X-Requests-Remaining` header before/after).
 - [ ] `python3 scripts/closing_line.py` (manually triggered) writes `pinnacle_close_prob` to paper CSVs at T-1.
 - [ ] `python3 scripts/compare_strategies.py` runs without error and produces a Markdown table.
+- [ ] **`tests/test_strategies.py` from Phase 4.5 passes** — all 10 variant tests green. Phase 5.5 cannot be merged with failing tests.
 - [ ] `docs/PLAN.md` Phase 5.5 marked Done; `CLAUDE.md` implementation table updated.
 - [ ] All review-findings bugs (Review #1–#10) are either fixed in this PR or filed as separate issues with code-comment TODOs.
 
 ---
 
-## Phase 6 — Storage: SQLite + UUIDs (~4h)
+## Phase 6 — Storage: SQLite + UUIDs + sport_key column (~5h)
+
+**Why this phase also closes the tennis CLV gap**: today `bets.csv` stores the human label (`sport: "EPL"`) and `closing_line.py` translates back to a sport key via a static dict (`LABEL_TO_KEY`) that excludes tennis tournaments because their titles are dynamic. By moving to a SQLite schema where `sport_key` is a first-class column populated at scan time (`soccer_epl`, `tennis_atp_madrid`, etc.), the closing-line script can iterate over distinct sport keys directly — and tennis bets get drift + CLV automatically.
+
+**Note for the implementer**: this phase covers production `bets.csv` *and* the 8 paper CSVs from Phase 5.5. Do the migration once across all of them.
 
 ### 6.1 Migrate `bets.csv` to SQLite
 
@@ -407,20 +489,116 @@ Closing-line cron is unchanged; it now updates paper CSVs in addition to `bets.c
 - Each bet has a `bet_uuid` PK, not a row index.
 - Migrate existing CSV: read all rows, assign UUIDs, write to SQLite.
 
-### 6.2 Refactor scanner and dashboard
+### 6.1.1 Schema (the contract)
 
-- `scripts/scan_odds.py` writes via `INSERT OR IGNORE` keyed on a unique constraint `(kickoff, home, away, side, book, market)`.
-- `app.py` queries SQLite. Routes use `bet_uuid` instead of int index.
-- Add `csv_export` route for backwards compat — anyone who downloads a CSV still can.
+```sql
+CREATE TABLE bets (
+    bet_uuid             TEXT PRIMARY KEY,
+    scanned_at           TEXT NOT NULL,        -- ISO UTC
+    strategy             TEXT NOT NULL,        -- "production" or strategy name from Phase 5.5
+    sport_key            TEXT NOT NULL,        -- "soccer_epl", "tennis_atp_madrid", "basketball_nba"
+    sport_label          TEXT NOT NULL,        -- "EPL", "ATP Madrid Open" — preserved for display
+    home                 TEXT NOT NULL,
+    away                 TEXT NOT NULL,
+    kickoff              TEXT NOT NULL,        -- ISO UTC
+    market               TEXT NOT NULL,        -- "h2h" | "totals" | "btts"
+    line                 REAL,                 -- NULL for h2h/btts; e.g. 2.5 for totals
+    side                 TEXT NOT NULL,        -- "HOME" | "DRAW" | "AWAY" | "OVER" | "UNDER" | "YES" | "NO"
+    book                 TEXT NOT NULL,
+    odds                 REAL NOT NULL,
+    edge                 REAL NOT NULL,
+    consensus            REAL NOT NULL,
+    pinnacle_cons        REAL,
+    n_books              INTEGER NOT NULL,
+    confidence           TEXT NOT NULL,
+    model_signal         TEXT,
+    dispersion           REAL,                 -- from Phase 4.1, NULL if not computed
+    suggested_stake      REAL NOT NULL,
+    actual_stake         REAL,                 -- NULL until placed
+    result               TEXT,                 -- NULL | "W" | "L" | "V"
+    pnl                  REAL,
+    pinnacle_close_prob  REAL,
+    your_book_close_odds REAL,                 -- new from Review #8
+    clv_pct              REAL,
+    UNIQUE (strategy, kickoff, home, away, side, book, market, line)
+);
 
-### 6.3 Dashboard UUID-safe URLs
+CREATE INDEX idx_bets_strategy ON bets (strategy);
+CREATE INDEX idx_bets_sport_key ON bets (sport_key);
+CREATE INDEX idx_bets_kickoff ON bets (kickoff);
 
-- `/update/<uuid>` instead of `/update/<int>`.
+CREATE TABLE drift (
+    drift_uuid    TEXT PRIMARY KEY,
+    bet_uuid      TEXT NOT NULL,               -- FK to bets
+    captured_at   TEXT NOT NULL,
+    t_minus_min   INTEGER NOT NULL,
+    your_book_odds REAL,
+    pinnacle_odds REAL,
+    n_books       INTEGER,
+    FOREIGN KEY (bet_uuid) REFERENCES bets (bet_uuid)
+);
+
+CREATE TABLE bankroll_history (
+    snapshot_at  TEXT PRIMARY KEY,
+    bankroll     REAL NOT NULL,
+    high_water   REAL NOT NULL
+);
+```
+
+### 6.1.2 Migration script `scripts/migrate_to_sqlite.py`
+
+- Reads `logs/bets.csv` and every `logs/paper/*.csv`. Each row gets a freshly-generated `bet_uuid` (`uuid.uuid4().hex`).
+- For production rows, set `strategy = "production"`. For paper rows, set `strategy = <filename stem>` (e.g. `"A_production"`, `"B_strict"`).
+- Backfill `sport_key` by reverse-lookup from `sport_label` using `LABEL_TO_KEY` from `closing_line.py` extended to include the historical tennis labels found in the CSV. For unmappable rows, set `sport_key = sport_label.lower().replace(' ', '_')` and log a warning.
+- Backfill `drift` table from `logs/drift.csv` by joining on `(home, away, kickoff, side, market, line)` to get `bet_uuid`.
+- Run migration in a transaction; on any error, rollback and leave CSVs untouched.
+- Acceptance: `SELECT COUNT(*) FROM bets WHERE strategy='production'` equals the row count of `bets.csv`. Same for each paper CSV.
+
+### 6.2 Refactor scanner
+
+- `scripts/scan_odds.py` and the strategies-loop append via `INSERT OR IGNORE` (the `UNIQUE` constraint above replaces the existing dedup logic).
+- Both production and paper writes flow through one helper: `db.insert_bet(bet_dict, strategy)`.
+- **Schema additions on the bet dict**: `sport_key` (always set from the API call's sport), `sport_label` (display name), `dispersion` (computed in Phase 4.1, `None` if not).
+
+### 6.3 Refactor closing-line and dashboard
+
+- `closing_line.py` queries `SELECT DISTINCT sport_key FROM bets WHERE pinnacle_close_prob IS NULL AND kickoff BETWEEN ? AND ?` — no more `LABEL_TO_KEY` map. **Tennis works automatically.**
+- Closing-line writes `pinnacle_close_prob`, `your_book_close_odds`, `clv_pct` via `UPDATE` keyed on `bet_uuid` — replaces the per-CSV walk from Phase 5.5.3.
+- `app.py`: `load_bets()` becomes `db.fetch_bets()`. Routes use `bet_uuid` (string) not int index. `/update/<bet_uuid>` replaces `/update/<int:bet_id>`.
+- Dashboard adds a `strategy` filter dropdown (default: `production`).
+
+### 6.4 Concurrency
+
+- SQLite `journal_mode=WAL` set on first open so the dashboard and scanner can read+write concurrently without the existing fcntl locking.
+- Drop the `fcntl.flock` calls — WAL handles it.
 - Acceptance: scanner and dashboard concurrent run for an hour — no race, no duplicate, no lost edits.
 
-### 6.4 Keep CSV export for analysis
+### 6.5 CSV export for analysis
 
-- Nightly cron: dump SQLite to `logs/bets_export.csv` for ad-hoc analysis in Excel/pandas.
+- Nightly cron: `python3 scripts/export_csv.py` dumps `bets`, `drift`, and per-strategy bet tables to `logs/exports/<date>/*.csv` for ad-hoc analysis. Keep last 30 days.
+- The dashboard gets a "Download CSV" button that streams a snapshot.
+
+### 6.6 Tennis CLV verification (the bonus deliverable)
+
+- After migration + closing-line refactor, run an active tennis tournament through one full scan + closing-line cycle. Confirm Pinnacle close prob and CLV land in the `bets` table for tennis rows.
+- Acceptance: `SELECT sport_key, COUNT(*), AVG(clv_pct) FROM bets WHERE sport_key LIKE 'tennis_%' AND clv_pct IS NOT NULL GROUP BY sport_key` returns rows.
+- Update `CLAUDE.md` to remove the "tennis CLV gap" caveat.
+
+### 6.7 Tests (extends Phase 4.5)
+
+- `tests/test_db.py`: schema migration round-trip; `INSERT OR IGNORE` upsert behaviour; concurrent read+write under WAL.
+- `tests/test_keys.py`: contract test now asserts SQLite UNIQUE constraint matches the in-memory dedup key shape.
+- Acceptance: `pytest tests/test_db.py` passes.
+
+### 6.8 Acceptance checklist
+
+- [ ] `logs/bets.db` exists; `logs/bets.csv` and `logs/paper/*.csv` archived to `logs/archive/<date>/`.
+- [ ] All historical bets reachable via SQL with correct `strategy` and `sport_key`.
+- [ ] One full scan → closing-line → settle round-trip works end-to-end.
+- [ ] Tennis bet from a live tournament has `clv_pct` populated within ~10 min of kickoff.
+- [ ] `app.py` works against the DB; dashboard renders identically (visually) to the CSV-backed version.
+- [ ] All Phase 4.5 tests still pass; new `tests/test_db.py` tests pass.
+- [ ] CLAUDE.md updated: tennis caveat removed; storage section says SQLite.
 
 ---
 
