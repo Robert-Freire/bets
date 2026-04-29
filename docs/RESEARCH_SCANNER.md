@@ -24,8 +24,8 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.0 | Cron-auth smoke test (no code) | done | main / c670a5e | CLAUDE_CMD verified; median 3.7s; model=claude-opus-4-7; PATH needs /home/rfreire/.local/bin. (Bundled into 11.1's commit.) |
 | 11.1 | Source list + queries (data only) | done | main / c670a5e | 37 URLs (25 Tier-A + 12 Tier-B); 7 queries; spec URL count corrected 28→25. |
 | 11.2 | Fetcher module | done | main / 1f1c1b1 → b911df9 | FetchResult + 6 handlers; review fixed: github topic parser broken on real HTML, 4xx silently parsed, Wikipedia nav cruft, 501 missing. 21/21 fetch tests pass. |
-| 11.3 | Dedup state + pending-file builder | pending | — | `research_seen.json` + assembler. |
-| 11.4 | Claude subprocess wrapper | pending | — | Depends on 11.0 + 11.3. |
+| 11.3 | Dedup state + pending-file builder | done | main / HEAD | `load_seen/save_seen/is_changed/update_seen/assemble_pending`; 19/19 tests pass; atomic write + 200 KB batching verified. |
+| 11.4 | Claude subprocess wrapper | done | main / HEAD | call_claude + call_claude_batched; 8/8 tests; real smoke returned findings; PROMPT_TEMPLATE byte-for-byte match; log line confirmed. |
 | 11.5 | Feed writer | pending | — | Prepends to `RESEARCH_FEED.md`. |
 | 11.6 | Top-level CLI + bootstrap mode | pending | — | First end-to-end run. |
 | 11.7 | Open-search backends | pending | — | Independent of 11.8. |
@@ -441,9 +441,9 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 5. Tests cover: changed/unchanged dedup, atomic write (kill-mid-write doesn't corrupt — simulate with patched `os.replace`), batching at 200 KB.
 
 **Acceptance.**
-- [ ] Tests pass.
-- [ ] Manual: write a `seen.json` with one entry, re-run `assemble_pending` with same hash → returns empty list.
-- [ ] 200 KB cap correctly produces ≥2 segments when given 350 KB of input.
+- [x] Tests pass (19/19).
+- [x] Manual: write a `seen.json` with one entry, re-run `assemble_pending` with same hash → returns empty list.
+- [x] 200 KB cap correctly produces ≥2 segments when given 350 KB of input.
 
 **Reviewer focus.** Atomic-write correctness; ISO 8601 UTC consistency; segment-boundary logic at the 200 KB cap.
 
@@ -478,10 +478,10 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
    - Batched: 3 segments → 3 shim invocations, joined output.
 
 **Acceptance.**
-- [ ] Tests pass with fake shim.
-- [ ] Real-world smoke: `python3 -c "from scripts.research_lib.claude_call import call_claude; print(call_claude('## Source: https://example.com\nThe sky is blue.\n'))"` returns recognisable findings markdown (or "(no actionable findings)").
-- [ ] `logs/research.log` has one line per call with correct fields.
-- [ ] PROMPT_TEMPLATE matches this doc byte-for-byte (`diff` clean).
+- [x] Tests pass with fake shim (8/8).
+- [x] Real-world smoke: returned `(no actionable findings)` as expected.
+- [x] `logs/research.log` has one line per call with correct fields.
+- [x] PROMPT_TEMPLATE matches this doc byte-for-byte (`diff` clean).
 
 **Reviewer focus.** Diff PROMPT_TEMPLATE against this doc. Shim test must actually exercise stdin piping (not just argv).
 
