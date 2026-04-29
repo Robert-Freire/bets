@@ -28,7 +28,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.4 | Claude subprocess wrapper | done | main / HEAD | call_claude + call_claude_batched; 8/8 tests; real smoke returned findings; PROMPT_TEMPLATE byte-for-byte match; log line confirmed. |
 | 11.5 | Feed writer | done | main / HEAD | `write_findings`; 13/13 tests pass; atomic write, banner-once, newest-first verified. |
 | 11.6 | Top-level CLI + bootstrap mode | done | main / HEAD | CLI + bootstrap; 37 findings on first run; dedup confirmed; kill switch verified; no hard-coded paths. |
-| 11.7 | Open-search backends | done | main / HEAD | `search.py`; 4 backends (arxiv/hn/github/ddg); 10/10 tests pass; dry-run confirmed 35 URLs × 7 queries; backend tags in feed. |
+| 11.7 | Open-search backends | done | main / HEAD | `search.py`; 4 backends (arxiv/hn/github/ddg); 13/13 tests pass; live `--mode open` confirmed; backend tags in feed; 4-metric dedup log; GITHUB_TOKEN auth. |
 | 11.8 | Dashboard tile | pending | — | Independent of 11.7. |
 | 11.9 | Cron + production hardening | pending | — | After 11.6 (preferably 11.7+11.8). |
 | 11.10 | Optional follow-ups | deferred | — | Post-MVP only. |
@@ -172,7 +172,7 @@ These are the source-of-truth lists. Phase 11.1 copies them into committed `.md`
 |---|---|
 | GitHub topic | `https://github.com/topics/value-betting` |
 | GitHub topic | `https://github.com/topics/sports-betting?o=desc&s=updated` |
-| arXiv search | `http://export.arxiv.org/api/query?search_query=all:%22value+betting%22+OR+all:%22closing+line+value%22&sortBy=submittedDate&max_results=20` |
+| arXiv search | `https://export.arxiv.org/api/query?search_query=all:%22value+betting%22+OR+all:%22closing+line+value%22&sortBy=submittedDate&max_results=20` |
 | HN search | `https://hn.algolia.com/api/v1/search_by_date?query=sports+betting+strategy&hitsPerPage=20` |
 | Reddit | `https://www.reddit.com/r/algobetting/.json` |
 | Reddit (top week) | `https://www.reddit.com/r/sportsbook/top/.json?t=week` |
@@ -579,7 +579,7 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 
 **Tasks.**
 1. Per-backend:
-   - **arXiv**: `http://export.arxiv.org/api/query?search_query=all:{q_url_encoded}&sortBy=submittedDate&max_results=10`. Parse Atom `<id>` URLs.
+   - **arXiv**: `https://export.arxiv.org/api/query?search_query=all:{q_url_encoded}&sortBy=submittedDate&max_results=10`. Parse Atom `<id>` URLs.
    - **HN**: `https://hn.algolia.com/api/v1/search_by_date?query={q}&hitsPerPage=10`. Extract `hits[].url` (skip if null).
    - **GitHub**: `https://api.github.com/search/repositories?q={q}&sort=updated&per_page=10`. Extract `items[].html_url`.
    - **DDG**: `https://duckduckgo.com/html/?q={q}`. Scrape `.result__a` href. Fragile — wrap in try/except, log + return `[]` on parse failure.
@@ -587,13 +587,14 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 3. Filter against `research_seen.json` — only fetch URLs not seen.
 4. Cap discovered URLs per query at 5 (avoid runaway).
 5. Route through fetch → assemble → claude → feed pipeline.
-6. Tag findings: prepend `[backend:arxiv]` to each source heading in the assembled pending so Claude's output preserves channel attribution.
+6. Tag findings: backend tags are post-injected into Claude's output headings (`### [backend:X] <url>`) so the feed is searchable by channel.
+7. **GitHub auth**: set `GITHUB_TOKEN` env var to use authenticated requests (60 req/hr → 5000 req/hr). Without it, unauthenticated search caps at 10 req/min and will rate-limit on multi-query runs.
 
 **Acceptance.**
-- [ ] Tests with canned API responses for each backend.
-- [ ] `--mode open` runs all 7 queries × 4 backends, dedupes, fetches up to 5 new URLs/query.
-- [ ] Output sections in `RESEARCH_FEED.md` show backend tag.
-- [ ] Log records dedup hit rate (URLs found vs. URLs fetched).
+- [x] Tests with canned API responses for each backend.
+- [x] `--mode open` runs all 7 queries × 4 backends, dedupes, fetches up to 5 new URLs/query.
+- [x] Output sections in `RESEARCH_FEED.md` show backend tag.
+- [x] Log records dedup hit rate (URLs found vs. URLs fetched).
 
 **Reviewer focus.** Dedup hit rate. If we're always fetching >50% already-seen URLs, the Tier-A corpus is overlapping with discovery and we should narrow queries.
 

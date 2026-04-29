@@ -5,6 +5,42 @@ See docs/RESEARCH_SCANNER.md for the spec.
 
 ---
 
+## Run 2026-04-29 20:03 UTC (mode: open) — 0 findings
+
+### [backend:arxiv] http://arxiv.org/abs/2604.25916v1
+(no actionable findings)
+
+### [backend:arxiv] http://arxiv.org/abs/2604.25915v1
+(no actionable findings)
+
+### [backend:arxiv] http://arxiv.org/abs/2604.19104v1
+(no actionable findings)
+
+
+---
+
+## Run 2026-04-29 20:01 UTC (mode: open) — 3 findings
+
+### http://arxiv.org/abs/2604.25918v1
+(no actionable findings)
+
+### http://arxiv.org/abs/2604.25917v1
+(no actionable findings)
+
+### http://arxiv.org/abs/2604.21087v2
+- **STRATEGY** — Quantify model error of Expected Threat (xT) before trusting outputs; log-normal error scales with state count and training points. Adopt-ability: 2. Only relevant if/when an xT-style possession-value model feeds the CatBoost pipeline (not currently in production); add an error-vs-training-size sanity check before swapping any xT features in.
+- **EVIDENCE** — Model error is approximately log-normally distributed and bounded by training-point/state-count thresholds; ground truth unobservable. Affects: future Phase 7 model overhaul (calibration), not the live consensus scanner.
+- **RISK** — Suggests our current CatBoost signal (RPS 0.2137 vs book 0.1957, no edge) may be unvalidated against a similar quality-floor framework; we should formalise a model-error gate before letting any model-derived signal lower the edge threshold to 2%.
+
+### http://arxiv.org/abs/2604.20285v1
+(no actionable findings)
+
+### http://arxiv.org/abs/2604.25906v1
+(no actionable findings)
+
+
+---
+
 ## Run 2026-04-29 (mode: curated) — 0 findings
 
 ### https://hn.algolia.com/api/v1/search_by_date?query=sports+betting+strategy&hitsPerPage=20

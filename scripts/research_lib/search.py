@@ -1,6 +1,7 @@
 """Open-search backends for research scanner (Phase 11.7)."""
 
 import logging
+import os
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -44,7 +45,7 @@ def _get(url: str, extra_headers: dict | None = None) -> requests.Response:
 
 def _arxiv(query: str) -> list[str]:
     q = urllib.parse.quote(f"all:{query}")
-    url = f"http://export.arxiv.org/api/query?search_query={q}&sortBy=submittedDate&max_results=10"
+    url = f"https://export.arxiv.org/api/query?search_query={q}&sortBy=submittedDate&max_results=10"
     r = _get(url)
     r.raise_for_status()
     root = ET.fromstring(r.text)
@@ -67,7 +68,11 @@ def _hn(query: str) -> list[str]:
 def _github(query: str) -> list[str]:
     q = urllib.parse.quote(query)
     url = f"https://api.github.com/search/repositories?q={q}&sort=updated&per_page=10"
-    r = _get(url, {"Accept": "application/vnd.github+json"})
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    r = _get(url, headers)
     r.raise_for_status()
     return [item["html_url"] for item in r.json().get("items", []) if item.get("html_url")]
 

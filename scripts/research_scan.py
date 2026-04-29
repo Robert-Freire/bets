@@ -12,6 +12,7 @@ Kill switch: RESEARCH_SCAN_ENABLE must be set to "1" (or any non-zero string).
 import argparse
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -100,6 +101,15 @@ def _run_curated(
     return all_results, total_bytes
 
 
+def _inject_backend_tags(claude_output: str, url_backend: dict[str, str]) -> str:
+    """Replace '### <url>' headings in Claude output with '### [backend:X] <url>'."""
+    def _replace(m: re.Match) -> str:
+        url = m.group(1)
+        tag = url_backend.get(url)
+        return f"### [backend:{tag}] {url}" if tag else m.group(0)
+    return re.sub(r"^### (https?://\S+)", _replace, claude_output, flags=re.MULTILINE)
+
+
 def _run_open_search(
     seen: dict,
     dry_run: bool,
@@ -114,22 +124,32 @@ def _run_open_search(
 
     for query in queries:
         found_total = 0
-        query_new: dict[str, str] = {}
+        query_new: dict[str, str] = {}  # url -> backend, deduped across backends + prior queries
         for backend in BACKENDS:
             urls = search(query, backend)
             found_total += len(urls)
             for url in urls:
-                if url not in url_backend and url not in seen and url not in query_new:
+                if url not in url_backend and url not in query_new:
                     query_new[url] = backend
 
-        capped = dict(list(query_new.items())[:5])
-        url_backend.update(capped)
+        new_in_run = len(query_new)
+        query_unseen = {u: b for u, b in query_new.items() if u not in seen}
+        new_after_seen = len(query_unseen)
 
-        fetch_count = len(capped)
-        dedup_rate = (found_total - fetch_count) / max(found_total, 1) * 100
+        # Cap: max 2 per backend, 5 total — prevents arXiv monopolising all slots
+        capped: dict[str, str] = {}
+        per_backend_count: dict[str, int] = {}
+        for url, backend in query_unseen.items():
+            if len(capped) >= 5:
+                break
+            if per_backend_count.get(backend, 0) < 2:
+                capped[url] = backend
+                per_backend_count[backend] = per_backend_count.get(backend, 0) + 1
+
+        url_backend.update(capped)
         _log.info(
-            "open-search query=%r backends_found=%d new_urls=%d dedup_rate=%.0f%%",
-            query, found_total, fetch_count, dedup_rate,
+            "open-search query=%r found=%d new_in_run=%d new_after_seen=%d fetched=%d",
+            query, found_total, new_in_run, new_after_seen, len(capped),
         )
 
     if max_sources is not None:
@@ -209,7 +229,7 @@ def main() -> None:
             changed = [r for r in all_results if force or is_changed(r.url, r.body_hash, seen)]
             ok_changed = [r for r in changed if r.status == "ok"]
             for r in all_results:
-                update_seen(seen, r)
+                update_seen(seen, r)  # track all (incl. skip/error) to keep fetched_at fresh
 
             if ok_changed:
                 segments = assemble_pending(ok_changed)
@@ -228,6 +248,7 @@ def main() -> None:
             if ok_results:
                 segments = assemble_pending(ok_results, tags=tags)
                 claude_out = call_claude_batched(segments)
+                claude_out = _inject_backend_tags(claude_out, tags)
                 open_label = "open" if args.mode == "open" else "all:open"
                 count = write_findings(claude_out, open_label, run_at)
                 total_count += count

@@ -76,6 +76,30 @@ def test_search_github_skips_null_html_url(monkeypatch):
     assert all("github.com" in u for u in urls)
 
 
+def test_search_github_sends_auth_header_when_token_set(monkeypatch):
+    data = json.loads((FIXTURES / "search_github.json").read_text())
+    captured = {}
+    def _fake_get(url, headers=None, **kw):
+        captured["headers"] = headers or {}
+        return _Resp(json_data=data)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token-xyz")
+    monkeypatch.setattr(search_mod.requests, "get", _fake_get)
+    search("value betting", "github")
+    assert captured["headers"].get("Authorization") == "Bearer test-token-xyz"
+
+
+def test_search_github_no_auth_header_when_no_token(monkeypatch):
+    data = json.loads((FIXTURES / "search_github.json").read_text())
+    captured = {}
+    def _fake_get(url, headers=None, **kw):
+        captured["headers"] = headers or {}
+        return _Resp(json_data=data)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(search_mod.requests, "get", _fake_get)
+    search("value betting", "github")
+    assert "Authorization" not in captured["headers"]
+
+
 # ── DDG ───────────────────────────────────────────────────────────────────────
 
 def test_search_ddg_extracts_result_a_links(monkeypatch):
@@ -117,6 +141,16 @@ def test_assemble_pending_with_tags_adds_backend_prefix():
     segments = assemble_pending([r], tags={"https://example.com/paper": "arxiv"})
     assert len(segments) == 1
     assert "[backend:arxiv] https://example.com/paper" in segments[0]
+
+
+def test_inject_backend_tags_rewrites_matching_headings():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import importlib, research_scan as rs_mod
+    output = "### http://arxiv.org/abs/1234\n- **STRATEGY** — something\n### http://other.com/page\n- (no actionable findings)"
+    tags = {"http://arxiv.org/abs/1234": "arxiv"}
+    result = rs_mod._inject_backend_tags(output, tags)
+    assert "### [backend:arxiv] http://arxiv.org/abs/1234" in result
+    assert "### http://other.com/page" in result  # untagged unchanged
 
 
 def test_assemble_pending_without_tags_no_backend_prefix():
