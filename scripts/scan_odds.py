@@ -40,6 +40,13 @@ try:
 except ImportError:
     _RISK = False
 
+try:
+    from src.betting.strategies import STRATEGIES, evaluate_strategy
+    _STRATEGIES = True
+except ImportError:
+    _STRATEGIES = False
+    STRATEGIES = []
+
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
@@ -566,6 +573,86 @@ def _mark_notified(bets: list[dict], notified: dict, now_dt: datetime):
         }
 
 
+_PAPER_DIR = Path(__file__).parent.parent / "logs" / "paper"
+
+_PAPER_FIELDNAMES = [
+    "scanned_at", "strategy", "sport", "market", "line", "home", "away", "kickoff",
+    "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
+    "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
+    "pinnacle_close_prob", "clv_pct",
+]
+
+_H2H_SIDE = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
+
+
+def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
+                      sport_label: str, now: str, scan_date: str):
+    """Write paper strategy bets to logs/paper/<strategy_name>.csv."""
+    if not paper_bets:
+        return
+    _PAPER_DIR.mkdir(exist_ok=True)
+    log_file = _PAPER_DIR / f"{strategy_name}.csv"
+
+    existing_keys: set = set()
+    if log_file.exists():
+        with open(log_file, newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("scanned_at", "")[:10] == scan_date:
+                    existing_keys.add((
+                        row.get("kickoff", ""),
+                        row.get("home", ""),
+                        row.get("away", ""),
+                        row.get("side", ""),
+                        row.get("book", ""),
+                        row.get("market", "h2h"),
+                        str(row.get("line", "")),
+                    ))
+
+    new_rows = []
+    for vb in paper_bets:
+        dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+        side = _H2H_SIDE.get(vb["side"], vb["side"])
+        key = (dt, vb["home"], vb["away"], side, vb["book"],
+               vb.get("market", "h2h"), str(vb.get("line", "")))
+        if key in existing_keys:
+            continue
+        new_rows.append({
+            "scanned_at": now,
+            "strategy": strategy_name,
+            "sport": sport_label,
+            "market": vb.get("market", "h2h"),
+            "line": vb.get("line", ""),
+            "home": vb["home"],
+            "away": vb["away"],
+            "kickoff": dt,
+            "side": side,
+            "book": vb["book"],
+            "odds": vb["odds"],
+            "edge": round(vb["edge"], 4),
+            "consensus": round(vb["cons"], 4),
+            "pinnacle_cons": round(vb.get("pinnacle_cons", 0.0), 4),
+            "n_books": vb["n_books"],
+            "confidence": vb["confidence"],
+            "model_signal": vb.get("model_signal", "?"),
+            "dispersion": round(vb.get("dispersion", 0.0), 4),
+            "outlier_z": round(vb.get("outlier_z", 0.0), 3),
+            "pinnacle_close_prob": "",
+            "clv_pct": "",
+        })
+
+    if not new_rows:
+        return
+
+    write_header = not log_file.exists()
+    with open(log_file, "a", newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        writer = csv.DictWriter(f, fieldnames=_PAPER_FIELDNAMES, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerows(new_rows)
+    print(f"[paper:{strategy_name}] {len(new_rows)} bet(s) → logs/paper/{strategy_name}.csv")
+
+
 SPORT_GROUPS = {
     "football": {s[0] for s in FIXED_SPORTS if s[0].startswith("soccer_")},
     "nba":      {"basketball_nba"},
@@ -640,6 +727,7 @@ def main():
     quota_remaining = "?"
     all_bets: list[dict] = []
     sport_summary: list[str] = []
+    scan_date = now[:10]  # "YYYY-MM-DD"
 
     for sport_key, label, _ in all_sports:
         try:
@@ -652,6 +740,20 @@ def main():
                   f"{flag}")
             if bets:
                 sport_summary.append(f"{label}: {len(bets)} bet(s)")
+
+            # Paper strategies — reuse same events, no extra API calls
+            if _STRATEGIES:
+                for strategy in STRATEGIES:
+                    try:
+                        paper_bets = evaluate_strategy(
+                            events, sport_key, strategy,
+                            model_signals=_MODEL_SIGNALS,
+                            api_to_fd=_API_TO_FD,
+                        )
+                        _append_paper_csv(strategy.name, paper_bets,
+                                          sport_label=label, now=now, scan_date=scan_date)
+                    except Exception as pe:
+                        print(f"[paper:{strategy.name}] ERROR for {label}: {pe}")
         except Exception as e:
             print(f"  {label:<28} ERROR: {e}")
 
@@ -720,7 +822,6 @@ def main():
 
     # Write bets to CSV log — deduped against same-day entries
     log_file = Path(__file__).parent.parent / "logs" / "bets.csv"
-    scan_date = now[:10]  # "YYYY-MM-DD"
     existing_keys: set = set()
     if log_file.exists():
         with open(log_file, newline="") as f:

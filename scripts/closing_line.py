@@ -43,6 +43,7 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 BETS_CSV    = _ROOT / "logs" / "bets.csv"
 CLOSING_CSV = _ROOT / "logs" / "closing_lines.csv"
 DRIFT_CSV   = _ROOT / "logs" / "drift.csv"
+PAPER_DIR   = _ROOT / "logs" / "paper"
 
 LABEL_TO_KEY = {
     "EPL":          "soccer_epl",
@@ -222,12 +223,12 @@ def _extract_snapshot(event: dict, home: str, away: str, side: str, book: str,
     return {"pinnacle_fair": pinnacle_fair, "your_book_odds": your_book_odds, "n_books": n_books}
 
 
-def update_bets_csv_clv(updates: dict):
-    """Write pinnacle_close_prob + clv_pct back into bets.csv for matching rows."""
-    if not updates or not BETS_CSV.exists():
+def update_csv_clv(path: "Path", updates: dict):
+    """Write pinnacle_close_prob + clv_pct back into any bets CSV for matching rows."""
+    if not updates or not path.exists():
         return
 
-    with open(BETS_CSV, newline="") as f:
+    with open(path, newline="") as f:
         fcntl.flock(f, fcntl.LOCK_SH)
         reader = csv.DictReader(f)
         fieldnames = list(reader.fieldnames or [])
@@ -249,14 +250,48 @@ def update_bets_csv_clv(updates: dict):
     if not changed:
         return
 
-    tmp = BETS_CSV.with_suffix(".csv.tmp")
+    tmp = path.with_suffix(".csv.tmp")
     with open(tmp, "w", newline="") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
-    os.replace(tmp, BETS_CSV)
-    print(f"[bets.csv] Updated {len(updates)} row(s) with CLV data.")
+    os.replace(tmp, path)
+    print(f"[{path.name}] Updated {sum(1 for r in rows if r.get('pinnacle_close_prob'))} row(s) with CLV data.")
+
+
+def update_bets_csv_clv(updates: dict):
+    """Backward-compatible wrapper — updates production bets.csv."""
+    update_csv_clv(BETS_CSV, updates)
+
+
+def load_active_paper_bets(now: datetime) -> list[dict]:
+    """Active bets from all paper strategy CSVs (same window logic as production)."""
+    result = []
+    if not PAPER_DIR.exists():
+        return result
+    for csv_path in sorted(PAPER_DIR.glob("*.csv")):
+        try:
+            with open(csv_path, newline="") as f:
+                rows = list(csv.DictReader(f))
+            for row in rows:
+                if row.get("pinnacle_close_prob"):
+                    continue
+                kickoff_str = row.get("kickoff", "")
+                if not kickoff_str:
+                    continue
+                try:
+                    kickoff = datetime.strptime(kickoff_str, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                minutes_to_ko = (kickoff - now).total_seconds() / 60
+                if -6 <= minutes_to_ko <= 65:
+                    result.append({**row, "_kickoff_dt": kickoff, "_minutes_to_ko": minutes_to_ko,
+                                   "_market": row.get("market", "h2h"), "_line": row.get("line", ""),
+                                   "_source_csv": str(csv_path)})
+        except Exception as e:
+            print(f"  [paper] Could not read {csv_path.name}: {e}")
+    return result
 
 
 def main():
@@ -264,23 +299,41 @@ def main():
     print(f"=== Closing Line Snapshot === {now.strftime('%Y-%m-%d %H:%M UTC')}")
 
     active_bets = load_active_bets(now)
-    if not active_bets:
+    paper_bets  = load_active_paper_bets(now)
+
+    # Deduplicate paper bets against production by bet key (same fixture/market may appear in many CSVs)
+    prod_keys = {
+        (b["home"], b["away"], b["kickoff"], b["side"],
+         b.get("_market", "h2h"), b.get("_line", ""))
+        for b in active_bets
+    }
+    # Include paper bets on fixtures not already covered by production (e.g. C_loose extra bets)
+    extra_paper = [b for b in paper_bets
+                   if (b["home"], b["away"], b["kickoff"], b["side"],
+                       b.get("_market", "h2h"), b.get("_line", "")) not in prod_keys]
+
+    all_active = active_bets + extra_paper
+    if not all_active:
         print("No active bets in window. Nothing to do.")
         return
 
-    print(f"{len(active_bets)} bet(s) in window.")
+    prod_count = len(active_bets)
+    paper_count = len(paper_bets)
+    print(f"{prod_count} production bet(s) + {paper_count} paper bet(s) in window "
+          f"({len(extra_paper)} unique paper-only).")
 
     existing_closing = load_existing_closing_keys()
     existing_drift   = load_existing_drift_keys()
 
     # Group by sport to minimise API calls (one call per sport, not per fixture)
     by_sport: dict[str, list[dict]] = {}
-    for bet in active_bets:
+    for bet in all_active:
         sport_key = LABEL_TO_KEY.get(bet.get("sport", ""))
         if not sport_key:
             # Tennis labels are dynamic (API title field) and not in LABEL_TO_KEY.
             # Tennis bets produce no CLV/drift until sport_key is stored in bets.csv (Phase 6).
-            print(f"  [skip] {bet.get('sport','?')} — no sport_key mapping for CLV (tennis excluded)")
+            if bet not in extra_paper:  # only warn once (from production bets)
+                print(f"  [skip] {bet.get('sport','?')} — no sport_key mapping for CLV (tennis excluded)")
             continue
         by_sport.setdefault(sport_key, []).append(bet)
 
@@ -388,7 +441,12 @@ def main():
                 w.writeheader()
             w.writerows(closing_rows)
         print(f"[log] {len(closing_rows)} closing line(s) → closing_lines.csv")
-        update_bets_csv_clv(clv_updates)
+        # Update production bets.csv
+        update_csv_clv(BETS_CSV, clv_updates)
+        # Update all paper strategy CSVs (same clv_updates keyed by bet identity)
+        if PAPER_DIR.exists():
+            for paper_path in sorted(PAPER_DIR.glob("*.csv")):
+                update_csv_clv(paper_path, clv_updates)
 
     # --- Write drift.csv ---
     if drift_rows:

@@ -27,7 +27,9 @@ This is a phased plan to roll the recommendations from the review into the syste
 | 4 | Filters: dispersion, outliers, dedup | ~4h | Low |
 | 4.5 | Test scaffolding (pytest, devig/risk/keys) | ~2h | Low |
 | 5 | New markets: totals, BTTS | ~3h | Low |
-| 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ~4h | Low |
+| 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done | Low |
+| 5.6 | Phase 5.5 bugfix sweep (P0/P1 from code review) | ~3h | Low |
+| 5.7 | Commission-aware edges (per-book commission collection) | ~3h | Low |
 | 6 | Storage: SQLite + UUIDs + `sport_key` (closes tennis CLV gap) | ~5h | Medium |
 | 7 | Model overhaul: calibration, daily refresh, ensemble | ~8h | Medium |
 | 8 | Auto-placement: Betfair API + dry-run | ~12h | High |
@@ -331,26 +333,22 @@ Add a GitHub Action (or local pre-commit) that runs `pytest` on push. If GitHub 
 
 ### 5.3 ✅ Done — `bets.csv` schema has `market`, `line`, `pinnacle_cons`, `pinnacle_close_prob`, `clv_pct`. Old rows missing these columns are tolerated by `app.py:load_bets` defaults.
 
-### 5.4 Dashboard polish — TODO
+### 5.4 ✅ Done — Dashboard polish
 
-- `templates/index.html`: add CSS classes for `.side-OVER`, `.side-UNDER`, `.side-YES`, `.side-NO` so non-h2h sides have colour.
-- For non-h2h rows, render a small market tag in front of the side, e.g. `<span class="market-tag">O/U {{ b.line }}</span> OVER` for totals, `<span class="market-tag">BTTS</span> YES` for BTTS.
-- Apply the change to all three sections (placed-pending, not-placed-pending, settled).
-- Acceptance: a totals OVER 2.5 bet shows `O/U 2.5 OVER` in yellow; a BTTS YES bet shows `BTTS YES` in green.
+- `.side-OVER`, `.side-UNDER`, `.side-YES`, `.side-NO` CSS added.
+- `market_badge` macro renders `O/U 2.5` / `BTTS` tags in all three sections.
 
-### 5.5 Drift key bugfix — TODO (covered by Review #1 above)
+### 5.5 ✅ Done — Drift key bugfix
 
-- In `app.py`, change `load_drift()` and `summary_stats()` drift-key tuples from `(home, away, kickoff, side)` to `(home, away, kickoff, side, market, line)`.
-- Same change in `index()` route at line 185 where `_drift_dir` is attached to settled bets.
-- Acceptance: a fixture flagged at both totals OVER 2.5 and h2h HOME shows independent drift directions.
+- `load_drift()`, `summary_stats()`, and `index()` all key on `(home, away, kickoff, side, market, line)`.
 
-### 5.6 Document the model-gate scope — TODO
+### 5.6 ✅ Done — Model-gate scope documented
 
-- Add a note to `CLAUDE.md` and `README.md`: the CatBoost model only produces signals for h2h on the four leagues with xG (EPL, Bundesliga, Serie A, Ligue 1). Totals/BTTS bets and Championship/Bundesliga 2/NBA/tennis bets always show `model_signal=?`, so the 2–3% model-filtered path **only ever fires on h2h in those four leagues**.
+- Note in `CLAUDE.md` CLV Scope Limitations section.
 
 ---
 
-## Phase 5.5 — Paper portfolios (shadow A/B test) (~4h)
+## Phase 5.5 — Paper portfolios (shadow A/B test) (~4h) ✅ Done
 
 **Goal**: run 7 alternative strategy variants alongside production every scan, log their would-be bets, and let CLV after this weekend's matches tell us which configuration extracts the most edge. No real money — pure data.
 
@@ -474,6 +472,244 @@ Closing-line cron is unchanged; it now updates paper CSVs in addition to `bets.c
 - [ ] **`tests/test_strategies.py` from Phase 4.5 passes** — all 10 variant tests green. Phase 5.5 cannot be merged with failing tests.
 - [ ] `docs/PLAN.md` Phase 5.5 marked Done; `CLAUDE.md` implementation table updated.
 - [ ] All review-findings bugs (Review #1–#10) are either fixed in this PR or filed as separate issues with code-comment TODOs.
+
+---
+
+## Phase 5.6 — Phase 5.5 bugfix sweep (~3h, must finish by Fri 18:00 BST)
+
+Code review of the Phase 5.5 implementation (2026-04-29) surfaced 15 issues. Group by priority — only P0 + P1 are blockers for the weekend.
+
+### P0 — must fix before the weekend smoke test
+
+**5.6.1 Add `tests/test_strategies.py` with the full 10-test suite** specified in Phase 4.5.4 (skipped during 5.5 implementation). All 10 are required — no minimum-subset escape hatch — since we have the time and the variants will only multiply in later phases.
+
+The 10 required tests (verbatim from 4.5.4 — do not abridge):
+
+1. `test_variant_A_matches_production_h2h_count` — variant A on the sample event produces ≤1 bet difference vs the legacy `find_value_bets` output. Variant A is the regression check on the abstraction itself.
+2. `test_variant_C_loose_finds_more_bets_than_A` — same fixture, lower edge threshold → equal-or-more bets.
+3. `test_variant_E_exchanges_only_no_williamhill` — no flagged bet has `book == "williamhill"` (or any non-exchange book).
+4. `test_variant_D_pinnacle_only_uses_pinnacle_devig` — edge computed against Pinnacle's de-vigged prob, not market mean. Verify with a synthetic event where Pinnacle has a deliberately weird price.
+5. `test_variant_F_model_primary_skips_totals_btts` — only h2h bets flagged.
+6. `test_variant_F_requires_positive_model_edge` — with `_MODEL_SIGNALS = {}`, variant F flags nothing.
+7. `test_variant_H_excludes_pinnacle_from_consensus` — synthetic event where dropping Pinnacle changes the mean; variant H's consensus differs from variant A's by the expected amount.
+8. `test_dispersion_filter_blocks_high_dispersion` — synthetic event where book probs split 50/50 → variant B (`max_dispersion=0.04`) flags 0 bets, variant A flags ≥1.
+9. `test_outlier_book_filter_blocks_outlier` — synthetic event with one rogue book at z>2.5 → no bet flagged AT that book (other books still flag-eligible).
+10. `test_strategy_count_is_8` — `len(STRATEGIES) == 8` and all `name` values are unique.
+
+- Acceptance: `pytest tests/test_strategies.py -v` shows **10 passed, 0 skipped, 0 xfailed**. CI must fail if any test is `@pytest.mark.skip`'d or removed.
+- Implementation note for the bot: tests 4, 7, 8, 9 need *synthetic events* (not just the captured sample). Build a `synthetic_event(prices_per_book)` helper in `tests/conftest.py` so each test constructs the exact market state it needs.
+
+**5.6.2 Run a smoke scan and verify all 8 paper CSVs populate.**
+
+- `mkdir -p logs/paper && python3 scripts/scan_odds.py --sports football`
+- Acceptance: `ls logs/paper/` shows ≥1 CSV per non-empty variant; total row count > 0; `python3 scripts/compare_strategies.py` runs without error.
+- If any variant produces zero rows on a normal Friday-evening scan, debug the strategy config (likely `min_books`, `max_dispersion`, or `consensus_mode` filtering everything).
+
+**5.6.3 Add `stake` column to paper CSVs** (`scripts/scan_odds.py:_PAPER_FIELDNAMES`).
+
+- Compute via `risk.compute_raw_stake(vb["cons"], vb["odds"], BANKROLL)` — half-Kelly capped at 5%.
+- **Do not apply the full risk pipeline** to paper bets (no fixture cap, no portfolio cap, no drawdown brake — paper is per-bet hypothetical, not a portfolio).
+- Add `stake` between `model_signal` and `pinnacle_close_prob` in the field order.
+- Acceptance: every paper CSV row has a non-empty `stake` value.
+
+**5.6.4 Fix the post-risk-pipeline categorisation bug** (Review #3, `scan_odds.py:580–583`).
+
+- Tag each bet with its source bucket (`"kaunitz"` or `"model"`) **before** `_apply_risk_pipeline`.
+- After the pipeline, partition by tag, not by `edge >= MIN_EDGE`.
+- Acceptance: a 2.5%-edge model-agree bet that survives the risk pipeline is sent in the `MODEL` notification, not silently dropped or mis-categorised.
+
+### P1 — should fix this week
+
+**5.6.5 Fix variant F's `min_edge` so it's truly model-primary.**
+
+- Currently `min_edge=0.0` still gates on `edge >= 0` — bets where the model agrees but consensus disagrees are dropped.
+- Change to `min_edge=-1.0` (effectively off) in `STRATEGIES`, and add a comment explaining why. Acceptance criterion: a synthetic event where consensus is mildly negative on a side but model edge is +5% gets flagged by F.
+
+**5.6.6 Stop double-counting in `compare_strategies.py`.**
+
+- Drop the `bets.csv` ("production") entry from the report; `paper/A_production.csv` is the proxy. Or merge them under one "production" label and dedupe by bet key.
+- Acceptance: report no longer shows both rows for the same bets.
+
+**5.6.7 Strengthen `tests/test_keys.py:test_closing_line_key_matches_drift_key`.**
+
+- Replace the per-key length asserts with a real equality check: `assert lk == dk[:4] + dk[5:]` — the lookup key must be the drift key minus `t_label`.
+- Use `tmp_path` fixture instead of writing `logs/_test_drift_tmp.csv`.
+
+**5.6.8 Fix `compare_strategies.py:_stats:avg_edge` fallback.**
+
+- Drop the `or r.get("consensus", 0)` fallback (line ~50). Edge and consensus aren't interchangeable. If `edge` is missing, skip the row.
+
+**5.6.9 Add a comment to Strategy E about consensus dilution.**
+
+- E uses `mean` consensus over all UK-licensed soft books. Document in the `description` that this dilutes the exchange-only signal; a future refinement is to anchor E on Pinnacle.
+
+**5.6.10 Tennis "skip" log spam.**
+
+- `closing_line.py` prints a "tennis excluded" warning per bet. Throttle to one warning per scan with the count of skipped tennis bets.
+
+### P2 — backlog (do with Phase 6 next week)
+
+- 5.6.11: Test for `_append_paper_csv` (would have caught the missing stake column).
+- 5.6.12: Update `PLAN.md` roadmap line "Phase 5.5 ✅ Done" to also tick the sub-item checklist inside the phase body.
+- 5.6.13: Update `CLAUDE.md` implementation table — Phase 4 should be "Pending" until dispersion/outlier filters land via Phase 5.5's strategies.py (now landed inside `_flag_bets`); Phase 5 + 5.5 should be marked Done.
+- 5.6.14: Make the `1.2 <= odds <= 15.0` band a `StrategyConfig` field (`min_odds`, `max_odds`) so variant C_loose can capture short-favourite value at 1.10–1.20.
+- 5.6.15: Apply notification dedupe (`logs/notified.json`) — Phase 4.4 still pending.
+
+### Acceptance for Phase 5.6 as a whole
+
+- [ ] `pytest` passes (incl. the new `test_strategies.py`).
+- [ ] One scan run produces 8 paper CSVs with `stake` column populated.
+- [ ] `compare_strategies.py` shows no double-counting.
+- [ ] No P0 or P1 item open.
+- [ ] CLAUDE.md and PLAN.md status tables match reality.
+
+---
+
+## Phase 5.7 — Commission-aware edges (~3h, ship with 5.6)
+
+Replaces "Strategy E uses min_edge=0.04 to compensate for commission" with a global commission table, so **every strategy reports honest net edges** and Kelly stakes correctly account for what each book actually pays out.
+
+### 5.7.1 New module `src/betting/commissions.py`
+
+```python
+"""
+Commission rates per bookmaker on the Odds API.
+Type: 'winnings' = % of net winnings (exchanges); 'none' = baked into odds (sportsbooks).
+"""
+
+# ─── Commission collection ──────────────────────────────────────────────────
+# Source: each book's published commission policy, verified 2026-04-29.
+# See docs/COMMISSIONS.md for citations.
+BOOK_COMMISSIONS: dict[str, dict] = {
+    # ── Exchanges (commission on net winnings) ─────────────────────────────
+    "betfair_ex_uk":   {"type": "winnings", "rate": 0.05, "label": "Betfair Exchange (UK MBR)"},
+    "smarkets":        {"type": "winnings", "rate": 0.02, "label": "Smarkets"},
+    "matchbook":       {"type": "winnings", "rate": 0.02, "label": "Matchbook"},
+
+    # ── Sportsbooks (no commission; margin built into odds) ────────────────
+    "pinnacle":        {"type": "none",     "rate": 0.0,  "label": "Pinnacle (low-margin sportsbook)"},
+    "betfair_sb_uk":   {"type": "none",     "rate": 0.0,  "label": "Betfair Sportsbook"},
+    "betfred_uk":      {"type": "none",     "rate": 0.0,  "label": "Betfred"},
+    "williamhill":     {"type": "none",     "rate": 0.0,  "label": "William Hill"},
+    "coral":           {"type": "none",     "rate": 0.0,  "label": "Coral"},
+    "ladbrokes_uk":    {"type": "none",     "rate": 0.0,  "label": "Ladbrokes"},
+    "skybet":          {"type": "none",     "rate": 0.0,  "label": "Sky Bet"},
+    "paddypower":      {"type": "none",     "rate": 0.0,  "label": "Paddy Power"},
+    "boylesports":     {"type": "none",     "rate": 0.0,  "label": "BoyleSports"},
+    "betvictor":       {"type": "none",     "rate": 0.0,  "label": "BetVictor"},
+    "betway":          {"type": "none",     "rate": 0.0,  "label": "Betway"},
+    "leovegas":        {"type": "none",     "rate": 0.0,  "label": "LeoVegas"},
+    "casumo":          {"type": "none",     "rate": 0.0,  "label": "Casumo"},
+    "virginbet":       {"type": "none",     "rate": 0.0,  "label": "Virgin Bet"},
+    "livescorebet":    {"type": "none",     "rate": 0.0,  "label": "LiveScore Bet"},
+    "sport888":        {"type": "none",     "rate": 0.0,  "label": "888Sport"},
+    "grosvenor":       {"type": "none",     "rate": 0.0,  "label": "Grosvenor"},
+}
+
+# Default for any book not in the table (assume no commission)
+DEFAULT_COMMISSION = {"type": "none", "rate": 0.0, "label": "unknown"}
+
+
+def commission_rate(book: str) -> float:
+    """Commission as a fraction of net winnings. 0.0 for sportsbooks."""
+    entry = BOOK_COMMISSIONS.get(book, DEFAULT_COMMISSION)
+    return entry["rate"] if entry["type"] == "winnings" else 0.0
+
+
+def effective_odds(odds: float, book: str) -> float:
+    """Decimal odds after commission deducted from net winnings."""
+    c = commission_rate(book)
+    if c == 0.0:
+        return odds
+    return 1.0 + (odds - 1.0) * (1.0 - c)
+
+
+def effective_implied_prob(odds: float, book: str) -> float:
+    """1 / effective_odds — the implied prob you actually pay for."""
+    return 1.0 / effective_odds(odds, book)
+```
+
+### 5.7.2 Wire commission into edge & Kelly
+
+**`src/betting/strategies.py:_flag_bets`** — replace the gross edge with net edge:
+
+```python
+from src.betting.commissions import effective_implied_prob, commission_rate
+
+# ... inside the per-side loop:
+fair_side = b["fair"].get(side, 1.0 / odds)
+gross_edge = cons[side] - fair_side
+# Commission shrinks effective odds → raises effective implied prob → reduces edge
+net_edge = cons[side] - effective_implied_prob(odds, b["book"])
+if net_edge < strategy.min_edge:
+    continue
+```
+
+Store both `gross_edge` and `net_edge` (or rename to `edge` for net and keep `edge_gross` for the old number) on each bet dict so the comparison can still see what was lost to commission.
+
+**`src/betting/risk.py:compute_raw_stake`** — Kelly uses effective odds:
+
+```python
+from src.betting.commissions import effective_odds
+
+def compute_raw_stake(cons: float, odds: float, bankroll: float, book: str = "") -> float:
+    eff = effective_odds(odds, book) if book else odds
+    kelly = max(0.0, min(0.5 * (cons * eff - 1) / (eff - 1), 0.05))
+    return kelly * bankroll
+```
+
+**`scripts/closing_line.py:clv_pct`** — CLV uses effective odds:
+
+```python
+close_odds = your_book_odds if your_book_odds else flagged_odds
+eff = effective_odds(close_odds, book) if close_odds else 0
+clv = round(eff * pin_prob - 1, 6) if eff else ""
+```
+
+### 5.7.3 Schema additions
+
+Add to `bets.csv`, paper CSVs, and `closing_lines.csv`:
+
+- `commission_rate` (float, e.g. 0.05 for Betfair Ex)
+- `edge_gross` (float — old "edge" before commission)
+- `edge` (now means net of commission)
+- `effective_odds` (float)
+
+### 5.7.4 Strategy E reformulation
+
+Now that commissions apply globally, `E_exchanges_only` no longer needs `min_edge=0.04` to compensate. Change:
+
+```python
+StrategyConfig(
+    name="E_exchanges_only",
+    label="E: Exchanges only",
+    description="Restrict to Betfair Ex / Smarkets / Matchbook; commission auto-applied via commissions.py",
+    book_filter="exchanges_only",
+    min_edge=0.03,  # same as production now that commission shrinks edge fairly
+),
+```
+
+**Verify what this changes**: Smarkets at 4% gross becomes ~3.2% net (still passes 3% threshold). Betfair at 4% gross becomes ~3% net (borderline). Betfair at 3% gross becomes ~2.4% net (fails). So variant E will skip Betfair-only marginal bets — which is the intended outcome.
+
+### 5.7.5 Documentation
+
+Create `docs/COMMISSIONS.md` listing each book's commission rate with a citation URL. Pin the verification date so future drift is visible.
+
+### 5.7.6 Tests `tests/test_commissions.py`
+
+- `test_sportsbook_effective_odds_unchanged`: `williamhill` at 2.5 → 2.5.
+- `test_betfair_5pct_winnings`: 2.5 → `1 + 1.5*0.95 = 2.425`.
+- `test_smarkets_2pct`: 2.5 → `1 + 1.5*0.98 = 2.47`.
+- `test_unknown_book_defaults_to_zero`: an unmapped key returns input odds unchanged.
+- `test_kelly_uses_effective_odds`: same gross edge, smaller stake on Betfair than Smarkets.
+
+### 5.7.7 Acceptance
+
+- [ ] `BOOK_COMMISSIONS` covers every book in `UK_LICENSED_BOOKS` plus Pinnacle.
+- [ ] `pytest tests/test_commissions.py` passes.
+- [ ] After re-running a scan, paper CSVs show `commission_rate=0.05` for Betfair rows, `0.02` for Smarkets/Matchbook, `0` for sportsbooks.
+- [ ] `edge` in CSV is now net edge; sanity-check that exchange bets show `edge_gross > edge` and sportsbook bets show `edge_gross == edge`.
+- [ ] `compare_strategies.py` reflects net edges; the `Avg Edge` column should now be lower for variants that flag exchange bets heavily.
 
 ---
 

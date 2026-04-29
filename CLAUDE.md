@@ -20,6 +20,9 @@ python3 app.py   # → http://localhost:5000
 
 # Check for new sports worth adding (bi-weekly)
 export $(cat .env) && python3 scripts/check_sports.py
+
+# Compare strategy variants (after a weekend of data)
+python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
 ```
 
 ## How the scanner works
@@ -107,8 +110,12 @@ logs/notified.json          Notification dedupe state (12h per bet key)
 tests/                      pytest suite (16 tests; run with `pytest`)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
+src/betting/strategies.py   8 paper strategy variants + evaluate_strategy() entry point
 src/betting/consensus.py    Consensus computation helpers
 src/betting/kelly.py        Kelly criterion
+logs/paper/                 Paper strategy CSVs (one per variant, same schema as bets.csv + strategy col)
+scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
+docs/STRATEGY_COMPARISON.md   Latest CLV comparison across all 8 strategy variants
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10)
 docs/APPROACH.md            Full research-backed architecture
 src/                        Statistical models (Dixon-Coles, pi-ratings, CatBoost)
@@ -174,7 +181,8 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 2 | Risk management (rounding, caps, drawdown) | ✅ Done |
 | 3 | CLV + drift diagnostics | ✅ Done |
 | 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done |
-| 5 | New markets: totals, BTTS | Pending |
+| 5 | New markets: totals, BTTS | ✅ Done |
+| 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done |
 | 6 | SQLite + UUIDs | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
