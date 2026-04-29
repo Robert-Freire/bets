@@ -76,6 +76,11 @@
     .model-disagree { background: #450a0a; color: #f87171; }
     .model-unknown  { background: #1e293b; color: #94a3b8; }
 
+    /* Market badges */
+    .mkt-h2h    { background: #1e293b; color: #94a3b8; }
+    .mkt-totals { background: #1c2840; color: #60a5fa; }
+    .mkt-btts   { background: #2d1b4e; color: #c084fc; }
+
     .no-bets { color: #475569; font-size: .9rem; padding: 1rem 0; }
     .fixture { font-weight: 500; }
     .meta { font-size: .75rem; color: #64748b; }
@@ -85,6 +90,16 @@
     a.result-link { font-size: .7rem; color: #6366f1; text-decoration: none; white-space: nowrap; }
     a.result-link:hover { color: #a5b4fc; }
   </style>
+  {%- macro market_badge(b) %}
+    {%- set mkt = b.market | default('h2h') %}
+    {%- if mkt == 'totals' %}
+      <span class="badge mkt-totals">O/U {{ b.line }}</span>
+    {%- elif mkt == 'btts' %}
+      <span class="badge mkt-btts">BTTS</span>
+    {%- else %}
+      <span class="badge mkt-h2h">H2H</span>
+    {%- endif %}
+  {%- endmacro %}
   <script>
     const BOOK_URLS = {
       betfair_ex_uk: "https://www.betfair.com/exchange/plus/football",
@@ -134,6 +149,24 @@
       {{ stats.roi }}%
     </div>
   </div>
+  {% if stats.avg_clv is not none %}
+  <div class="stat">
+    <div class="stat-label">Avg CLV ({{ stats.bets_w_clv }} bets)</div>
+    <div class="stat-value {% if stats.avg_clv > 0 %}pos{% elif stats.avg_clv < 0 %}neg{% else %}neu{% endif %}"
+         title="{{ stats.clv_pos_rate }}% of settled bets have positive CLV">
+      {{ '+' if stats.avg_clv > 0 else '' }}{{ stats.avg_clv }}%
+    </div>
+  </div>
+  {% endif %}
+  {% if stats.drift_toward_pct is not none %}
+  <div class="stat">
+    <div class="stat-label">Drift toward you</div>
+    <div class="stat-value {% if stats.drift_toward_pct >= 50 %}pos{% else %}neg{% endif %}"
+         title="% of settled bets where Pinnacle odds shortened (market agreed with your pick)">
+      {{ stats.drift_toward_pct }}%
+    </div>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Pending bets -->
@@ -146,7 +179,7 @@
   <table style="margin-bottom:1.5rem">
     <thead>
       <tr>
-        <th>Kick-off</th><th>Sport</th><th>Fixture</th><th>Side</th>
+        <th>Kick-off</th><th>Sport</th><th>Market</th><th>Fixture</th><th>Side</th>
         <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th><th>Model</th>
         <th>Suggested £</th><th>Placed £</th><th>Settle</th>
       </tr>
@@ -156,6 +189,7 @@
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
+        <td>{{ market_badge(b) }}</td>
         <td class="fixture">{{ b.home }} vs {{ b.away }}<br><a class="result-link" href="{{ '#' }}" onclick="window.open(resultUrl('{{ b.home }}','{{ b.away }}'),'_blank');return false;">results ↗</a></td>
         <td class="side-{{ b.side }}">{{ b.side }}</td>
         <td class="meta"><a class="book-link" href="{{ '#' }}" onclick="window.open(bookUrl('{{ b.book }}'),'_blank');return false;" title="{{ b.book }}">{{ b.book }}</a></td>
@@ -201,7 +235,7 @@
   <table>
     <thead>
       <tr>
-        <th>Kick-off</th><th>Sport</th><th>Fixture</th><th>Side</th>
+        <th>Kick-off</th><th>Sport</th><th>Market</th><th>Fixture</th><th>Side</th>
         <th>Book</th><th>Odds</th><th>Edge</th><th>Conf</th><th>Model</th>
         <th>Suggested £</th><th>Log bet</th>
       </tr>
@@ -211,6 +245,7 @@
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
+        <td>{{ market_badge(b) }}</td>
         <td class="fixture">{{ b.home }} vs {{ b.away }}<br><a class="result-link" href="{{ '#' }}" onclick="window.open(resultUrl('{{ b.home }}','{{ b.away }}'),'_blank');return false;">results ↗</a></td>
         <td class="side-{{ b.side }}">{{ b.side }}</td>
         <td class="meta"><a class="book-link" href="{{ '#' }}" onclick="window.open(bookUrl('{{ b.book }}'),'_blank');return false;" title="{{ b.book }}">{{ b.book }}</a></td>
@@ -262,6 +297,7 @@
       <tr>
         <th>Kick-off</th>
         <th>Sport</th>
+        <th>Market</th>
         <th>Fixture</th>
         <th>Side</th>
         <th>Book</th>
@@ -269,6 +305,8 @@
         <th>Edge</th>
         <th>Conf</th>
         <th>Model</th>
+        <th>CLV</th>
+        <th>Drift</th>
         <th>Suggested £</th>
         <th>Placed £</th>
         <th>Result</th>
@@ -281,6 +319,7 @@
       <tr>
         <td class="meta">{{ b.kickoff }}</td>
         <td class="meta">{{ b.sport }}</td>
+        <td>{{ market_badge(b) }}</td>
         <td class="fixture">{{ b.home }} vs {{ b.away }}<br><a class="result-link" href="{{ '#' }}" onclick="window.open(resultUrl('{{ b.home }}','{{ b.away }}'),'_blank');return false;">results ↗</a></td>
         <td class="side-{{ b.side }}">{{ b.side }}</td>
         <td class="meta"><a class="book-link" href="{{ '#' }}" onclick="window.open(bookUrl('{{ b.book }}'),'_blank');return false;" title="{{ b.book }}">{{ b.book }}</a></td>
@@ -297,6 +336,21 @@
           {% endif %}
         {% else %}
           <td style="color:#475569;font-size:.75rem">?</td>
+        {% endif %}
+        {% set clv = b.clv_pct | default('') %}
+        {% if clv %}
+          {% set clv_f = clv | float(none) %}
+          <td style="color:{{ '#4ade80' if clv_f and clv_f > 0 else ('#ef4444' if clv_f and clv_f < 0 else '#94a3b8') }};font-weight:600;font-size:.8rem" title="Closing Line Value vs Pinnacle">{{ '+' if clv_f and clv_f > 0 else '' }}{{ (clv_f * 100) | round(1) if clv_f is not none else '?' }}%</td>
+        {% else %}
+          <td style="color:#475569;font-size:.75rem" title="Closing line not yet captured">—</td>
+        {% endif %}
+        {% set dd = b._drift_dir | default(none) %}
+        {% if dd == 'toward' %}
+          <td style="color:#4ade80;font-size:.8rem" title="Pinnacle odds shortened — market agreed with your bet">▼ toward</td>
+        {% elif dd == 'away' %}
+          <td style="color:#f87171;font-size:.8rem" title="Pinnacle odds lengthened — market moved against your bet">▲ away</td>
+        {% else %}
+          <td style="color:#475569;font-size:.75rem" title="No drift data">—</td>
         {% endif %}
         <td class="meta">£{{ b.stake }}</td>
         <td>£{{ b.actual_stake }}</td>

@@ -28,6 +28,18 @@ try:
 except ImportError:
     _DEVIG = False
 
+try:
+    from src.betting.risk import (
+        get_bankroll as _get_bankroll,
+        compute_raw_stake as _compute_raw_stake,
+        load_drawdown_state as _load_drawdown_state,
+        drawdown_multiplier as _drawdown_multiplier,
+        apply_risk_pipeline as _apply_risk_pipeline,
+    )
+    _RISK = True
+except ImportError:
+    _RISK = False
+
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
@@ -167,7 +179,6 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 BASE_URL = "https://api.the-odds-api.com/v4"
 MIN_EDGE = 0.03        # Kaunitz-only threshold (no model required)
 MODEL_MIN_EDGE = 0.02  # lower threshold — only shown when model agrees
-BANKROLL = 1000.0
 
 # Bookmakers with a UK Gambling Commission licence — the only ones usable from the UK.
 # Consensus is still computed across ALL books (better signal), but value bets are
@@ -233,16 +244,13 @@ def get_active_tennis_sports(max_tournaments: int = 99) -> list[tuple[str, str, 
 def fetch_odds(sport_key: str) -> tuple[list, str]:
     data, remaining = api_get(
         f"/sports/{sport_key}/odds/",
-        {"regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"},
+        {"regions": "uk,eu", "markets": "h2h,totals,btts", "oddsFormat": "decimal"},
     )
     return data, remaining
 
 
-def _devig_triplet(entries: dict) -> dict[str, float]:
-    """
-    De-vig a book's odds dict using Shin (1993). Returns fair probs keyed by side.
-    Falls back to proportional if Shin fails, raw 1/odds if devig unavailable.
-    """
+def _devig_book(entries: dict) -> dict[str, float]:
+    """De-vig any N-outcome market using Shin (1993). Falls back to proportional."""
     sides = list(entries.keys())
     raw = [1.0 / entries[s] for s in sides]
     if _DEVIG:
@@ -257,15 +265,15 @@ def _devig_triplet(entries: dict) -> dict[str, float]:
 
 def find_value_bets(events: list, sport_key: str) -> list[dict]:
     min_books = SPORT_MIN_BOOKS.get(sport_key, DEFAULT_MIN_BOOKS)
-    min_edge = SPORT_MIN_EDGE.get(sport_key, MODEL_MIN_EDGE)  # scan at 2% to catch model bets
+    min_edge = SPORT_MIN_EDGE.get(sport_key, MODEL_MIN_EDGE)
     bets = []
 
     for ev in events:
         home, away, commence = ev["home_team"], ev["away_team"], ev["commence_time"]
-        # impl now accumulates Shin fair probs (not raw 1/odds)
-        impl: dict[str, list] = {}
-        book_list = []
 
+        # --- H2H market ---
+        h2h_impl: dict[str, list] = {}
+        h2h_books: list[dict] = []
         for b in ev.get("bookmakers", []):
             for m in b.get("markets", []):
                 if m["key"] != "h2h":
@@ -275,76 +283,163 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                 draw = oc.get("Draw")
                 if draw:
                     entries["D"] = draw
-
                 if not all(v and v > 1.0 for v in entries.values()):
                     continue
-
-                fair = _devig_triplet(entries)
+                fair = _devig_book(entries)
                 for side, fp in fair.items():
-                    impl.setdefault(side, []).append(fp)
-                book_list.append({"book": b["key"], "fair": fair, **entries})
+                    h2h_impl.setdefault(side, []).append(fp)
+                h2h_books.append({"book": b["key"], "fair": fair, **entries})
 
-        if len(book_list) < min_books:
-            continue
-
-        # Consensus = mean of Shin-devigged fair probs across all books
-        cons = {s: statistics.mean(vals) for s, vals in impl.items()}
-        n_books = len(book_list)
-        confidence = "HIGH" if n_books >= 30 else ("MED" if n_books >= 20 else "LOW")
-
-        # Pinnacle's devigged prob, used as a sharp-book anchor signal
-        pinnacle_fair: dict[str, float] = next(
-            (b["fair"] for b in book_list if b["book"] == "pinnacle"), {}
-        )
-
-        for b in book_list:
-            if b["book"] not in UK_LICENSED_BOOKS:
-                continue  # consensus uses all books, but only flag UK-accessible ones
-            for side, odds in b.items():
-                if side in ("book", "fair") or side not in cons:
+        if len(h2h_books) >= min_books:
+            cons = {s: statistics.mean(v) for s, v in h2h_impl.items()}
+            n = len(h2h_books)
+            conf = "HIGH" if n >= 30 else ("MED" if n >= 20 else "LOW")
+            pin_fair = next((b["fair"] for b in h2h_books if b["book"] == "pinnacle"), {})
+            for b in h2h_books:
+                if b["book"] not in UK_LICENSED_BOOKS:
                     continue
-                # Edge: how much better does the consensus think this side is vs this book's own fair prob?
-                fair_book_side = b["fair"].get(side, 1.0 / odds)
-                edge = cons[side] - fair_book_side
-                if edge >= min_edge and 1.2 <= odds <= 15.0:
-                    impl_prob = round(1.0 / odds, 4)
-                    bets.append({
-                        "commence": commence,
-                        "home": home,
-                        "away": away,
-                        "side": side,
-                        "book": b["book"],
-                        "odds": odds,
-                        "impl": impl_prob,
-                        "cons": round(cons[side], 4),
-                        "edge": round(edge, 4),
-                        "pinnacle_cons": round(pinnacle_fair.get(side, 0.0), 4),
-                        "n_books": n_books,
-                        "confidence": confidence,
-                        "model_signal": _model_signal(home, away, sport_key, impl_prob, side),
-                    })
+                for side, odds in b.items():
+                    if side in ("book", "fair") or side not in cons:
+                        continue
+                    edge = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    if edge >= min_edge and 1.2 <= odds <= 15.0:
+                        ip = round(1.0 / odds, 4)
+                        bets.append({
+                            "market": "h2h", "line": "",
+                            "commence": commence, "home": home, "away": away,
+                            "side": side, "book": b["book"], "odds": odds,
+                            "impl": ip, "cons": round(cons[side], 4),
+                            "edge": round(edge, 4),
+                            "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
+                            "n_books": n, "confidence": conf,
+                            "model_signal": _model_signal(home, away, sport_key, ip, side),
+                        })
 
-    # Deduplicate: keep best edge per fixture + side
+        # --- Totals market (group by line point) ---
+        totals_by_line: dict[float, dict] = {}
+        for b in ev.get("bookmakers", []):
+            for m in b.get("markets", []):
+                if m["key"] != "totals":
+                    continue
+                by_pt: dict[float, dict[str, float]] = {}
+                for o in m.get("outcomes", []):
+                    pt = o.get("point")
+                    if pt is None:
+                        continue
+                    by_pt.setdefault(float(pt), {})[o["name"].upper()] = o["price"]
+                for pt, oc in by_pt.items():
+                    over, under = oc.get("OVER"), oc.get("UNDER")
+                    if not (over and under and over > 1.0 and under > 1.0):
+                        continue
+                    entries = {"OVER": over, "UNDER": under}
+                    fair = _devig_book(entries)
+                    if pt not in totals_by_line:
+                        totals_by_line[pt] = {"impl": {}, "books": []}
+                    for side, fp in fair.items():
+                        totals_by_line[pt]["impl"].setdefault(side, []).append(fp)
+                    totals_by_line[pt]["books"].append({"book": b["key"], "fair": fair, **entries})
+
+        for pt, data in totals_by_line.items():
+            if len(data["books"]) < min_books:
+                continue
+            cons = {s: statistics.mean(v) for s, v in data["impl"].items()}
+            n = len(data["books"])
+            conf = "HIGH" if n >= 30 else ("MED" if n >= 20 else "LOW")
+            pin_fair = next((b["fair"] for b in data["books"] if b["book"] == "pinnacle"), {})
+            for b in data["books"]:
+                if b["book"] not in UK_LICENSED_BOOKS:
+                    continue
+                for side in ("OVER", "UNDER"):
+                    odds = b.get(side)
+                    if not odds or side not in cons:
+                        continue
+                    edge = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    if edge >= min_edge and 1.2 <= odds <= 15.0:
+                        ip = round(1.0 / odds, 4)
+                        bets.append({
+                            "market": "totals", "line": pt,
+                            "commence": commence, "home": home, "away": away,
+                            "side": side, "book": b["book"], "odds": odds,
+                            "impl": ip, "cons": round(cons[side], 4),
+                            "edge": round(edge, 4),
+                            "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
+                            "n_books": n, "confidence": conf,
+                            "model_signal": "?",
+                        })
+
+        # --- BTTS market ---
+        btts_impl: dict[str, list] = {}
+        btts_books: list[dict] = []
+        for b in ev.get("bookmakers", []):
+            for m in b.get("markets", []):
+                if m["key"] != "btts":
+                    continue
+                oc = {o["name"].upper(): o["price"] for o in m.get("outcomes", [])}
+                yes_o, no_o = oc.get("YES"), oc.get("NO")
+                if not (yes_o and no_o and yes_o > 1.0 and no_o > 1.0):
+                    continue
+                entries = {"YES": yes_o, "NO": no_o}
+                fair = _devig_book(entries)
+                for side, fp in fair.items():
+                    btts_impl.setdefault(side, []).append(fp)
+                btts_books.append({"book": b["key"], "fair": fair, **entries})
+
+        if len(btts_books) >= min_books:
+            cons = {s: statistics.mean(v) for s, v in btts_impl.items()}
+            n = len(btts_books)
+            conf = "HIGH" if n >= 30 else ("MED" if n >= 20 else "LOW")
+            pin_fair = next((b["fair"] for b in btts_books if b["book"] == "pinnacle"), {})
+            for b in btts_books:
+                if b["book"] not in UK_LICENSED_BOOKS:
+                    continue
+                for side in ("YES", "NO"):
+                    odds = b.get(side)
+                    if not odds or side not in cons:
+                        continue
+                    edge = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    if edge >= min_edge and 1.2 <= odds <= 15.0:
+                        ip = round(1.0 / odds, 4)
+                        bets.append({
+                            "market": "btts", "line": "",
+                            "commence": commence, "home": home, "away": away,
+                            "side": side, "book": b["book"], "odds": odds,
+                            "impl": ip, "cons": round(cons[side], 4),
+                            "edge": round(edge, 4),
+                            "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
+                            "n_books": n, "confidence": conf,
+                            "model_signal": "?",
+                        })
+
+    # Deduplicate: best edge per (fixture, market, line, side)
     bets.sort(key=lambda x: x["edge"], reverse=True)
     seen: set = set()
     out = []
     for vb in bets:
-        k = (vb["home"], vb["away"], vb["side"])
+        k = (vb["home"], vb["away"], vb["market"], str(vb.get("line", "")), vb["side"])
         if k not in seen:
             seen.add(k)
             out.append(vb)
     return out
 
 
+def _side_label(vb: dict) -> str:
+    market = vb.get("market", "h2h")
+    if market == "h2h":
+        return {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
+    if market == "totals":
+        return f"{vb['side']} {vb.get('line', '')}"
+    if market == "btts":
+        return f"BTTS {vb['side']}"
+    return vb["side"]
+
+
 def format_bet_line(vb: dict) -> str:
     dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
-    kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
-    stake = round(kelly * BANKROLL, 2)
-    side = {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
+    side = _side_label(vb)
     return (
         f"{vb['home']} vs {vb['away']} [{side}]\n"
         f"  {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
-        f"{vb['n_books']} books [{vb['confidence']}] | Stake £{stake}\n"
+        f"{vb['n_books']} books [{vb['confidence']}] | Stake £{vb['stake']}\n"
         f"  {dt}"
     )
 
@@ -428,9 +523,12 @@ def main():
                         help="Cap number of active tennis tournaments to scan (saves API quota)")
     args = parser.parse_args()
 
+    BANKROLL = _get_bankroll() if _RISK else float(os.environ.get("BANKROLL", 1000.0))
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     label = f" [{args.sports}]" if args.sports else ""
-    print(f"=== Multi-Sport Value Bet Scanner{label} === {now}\n")
+    print(f"=== Multi-Sport Value Bet Scanner{label} === {now}")
+    print(f"Bankroll: £{BANKROLL:.0f}\n")
 
     all_sports = build_sport_list(args.sports, args.max_tennis)
 
@@ -459,28 +557,46 @@ def main():
     output_bets  = kaunitz_bets + model_bets
 
     print(f"\nAPI quota remaining: {quota_remaining}")
-    print(f"Kaunitz bets (≥3%): {len(kaunitz_bets)}  |  Model-filtered bets (2-3% + agree): {len(model_bets)}\n")
+    print(f"Kaunitz bets (≥3%): {len(kaunitz_bets)}  |  Model-filtered bets (2-3% + agree): {len(model_bets)}")
 
     if not output_bets:
         print("No value bets found today across all sports.")
         _maybe_notify_no_bets(len(all_sports))
         return
 
+    # Compute raw stakes then apply full risk pipeline
+    for vb in output_bets:
+        vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL) if _RISK else (
+            max(0.0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05)) * BANKROLL
+        )
+
+    dd_mult = 1.0
+    if _RISK:
+        current_br, high_water = _load_drawdown_state(BANKROLL)
+        dd_mult = _drawdown_multiplier(current_br, high_water)
+        if dd_mult < 1.0:
+            print(f"[risk] Drawdown brake active: bankroll £{current_br:.0f} vs high water £{high_water:.0f} "
+                  f"— stakes halved")
+        output_bets = _apply_risk_pipeline(output_bets, BANKROLL, dd_mult)
+        # Re-split after risk pipeline (some bets may have been zeroed out)
+        kaunitz_bets = [b for b in output_bets if b["edge"] >= MIN_EDGE]
+        model_bets   = [b for b in output_bets if b["edge"] < MIN_EDGE]
+        print(f"[risk] After risk pipeline: {len(output_bets)} bet(s) "
+              f"(portfolio cap {15}%, fixture cap {5}%, rounding £5)")
+    print()
+
     # Print full detail
-    side_labels = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
     for section, bets in [("≥3% Kaunitz", kaunitz_bets), ("2-3% Model-filtered", model_bets)]:
         if not bets:
             continue
         print(f"=== {section} ===")
         current_sport = None
-        for vb in sorted(bets, key=lambda x: (x["sport"], -x["edge"])):
+        for vb in sorted(bets, key=lambda x: (x["sport"], x.get("market", "h2h"), -x["edge"])):
             if vb["sport"] != current_sport:
                 current_sport = vb["sport"]
                 print(f"--- {current_sport} ---")
             dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%a %d %b %H:%M UTC")
-            kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
-            stake = round(kelly * BANKROLL, 2)
-            side = side_labels.get(vb["side"], vb["side"])
+            side = _side_label(vb)
             ms = vb.get("model_signal", "?")
             try:
                 ms_label = f"model {float(ms):+.1%}"
@@ -489,7 +605,7 @@ def main():
             print(f"  {vb['home']} vs {vb['away']} [{side}]")
             print(f"    {vb['book']} @ {vb['odds']} | Edge {vb['edge']:.1%} | "
                   f"Consensus {vb['cons']:.1%} | {vb['n_books']} books [{vb['confidence']}] | "
-                  f"{ms_label} | Stake £{stake} | {dt}")
+                  f"{ms_label} | Stake £{vb['stake']} | {dt}")
     print()
 
     # Write bets to CSV log — deduped against same-day entries
@@ -508,19 +624,23 @@ def main():
                         row.get("away", ""),
                         row.get("side", ""),
                         row.get("book", ""),
+                        row.get("market", "h2h"),
+                        str(row.get("line", "")),
                     ))
 
     new_rows = []
     for vb in output_bets:
         dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
         side = {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
-        key = (dt, vb["home"], vb["away"], side, vb["book"])
+        key = (dt, vb["home"], vb["away"], side, vb["book"],
+               vb.get("market", "h2h"), str(vb.get("line", "")))
         if key in existing_keys:
             continue
-        kelly = max(0, min(0.5 * (vb["cons"] * vb["odds"] - 1) / (vb["odds"] - 1), 0.05))
         new_rows.append({
             "scanned_at": now,
             "sport": vb["sport"],
+            "market": vb.get("market", "h2h"),
+            "line": vb.get("line", ""),
             "home": vb["home"],
             "away": vb["away"],
             "kickoff": dt,
@@ -533,7 +653,7 @@ def main():
             "n_books": vb["n_books"],
             "confidence": vb["confidence"],
             "model_signal": vb.get("model_signal", "?"),
-            "stake": round(kelly * BANKROLL, 2),
+            "stake": vb["stake"],
             "result": "",
         })
 
@@ -541,7 +661,7 @@ def main():
     with open(log_file, "a", newline="") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         writer = csv.DictWriter(f, fieldnames=[
-            "scanned_at", "sport", "home", "away", "kickoff",
+            "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
             "side", "book", "odds", "edge", "consensus", "pinnacle_cons",
             "n_books", "confidence", "model_signal", "stake", "result"
         ])
