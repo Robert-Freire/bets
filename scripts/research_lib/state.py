@@ -42,7 +42,11 @@ def update_seen(seen: dict, result: FetchResult) -> None:
     }
 
 
-def assemble_pending(results: list[FetchResult], cap_bytes: int = 200_000) -> list[str]:
+def assemble_pending(
+    results: list[FetchResult],
+    cap_bytes: int = 200_000,
+    tags: dict[str, str] | None = None,
+) -> list[str]:
     segments: list[str] = []
     current_parts: list[str] = []
     current_size = 0
@@ -50,8 +54,9 @@ def assemble_pending(results: list[FetchResult], cap_bytes: int = 200_000) -> li
     for r in results:
         if not r.body_text:
             continue
+        tag = f"[backend:{tags[r.url]}] " if tags and r.url in tags else ""
         block = (
-            f"## Source: {r.url}\n"
+            f"## Source: {tag}{r.url}\n"
             f"{r.fetched_at} — status: {r.status}\n\n"
             f"{r.body_text}\n\n"
             f"---\n\n"

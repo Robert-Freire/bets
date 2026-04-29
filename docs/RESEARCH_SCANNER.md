@@ -28,7 +28,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.4 | Claude subprocess wrapper | done | main / HEAD | call_claude + call_claude_batched; 8/8 tests; real smoke returned findings; PROMPT_TEMPLATE byte-for-byte match; log line confirmed. |
 | 11.5 | Feed writer | done | main / HEAD | `write_findings`; 13/13 tests pass; atomic write, banner-once, newest-first verified. |
 | 11.6 | Top-level CLI + bootstrap mode | done | main / HEAD | CLI + bootstrap; 37 findings on first run; dedup confirmed; kill switch verified; no hard-coded paths. |
-| 11.7 | Open-search backends | pending | — | Independent of 11.8. |
+| 11.7 | Open-search backends | done | main / HEAD | `search.py`; 4 backends (arxiv/hn/github/ddg); 10/10 tests pass; dry-run confirmed 35 URLs × 7 queries; backend tags in feed. |
 | 11.8 | Dashboard tile | pending | — | Independent of 11.7. |
 | 11.9 | Cron + production hardening | pending | — | After 11.6 (preferably 11.7+11.8). |
 | 11.10 | Optional follow-ups | deferred | — | Post-MVP only. |

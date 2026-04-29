@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2301.00001v1</id>
+    <title>Value Betting in Sports Markets</title>
+    <summary>A test abstract about value betting strategies.</summary>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2301.00002v1</id>
+    <title>Closing Line Value Analysis</title>
+    <summary>Another test abstract about CLV.</summary>
+  </entry>
+</feed>

@@ -1,0 +1,7 @@
+{
+  "hits": [
+    {"title": "Sports betting strategy discussion", "url": "https://hn-example.com/post1", "points": 42},
+    {"title": "No URL post", "url": null, "points": 5},
+    {"title": "Value betting algorithm", "url": "https://hn-example.com/post2", "points": 17}
+  ]
+}
