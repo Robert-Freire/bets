@@ -17,11 +17,23 @@ DRAWDOWN_THRESHOLD = 0.85    # halve stakes if bankroll < high_water * this
 
 
 def get_bankroll() -> float:
-    return float(os.environ.get("BANKROLL", 1000.0))
+    """Read bankroll from BANKROLL env var, then config.json, then default 1000."""
+    if "BANKROLL" in os.environ:
+        return float(os.environ["BANKROLL"])
+    config_path = Path(__file__).resolve().parent.parent.parent / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            if "bankroll" in cfg:
+                return float(cfg["bankroll"])
+        except Exception:
+            pass
+    return 1000.0
 
 
 def compute_raw_stake(cons: float, odds: float, bankroll: float) -> float:
-    """Half-Kelly stake (capped at 5% bankroll) before any risk adjustments."""
+    """Half-Kelly stake, hard-capped at 5% bankroll before risk adjustments.
+    At typical edges (3–8%) the 5% cap dominates — Kelly rarely reaches it."""
     kelly = max(0.0, min(0.5 * (cons * odds - 1) / (odds - 1), 0.05))
     return kelly * bankroll
 

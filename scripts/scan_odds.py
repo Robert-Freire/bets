@@ -462,6 +462,66 @@ def notify(title: str, message: str, priority: str = "default"):
         print(f"[ntfy] Failed: {e}")
 
 
+# --- Notification dedupe (logs/notified.json) ---
+_NOTIFIED_PATH = Path(__file__).parent.parent / "logs" / "notified.json"
+_NOTIFY_DEDUP_HOURS = 12
+_NOTIFY_ODDS_IMPROVEMENT = 0.02  # re-notify if odds improved by ≥2%
+
+
+def _notified_key(vb: dict) -> str:
+    return "|".join([
+        str(vb.get("kickoff", "")), vb.get("home", ""), vb.get("away", ""),
+        vb.get("side", ""), vb.get("book", ""),
+        vb.get("market", "h2h"), str(vb.get("line", "")),
+    ])
+
+
+def _load_notified() -> dict:
+    if _NOTIFIED_PATH.exists():
+        try:
+            return json.loads(_NOTIFIED_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_notified(notified: dict):
+    tmp = _NOTIFIED_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(notified, indent=2))
+    os.replace(tmp, _NOTIFIED_PATH)
+
+
+def _filter_notify(bets: list[dict], notified: dict, now_dt: datetime) -> list[dict]:
+    """Return bets that haven't been notified in the last 12h (unless odds improved ≥2%)."""
+    out = []
+    for vb in bets:
+        key = _notified_key(vb)
+        entry = notified.get(key)
+        if entry:
+            last_dt = datetime.fromisoformat(entry["last_notified_at"])
+            if (now_dt - last_dt).total_seconds() / 3600 < _NOTIFY_DEDUP_HOURS:
+                last_odds = entry.get("last_odds", 0.0)
+                improvement = (vb["odds"] - last_odds) / last_odds if last_odds > 0 else 0
+                if improvement < _NOTIFY_ODDS_IMPROVEMENT:
+                    print(f"[ntfy] Skipping duplicate: {vb['home']} vs {vb['away']} [{vb['side']}] "
+                          f"@ {vb['book']} (last notified {(now_dt - last_dt).total_seconds()/3600:.1f}h ago)")
+                    continue
+        out.append(vb)
+    return out
+
+
+def _mark_notified(bets: list[dict], notified: dict, now_dt: datetime):
+    iso = now_dt.isoformat()
+    for vb in bets:
+        key = _notified_key(vb)
+        existing = notified.get(key, {})
+        notified[key] = {
+            "first_notified_at": existing.get("first_notified_at", iso),
+            "last_notified_at": iso,
+            "last_odds": vb["odds"],
+        }
+
+
 SPORT_GROUPS = {
     "football": {s[0] for s in FIXED_SPORTS if s[0].startswith("soccer_")},
     "nba":      {"basketball_nba"},
@@ -519,13 +579,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sports", default=None,
                         help="Limit scan to: football, tennis, nba, or a specific sport key")
-    parser.add_argument("--max-tennis", type=int, default=99,
+    parser.add_argument("--max-tennis", type=int, default=8,
                         help="Cap number of active tennis tournaments to scan (saves API quota)")
     args = parser.parse_args()
 
     BANKROLL = _get_bankroll() if _RISK else float(os.environ.get("BANKROLL", 1000.0))
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.strftime("%Y-%m-%d %H:%M UTC")
     label = f" [{args.sports}]" if args.sports else ""
     print(f"=== Multi-Sport Value Bet Scanner{label} === {now}")
     print(f"Bankroll: £{BANKROLL:.0f}\n")
@@ -564,6 +625,11 @@ def main():
         _maybe_notify_no_bets(len(all_sports))
         return
 
+    # Tag each bet's source bucket before the risk pipeline can drop or reorder bets.
+    # Re-splitting by edge alone after the pipeline loses the model-agree condition.
+    for vb in output_bets:
+        vb["_bucket"] = "model" if vb["edge"] < MIN_EDGE else "kaunitz"
+
     # Compute raw stakes then apply full risk pipeline
     for vb in output_bets:
         vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL) if _RISK else (
@@ -578,9 +644,9 @@ def main():
             print(f"[risk] Drawdown brake active: bankroll £{current_br:.0f} vs high water £{high_water:.0f} "
                   f"— stakes halved")
         output_bets = _apply_risk_pipeline(output_bets, BANKROLL, dd_mult)
-        # Re-split after risk pipeline (some bets may have been zeroed out)
-        kaunitz_bets = [b for b in output_bets if b["edge"] >= MIN_EDGE]
-        model_bets   = [b for b in output_bets if b["edge"] < MIN_EDGE]
+        # Re-split using pre-pipeline tags (edge-only re-split drops the model-agree condition)
+        kaunitz_bets = [b for b in output_bets if b.get("_bucket") == "kaunitz"]
+        model_bets   = [b for b in output_bets if b.get("_bucket") == "model"]
         print(f"[risk] After risk pipeline: {len(output_bets)} bet(s) "
               f"(portfolio cap {15}%, fixture cap {5}%, rounding £5)")
     print()
@@ -672,37 +738,50 @@ def main():
     print(f"[log] {len(new_rows)} bets appended to logs/bets.csv"
           + (f" ({skipped} duplicate(s) skipped)" if skipped else ""))
 
-    # Kaunitz bets (≥3%): notify by confidence tier
+    # Kaunitz bets (≥3%): notify by confidence tier, with dedupe
+    notified = _load_notified()
     high = [vb for vb in kaunitz_bets if vb["confidence"] == "HIGH"]
     med  = [vb for vb in kaunitz_bets if vb["confidence"] == "MED"]
     low  = [vb for vb in kaunitz_bets if vb["confidence"] == "LOW"]
 
-    if high:
+    high_new = _filter_notify(high, notified, now_dt)
+    if high_new:
         notify(
-            title=f"Bets HIGH - {len(high)} bet{'s' if len(high) > 1 else ''} (>=30 books)",
-            message="\n\n".join(format_bet_line(vb) for vb in high),
+            title=f"Bets HIGH - {len(high_new)} bet{'s' if len(high_new) > 1 else ''} (>=30 books)",
+            message="\n\n".join(format_bet_line(vb) for vb in high_new),
             priority="high",
         )
-    if med:
+        _mark_notified(high_new, notified, now_dt)
+
+    med_new = _filter_notify(med, notified, now_dt)
+    if med_new:
         notify(
-            title=f"Bets MED - {len(med)} bet{'s' if len(med) > 1 else ''} (20-29 books)",
-            message="\n\n".join(format_bet_line(vb) for vb in med),
+            title=f"Bets MED - {len(med_new)} bet{'s' if len(med_new) > 1 else ''} (20-29 books)",
+            message="\n\n".join(format_bet_line(vb) for vb in med_new),
             priority="default",
         )
-    if low:
+        _mark_notified(med_new, notified, now_dt)
+
+    low_new = _filter_notify(low, notified, now_dt)
+    if low_new:
         notify(
-            title=f"Bets LOW - {len(low)} bet{'s' if len(low) > 1 else ''} (<20 books)",
-            message="\n\n".join(format_bet_line(vb) for vb in low),
+            title=f"Bets LOW - {len(low_new)} bet{'s' if len(low_new) > 1 else ''} (<20 books)",
+            message="\n\n".join(format_bet_line(vb) for vb in low_new),
             priority="low",
         )
+        _mark_notified(low_new, notified, now_dt)
 
     # Model-filtered bets (2-3% + model agrees): single notification, low priority
-    if model_bets:
+    model_new = _filter_notify(model_bets, notified, now_dt)
+    if model_new:
         notify(
-            title=f"Bets MODEL - {len(model_bets)} bet{'s' if len(model_bets) > 1 else ''} (2-3% + model agree)",
-            message="\n\n".join(format_bet_line(vb) for vb in model_bets),
+            title=f"Bets MODEL - {len(model_new)} bet{'s' if len(model_new) > 1 else ''} (2-3% + model agree)",
+            message="\n\n".join(format_bet_line(vb) for vb in model_new),
             priority="low",
         )
+        _mark_notified(model_new, notified, now_dt)
+
+    _save_notified(notified)
 
 
 if __name__ == "__main__":

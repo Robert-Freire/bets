@@ -80,18 +80,26 @@ def calc_pnl(result: str, actual_stake: str, odds: str) -> str:
 
 
 def load_drift() -> dict[tuple, list[dict]]:
-    """Load drift.csv keyed by (home, away, kickoff, side) → sorted drift rows."""
+    """Load drift.csv keyed by (home, away, kickoff, side, market, line) → sorted drift rows."""
     if not DRIFT_CSV.exists():
         return {}
     by_bet: dict[tuple, list[dict]] = {}
     with open(DRIFT_CSV, newline="") as f:
         for row in csv.DictReader(f):
-            key = (row["home"], row["away"], row["kickoff"], row["side"])
+            key = (row["home"], row["away"], row["kickoff"], row["side"],
+                   row.get("market", "h2h"), row.get("line", ""))
             by_bet.setdefault(key, []).append(row)
     # Sort each bet's drift rows by t_minus_min descending (T-60 first)
     for rows in by_bet.values():
-        rows.sort(key=lambda r: int(r.get("t_minus_min", 0)), reverse=True)
+        rows.sort(key=lambda r: _safe_t_minus(r.get("t_minus_min")), reverse=True)
     return by_bet
+
+
+def _safe_t_minus(v) -> int:
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return 0
 
 
 def _drift_direction(drift_rows: list[dict]) -> str | None:
@@ -147,7 +155,8 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
     if drift:
         directions = []
         for b in placed:
-            key = (b["home"], b["away"], b["kickoff"], b["side"])
+            key = (b["home"], b["away"], b["kickoff"], b["side"],
+                   b.get("market", "h2h"), b.get("line", ""))
             rows = drift.get(key, [])
             d = _drift_direction(rows)
             if d is not None:
@@ -182,7 +191,8 @@ def index():
 
     # Attach drift direction to each settled bet for the template
     for b in done:
-        key = (b["home"], b["away"], b["kickoff"], b["side"])
+        key = (b["home"], b["away"], b["kickoff"], b["side"],
+               b.get("market", "h2h"), b.get("line", ""))
         b["_drift_dir"] = _drift_direction(drift.get(key, []))
 
     return render_template("index.html", pending=pending, done=done, stats=stats)

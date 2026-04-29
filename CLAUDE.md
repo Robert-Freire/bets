@@ -58,7 +58,7 @@ La Liga excluded — too noisy, not enough UK bookmaker coverage yet.
 ```bash
 # .env (gitignored)
 ODDS_API_KEY=...
-BANKROLL=1000   # optional override; default in config
+BANKROLL=1000   # optional override; falls back to config.json → default 1000
 ```
 
 Free tier: 500 requests/month. Scanner uses ~474/month. Closing-line script adds ~6–10 calls on match days (zero on idle days).
@@ -136,7 +136,7 @@ Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 | Per-fixture cap | Max 5% of bankroll across all sides of one game |
 | Portfolio cap | Max 15% of bankroll per scan |
 | Drawdown brake | If bankroll < 85% of high-water → stakes halved |
-| Bankroll source | `BANKROLL` env var or `config.json` |
+| Bankroll source | `BANKROLL` env var → `config.json` → default £1000 |
 
 ## CLV diagnostics (Phase 3)
 
@@ -147,6 +147,10 @@ Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 - Dashboard aggregates: avg CLV and % of bets where line drifted toward you
 
 **CLV is the gate**: if avg CLV stays negative over ~50 bets, the system has no real edge and further build-out (Phases 5–10) is pointless.
+
+**CLV scope limitations:**
+- **Tennis bets produce no CLV/drift.** `closing_line.py` skips tennis because sport labels (API `title` field) are dynamic and not in the fixed `LABEL_TO_KEY` map. Will be fixed in Phase 6 when `sport_key` is stored in `bets.csv`.
+- **Totals and BTTS bets always show `model_signal=?`.** The CatBoost model only produces signals for h2h on EPL, Bundesliga, Serie A, and Ligue 1. The 2–3% model-filtered notification path therefore only ever fires on h2h bets in those four leagues — never on totals, BTTS, Championship, Bundesliga 2, NBA, or tennis.
 
 ## Statistical model (built, not yet in production)
 

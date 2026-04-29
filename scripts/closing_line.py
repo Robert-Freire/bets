@@ -278,7 +278,9 @@ def main():
     for bet in active_bets:
         sport_key = LABEL_TO_KEY.get(bet.get("sport", ""))
         if not sport_key:
-            # Tennis tournaments — sport key not in fixed map; skip until Phase 5/6
+            # Tennis labels are dynamic (API title field) and not in LABEL_TO_KEY.
+            # Tennis bets produce no CLV/drift until sport_key is stored in bets.csv (Phase 6).
+            print(f"  [skip] {bet.get('sport','?')} — no sport_key mapping for CLV (tennis excluded)")
             continue
         by_sport.setdefault(sport_key, []).append(bet)
 
@@ -345,26 +347,32 @@ def main():
             if 0 <= minutes_to_ko <= 6:
                 ck = (home, away, kickoff_str, side, market, line_val)
                 if ck not in existing_closing and pin_prob:
-                    your_odds = float(bet.get("odds") or 0)
-                    clv = round(your_odds * pin_prob - 1, 6) if your_odds else ""
+                    flagged_odds = float(bet.get("odds") or 0)
+                    # Use T-1 re-fetched price if available; it reflects actually-tradable odds.
+                    # Fall back to originally flagged odds only if the book is no longer quoted.
+                    close_odds = your_book_odds if your_book_odds else flagged_odds
+                    clv = round(close_odds * pin_prob - 1, 6) if close_odds else ""
                     closing_rows.append({
-                        "captured_at":         captured,
-                        "home":                home,
-                        "away":                away,
-                        "kickoff":             kickoff_str,
-                        "side":                side,
-                        "market":              market,
-                        "line":                line_val,
-                        "pinnacle_devig_prob":  round(pin_prob, 6),
-                        "pinnacle_raw_odds":   pin_odds,
-                        "clv_pct":             clv,
+                        "captured_at":            captured,
+                        "home":                   home,
+                        "away":                   away,
+                        "kickoff":                kickoff_str,
+                        "side":                   side,
+                        "market":                 market,
+                        "line":                   line_val,
+                        "pinnacle_devig_prob":    round(pin_prob, 6),
+                        "pinnacle_raw_odds":      pin_odds,
+                        "your_book_flagged_odds": flagged_odds or "",
+                        "your_book_close_odds":   your_book_odds or "",
+                        "clv_pct":                clv,
                     })
                     clv_updates[ck] = {
                         "pinnacle_close_prob": str(round(pin_prob, 6)),
                         "clv_pct":             str(clv),
                     }
                     clv_str = f"{clv:+.2%}" if isinstance(clv, float) else "n/a"
-                    print(f"  [closing]    {home} vs {away} [{side}] | CLV {clv_str}")
+                    stale = "" if your_book_odds else " (used flagged odds — book not quoted at T-1)"
+                    print(f"  [closing]    {home} vs {away} [{side}] | CLV {clv_str}{stale}")
 
     # --- Write closing_lines.csv ---
     if closing_rows:
@@ -373,7 +381,8 @@ def main():
             fcntl.flock(f, fcntl.LOCK_EX)
             w = csv.DictWriter(f, fieldnames=[
                 "captured_at", "home", "away", "kickoff", "side", "market", "line",
-                "pinnacle_devig_prob", "pinnacle_raw_odds", "clv_pct",
+                "pinnacle_devig_prob", "pinnacle_raw_odds",
+                "your_book_flagged_odds", "your_book_close_odds", "clv_pct",
             ])
             if write_hdr:
                 w.writeheader()
