@@ -210,8 +210,8 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | R.6 | Graduate winning **variants** (production-6 evidence) AND winning **leagues** (per-league evidence) → scanner defaults | Pending (conditional on R.5.5c) |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Pending |
 | R.8 | Draw-bias variant K (needs xG runtime hookup) | Pending |
-| R.9 | Asian Handicap feasibility probe (The Odds API) | Pending |
-| R.10 | AH probability conversion module (planning only) | Deferred |
+| R.9 | Asian Handicap feasibility probe (The Odds API) | ✅ Done (`docs/AH_FEASIBILITY.md`; AH fetchable via `spreads` key; UK books too thin; Pinnacle anchor viable post-upgrade) |
+| R.10 | AH probability conversion module (planning only) | Blocked on CLV confirmation (gate: R.6 graduations + avg CLV>0 over ≥50 bets + sharp-weighted shadow signal; see `docs/AH_FEASIBILITY.md` §6) |
 
 Full roadmap: `docs/PLAN.md`. 2026-04 sprint: `docs/PLAN_RESEARCH_2026-04.md`.
 

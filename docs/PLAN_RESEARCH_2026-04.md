@@ -137,8 +137,8 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.6 | Graduate winning variants AND winning leagues → scanner defaults | Wed | conditional on R.5.5c |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
 | R.8 | Draw-bias variant (K) — needs xG runtime hookup | Thu–Fri | pending |
-| R.9 | Asian Handicap feasibility probe (The Odds API) | Thu–Fri | pending |
-| R.10 | AH probability conversion module (planning only) | Following week | deferred |
+| R.9 | Asian Handicap feasibility probe (The Odds API) | Thu–Fri | ✅ done (2026-04-30, `docs/AH_FEASIBILITY.md`) |
+| R.10 | AH probability conversion module (planning only) | Following week | **blocked on CLV confirmation** (gate in §R.10 below) |
 
 **Dependency graph:**
 
@@ -1174,15 +1174,22 @@ pytest -q
 
 ---
 
-## Phase R.10 — AH probability conversion module (deferred, planning only)
+## Phase R.10 — AH probability conversion module (blocked on CLV confirmation)
 
 **Goal.** Implement Hegarty & Whelan's closed-form AH→prob conversion. Adds AH-derived prob as a *second anchor* alongside Pinnacle h2h.
 
-**Inputs.** R.9 says "yes, AH is fetchable."
+**Inputs.** R.9 confirmed AH is fetchable via The Odds API `spreads` market key, but only Pinnacle (in `eu` region) is usable as an anchor; UK books are too thin (`docs/AH_FEASIBILITY.md`). Adds ~90–120 calls/month → forces $79/month Starter tier upgrade.
 
-**Tasks.** (To be detailed in a follow-up plan once R.9 is in.)
+**Status.** **Blocked on CLV confirmation**, not merely deferred. Per `RESEARCH_NOTES_2026-04.md` §6, operational cost is the binding constraint on this system, not anchor quality. Spending $948/year + ~9h to refine a signal whose base utility we haven't yet measured is the wrong priority order.
 
-**Status.** Not committed for next week. Planning carryover only — listed here so it doesn't get lost.
+**Explicit gate to unblock** (all three must hold):
+1. R.6 has graduated ≥1 shadow variant to default with walk-forward evidence.
+2. Avg CLV across graduated variants is positive over ≥50 settled bets.
+3. Either (a) R.5.5c surfaces ≥1 league with h2h Pinnacle book count consistently <5, OR (b) `J_sharp_weighted` shadow shows materially better CLV than `A_production`.
+
+If gate fails: AH won't rescue an unconfirmed edge; reallocate effort to restriction-resilience (RESEARCH_NOTES §3.1, 3.3, 3.4).
+
+**Tasks.** (Detailed plan to be written when the gate clears, not before.)
 
 ---
 
@@ -1195,7 +1202,7 @@ pytest -q
 - ~~**Zenodo 84k-match dataset**~~ — investigated under R.5.5b, rejected: schema ships only aggregated odds (`maxhome`/`avghome`), no per-bookmaker triplets — incompatible with our consensus strategy. Full rationale in `docs/ZENODO_INGEST_NOTES.md`. R.5.5b pivoted to football-data.co.uk for the same 16 new leagues.
 - **`pybettor` evaluation** (RESEARCH_NOTES §9.4): 30-min skim of `ian-shepherd/pybettor` to determine if any utilities replace what we currently maintain. Decision: dep or reference.
 - **ELO prior variant `Q_elo_prior`** (RESEARCH_NOTES §9.3): WagerBrain's `elo_prob(elo_diff)` is a cheap model-agreement signal. Could substitute for CatBoost on leagues we don't have CatBoost coverage for (Championship, Bundesliga 2, NBA, tennis). Phase 7-adjacent.
-- **Asian Handicap as second anchor** (RESEARCH_NOTES §7.1): if R.9 says AH is fetchable, implement Hegarty & Whelan's closed-form prob conversion (Eqs 6–28) in `src/betting/asian_handicap.py`. Use AH-derived prob alongside Pinnacle h2h as a *second* anchor (averaging the two when both available). The point: AH is the efficient market — it's the strongest external probability signal we could integrate.
+- **Asian Handicap as second anchor** (RESEARCH_NOTES §7.1, R.9 done 2026-04-30): R.9 confirmed AH is fetchable but only Pinnacle (`eu` region) is usable; pushes API over free-tier budget. R.10 (implementation) is now **blocked on CLV confirmation** — see Phase R.10 above for the explicit unblock gate. Not a free carryover; it's a $948/year + ~9h investment that needs base-edge validation first.
 - **Dashboard pagination/filter for variants** (RESEARCH_NOTES §9 implications): with R.1 + R.1.5 + R.1.6 + R.2 we go from 8 to 13–14 strategy variants. The current dashboard's "Three bet sections" list will get crowded. Add a strategy filter dropdown.
 
 ---
@@ -1219,7 +1226,7 @@ pytest -q
 - [ ] **R.5.5c walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
 - [ ] At least one variant graduated (R.6) with explicit walk-forward evidence, OR explicit "no graduation this week" note citing CI breadth.
 - [ ] R.7 schema migration done (independent of graduation).
-- [ ] R.9 AH feasibility note written.
+- [x] R.9 AH feasibility note written (`docs/AH_FEASIBILITY.md`, 2026-04-30).
 - [ ] R.8 draw-bias variant in shadow if xG hookup landed; deferred to following week if not.
 - [ ] CLAUDE.md and README.md reflect any default changes.
 
