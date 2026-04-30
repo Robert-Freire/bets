@@ -51,6 +51,13 @@ crontab -e
 # Make sure paths use /home/pi/bets/ not /home/rfreire/projects/bets/
 ```
 
+Include the research scanner crons (update path for Pi):
+```
+0 10 * * 1   cd /home/pi/bets && RESEARCH_SCAN_ENABLE=1 python3 scripts/research_scan.py --mode curated >> logs/research.log 2>&1
+0 10 1 * *   cd /home/pi/bets && RESEARCH_SCAN_ENABLE=1 python3 scripts/research_scan.py --mode open    >> logs/research.log 2>&1
+```
+The script calls `claude` CLI internally — ensure Claude Code is installed on the Pi and authenticated (`claude --version`). See `docs/RESEARCH_SCANNER.md` for auth requirements.
+
 ### 1.6 Test the scanner
 ```bash
 cd ~/bets && export $(cat .env) && python3 scripts/scan_odds.py --sports football

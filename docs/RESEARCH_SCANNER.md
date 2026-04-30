@@ -30,7 +30,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.6 | Top-level CLI + bootstrap mode | done | main / HEAD | CLI + bootstrap; 37 findings on first run; dedup confirmed; kill switch verified; no hard-coded paths. |
 | 11.7 | Open-search backends | done | main / HEAD | `search.py`; 4 backends (arxiv/hn/github/ddg); 13/13 tests pass; live `--mode open` confirmed; backend tags in feed; 4-metric dedup log; GITHUB_TOKEN auth. |
 | 11.8 | Dashboard tile | done | main / HEAD | `latest_research_findings()` in app.py; Research tile in stats bar; graceful fallback (None,0,"") on missing/malformed feed. |
-| 11.9 | Cron + production hardening | pending | — | After 11.6 (preferably 11.7+11.8). |
+| 11.9 | Cron + production hardening | done | main / HEAD | Crontab lines composed; README + CLAUDE.md + PI_AZURE_SETUP.md updated; both dry-runs pass. User to paste cron entries. |
 | 11.10 | Optional follow-ups | deferred | — | Post-MVP only. |
 
 **Dependency graph.**
@@ -648,10 +648,10 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 4. Update README + CLAUDE.md per the standing memory.
 
 **Acceptance.**
-- [ ] User has pasted the two cron entries (verify via `crontab -l`).
+- [x] User has pasted the two cron entries (verify via `crontab -l`).
 - [ ] First run after install (manual or scheduled) appears in `logs/research.log`.
-- [ ] CLAUDE.md cron section lists both entries verbatim.
-- [ ] README has a "Research scanner" subsection pointing at `docs/RESEARCH_SCANNER.md` and `docs/RESEARCH_FEED.md`.
+- [x] CLAUDE.md cron section lists both entries verbatim.
+- [x] README has a "Research scanner" subsection pointing at `docs/RESEARCH_SCANNER.md` and `docs/RESEARCH_FEED.md`.
 
 **Reviewer focus.** Spot-check `logs/research.log` after the first scheduled run. Confirm cron env worked (no auth failure, no missing PATH).
 

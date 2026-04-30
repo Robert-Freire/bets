@@ -141,6 +141,29 @@ To log a bet: enter the odds you got, your actual stake, and hit Save. Fill in t
 
 ---
 
+## Research scanner
+
+`scripts/research_scan.py` fetches a curated list of external sources (academic papers, comparable open-source projects, discovery feeds) and runs them through Claude to surface new strategy ideas, evidence, and risks. Findings are appended to [`docs/RESEARCH_FEED.md`](docs/RESEARCH_FEED.md) (newest first) and appear as a tile on the dashboard.
+
+```bash
+# First run — deep read of all Tier-A reference sources
+RESEARCH_SCAN_ENABLE=1 python3 scripts/research_scan.py --mode bootstrap
+
+# Weekly — change-watch on Tier A + Tier B active feeds
+RESEARCH_SCAN_ENABLE=1 python3 scripts/research_scan.py --mode curated
+
+# Monthly — open search across 7 queries × 4 backends (arXiv, HN, GitHub, DDG)
+RESEARCH_SCAN_ENABLE=1 python3 scripts/research_scan.py --mode open
+
+# Dry run (no Claude call, just prints byte counts)
+RESEARCH_SCAN_ENABLE=1 python3 scripts/research_scan.py --mode curated --dry-run
+```
+
+Kill switch: `RESEARCH_SCAN_ENABLE=0` (or unset) exits without calling Claude.
+See [`docs/RESEARCH_SCANNER.md`](docs/RESEARCH_SCANNER.md) for the full spec.
+
+---
+
 ## Cron schedule (WSL, UTC)
 
 ```
@@ -160,6 +183,10 @@ To log a bet: enter the odds you got, your actual stake, and hit Save. Fill in t
 # Housekeeping
 0  8  1,15 * *  Bi-weekly 8:00      sports discovery check
 0  3  * * *     Daily 3:00          bets.csv backup (14-day retention)
+
+# Research scanner
+0 10 * * 1      Mon 10:00           curated sources (Tier A + Tier B)
+0 10 1 * *      1st of month        open-search (7 queries × 4 backends)
 ```
 
 ---

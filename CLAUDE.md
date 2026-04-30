@@ -89,6 +89,10 @@ Each region (`uk`, `eu`) counts as a separate API call.
 # Housekeeping
 0  8  1,15 * *  Bi-weekly 8am    — sports discovery check
 0  3  * * *     3am daily        — bets.csv backup (14-day retention)
+
+# Research scanner
+0 10 * * 1      Mon 10:00        — curated sources (Tier A change-watch + Tier B)
+0 10 1 * *      1st of month 10:00 — open-search (7 queries × 4 backends)
 ```
 
 ## Key files
@@ -190,6 +194,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
 | 9 | Pi / Azure infrastructure | Pending |
+| 11.0–11.9 | Research scanner (source scan → Claude → RESEARCH_FEED.md → dashboard tile → cron) | ✅ Done |
 
 Full roadmap: `docs/PLAN.md`.
 
