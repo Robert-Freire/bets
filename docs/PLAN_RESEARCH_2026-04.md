@@ -902,30 +902,43 @@ test -f scripts/refresh_fdco_data.py && python3 -c "import scripts.refresh_fdco_
 
 ---
 
-## Phase R.5.5c — Walk-forward run + per-fold report (~30 min)
+## Phase R.5.5c — Walk-forward run + per-fold report (~1–1.5h)
 
-**Goal.** Use the R.5.5a scaffold to run a walk-forward backtest with `TimeSeriesSplit(5)` over `raw` / `shin` / `power` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. Write per-fold ROI + bet counts, plus aggregate mean ± 95% CI, into `docs/BACKTEST.md`. Flag any edge×method combo whose CI crosses zero.
+**Goal.** Use the R.5.5a scaffold to run a walk-forward backtest with `TimeSeriesSplit(5)` over **30 combos**: `consensus_method ∈ {raw, shin, power}` × `consensus_mode ∈ {mean, pinnacle_only}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. Write per-fold ROI + bet counts, plus aggregate mean ± 95% CI, into `docs/BACKTEST.md`. Flag any combo whose CI crosses zero. The `consensus_mode` axis directly tests the question **"does the consensus-of-many-books complexity earn its keep, or would Pinnacle-anchor alone have done as well?"** — material evidence for R.6 graduations.
 
-**Why now.** Whole-period ROI hides per-season variance. Walk-forward reveals consistency. Required for any defensible default-flip in R.6.
+**Why now.** Whole-period ROI hides per-season variance. Walk-forward reveals consistency. The Pinnacle-only comparison is what tells us whether `D_pinnacle_only` should graduate to the production default; without it, R.6 would only have CLV-from-shadow evidence (slow to accumulate).
 
 **Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`). R.5.5b done (16 new leagues from football-data.co.uk added to `data/raw/`; loader returns ≥50k matches across ≥15 leagues).
 
 **Outputs.**
-- `scripts/walk_forward_backtest.py` — entry script: loads data via `load_backtest_data()`, loops `walk_forward_backtest()` over the 15 `(consensus_method, min_edge)` combos, aggregates per-fold ROI + 95% CI per combo, writes results.
+- Extension of `src/betting/consensus.py`'s three public functions (`compute_consensus`, `find_consensus_bets`, `backtest_consensus`) to accept a new `consensus_mode: str = "mean"` parameter with values `"mean"` (current behaviour, default) and `"pinnacle_only"`.
+- `scripts/walk_forward_backtest.py` — entry script: loads data via `load_backtest_data()`, loops `walk_forward_backtest()` over the **30 combos**, aggregates per-fold ROI + 95% CI per combo, writes results.
 - `docs/BACKTEST.md` — new "Walk-forward (5 folds)" section appended; legacy whole-period tables retained.
-- 95% CI aggregation helper (in the script or as a small function in `src/betting/walk_forward.py`).
+- `tests/test_consensus_pinnacle_only.py` (or extension to existing test file) covering the new `consensus_mode="pinnacle_only"` branch.
 
 **Tasks.**
-1. **Write `scripts/walk_forward_backtest.py`.** Loop over `consensus_method ∈ {raw, shin, power}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}` = 15 combos. For each: call `walk_forward_backtest(matches, consensus_method=..., min_edge=..., n_splits=5)`; capture the 5-row per-fold DataFrame.
-2. **Aggregate.** For each combo, compute mean ROI ± 95% CI (t-distribution, n=5: `t.ppf(0.975, 4) ≈ 2.776`).
-3. **Append walk-forward section to `docs/BACKTEST.md`.** Per-fold table (3 tables of 5×5, or one 15×5 table). Aggregate row per combo: mean ± 95% CI.
-4. **Interpretation note.** Mark any `(consensus_method, min_edge)` combo whose 95% CI crosses zero — those cannot defend a default-flip in R.6.
+1. **Extend `compute_consensus(matches, consensus_method, consensus_mode="mean")`.** When `consensus_mode="pinnacle_only"`: for each row, use only Pinnacle's columns (`PSH/PSD/PSA`) — devig with the requested `consensus_method`, return `consensus_prob_{H,D,A}` from Pinnacle's row directly. If Pinnacle's columns are missing for a row, set `consensus_prob_*` to NaN and `n_books_used = 0`. Otherwise `n_books_used = 1`.
+2. **Extend `find_consensus_bets(..., consensus_mode="mean")`.** Forward `consensus_mode` to `compute_consensus`. When `consensus_mode="pinnacle_only"`: **skip Pinnacle when iterating bet candidates** — Pinnacle is the anchor, not a book to bet at. Also: relax the `min_books` check (Pinnacle-only inherently has `n_books_used = 1`, so the default `min_books=3` would reject everything; either set `min_books=1` automatically when mode is pinnacle_only, OR document that the caller must override).
+3. **Extend `backtest_consensus(..., consensus_mode="mean")`.** Forward to `find_consensus_bets`. No other changes — same returned dict shape.
+4. **Tests** in `tests/test_consensus_pinnacle_only.py`:
+   - On a fabricated 1-row fixture with `PSH=2.50, PSD=3.30, PSA=2.90` and a UK book at `B365H=2.80`, `consensus_mode="pinnacle_only"` flags a HOME bet at B365 (consensus prob from Pinnacle = ~0.40, B365 implied ~0.36, edge ≈ 4%).
+   - Same fixture with `B365H=2.50` — no flag (no edge).
+   - Fixture missing all `PS*` columns → `n_books_used=0`, no bet flagged.
+   - Smoke: `consensus_mode="pinnacle_only"` does NOT flag a bet at Pinnacle itself even when its own price is theoretically beatable.
+5. **Write `scripts/walk_forward_backtest.py`.** Loop the **30 combos**: `consensus_method ∈ {raw, shin, power}` × `consensus_mode ∈ {mean, pinnacle_only}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. For each: call `walk_forward_backtest(matches, consensus_method=..., consensus_mode=..., min_edge=..., n_splits=5)` (R.5.5a's primitive needs to forward the new kwarg — already does via `**kwargs`); capture the 5-row per-fold DataFrame.
+6. **Aggregate.** For each combo: mean ROI ± 95% CI (t-distribution, n=5: `scipy.stats.t.ppf(0.975, 4) ≈ 2.776`).
+7. **Append walk-forward section to `docs/BACKTEST.md`.** Two parallel 3×5 tables (one per `consensus_mode`), each cell holding `ROI% ± CI` and `n_bets`. Plus a head-to-head summary: per `(devig × edge)` cell, which mode wins on aggregate ROI, and whether the difference's CI crosses zero (i.e. statistically distinguishable).
+8. **Interpretation note.** Mark CI-crosses-zero combos. Explicitly answer: "does `pinnacle_only` match or beat `mean` at any `(devig, edge)` combo with non-overlapping CI?" — that's the R.6-relevant signal for graduating `D_pinnacle_only` to production.
 
 **Acceptance.**
-- [ ] `scripts/walk_forward_backtest.py` runs end-to-end on the existing dataset.
-- [ ] `docs/BACKTEST.md` walk-forward section exists with all 3 consensus methods × 5 edge thresholds.
+- [ ] `compute_consensus` / `find_consensus_bets` / `backtest_consensus` accept `consensus_mode` kwarg with default `"mean"` (preserves current behaviour for all existing callers).
+- [ ] `tests/test_consensus_pinnacle_only.py` passes (4 tests).
+- [ ] `scripts/walk_forward_backtest.py` runs end-to-end on the existing dataset and produces 30 combo rows.
+- [ ] `docs/BACKTEST.md` walk-forward section exists with both `consensus_mode` values × all 3 consensus methods × 5 edge thresholds.
 - [ ] Per-fold variance reported. Aggregate mean ± 95% CI annotated.
 - [ ] CI-crosses-zero combos explicitly flagged in the interpretation note.
+- [ ] Head-to-head `mean` vs `pinnacle_only` summary present, with explicit yes/no answer to the "does complexity earn its keep" question.
+- [ ] No regressions in `pytest -q` — the default-arg change must not break any existing test.
 
 **Verification commands.**
 ```bash
@@ -936,16 +949,37 @@ python3 scripts/walk_forward_backtest.py 2>&1 | tail -20
 grep -c "Walk-forward" docs/BACKTEST.md  # >= 1
 grep -cE "(95% CI|confidence interval|fold)" docs/BACKTEST.md  # >= 1
 
-# All 3 consensus methods present in walk-forward
-grep -A40 "Walk-forward" docs/BACKTEST.md | grep -cE "(raw|shin|power)"  # >= 3
+# Both consensus modes present
+grep -A60 "Walk-forward" docs/BACKTEST.md | grep -cE "(mean|pinnacle_only)"  # >= 2
 
-# No regressions
-pytest -q
+# All 3 consensus methods present
+grep -A60 "Walk-forward" docs/BACKTEST.md | grep -cE "(raw|shin|power)"  # >= 3
+
+# Head-to-head answer present
+grep -iE "(does .* earn|complexity|pinnacle.*beat|mean.*beat)" docs/BACKTEST.md | head -3
+
+# Backwards compatibility — existing callers without consensus_mode still work
+python3 -c "
+from src.betting.consensus import backtest_consensus
+import pandas as pd
+# Smoke: existing default-arg call still works (no consensus_mode kwarg)
+help(backtest_consensus)  # should show consensus_mode in signature with default 'mean'
+"
+
+# Tests pass (including the new pinnacle_only suite)
+pytest -q tests/test_consensus_pinnacle_only.py
+pytest -q  # no regressions
 ```
 
-**Reviewer focus.** That CI uses the right t-quantile for n=5 (`scipy.stats.t.ppf(0.975, 4) ≈ 2.776`), NOT 1.96 (which would be the normal-approximation quantile and is too narrow for n=5). That CI-crosses-zero combos are correctly identified and prominently flagged. That the script doesn't re-implement walk-forward logic — it should be a thin loop over `walk_forward_backtest()` from R.5.5a.
+**Reviewer focus.**
+- **CI uses the right t-quantile** for n=5 (`scipy.stats.t.ppf(0.975, 4) ≈ 2.776`), NOT 1.96 (normal-approximation; too narrow for n=5).
+- **Pinnacle excluded from bet candidates in `pinnacle_only` mode.** Re-read the iteration in `find_consensus_bets` — confirm `if consensus_mode == "pinnacle_only" and book == "PS": continue`. Without this, the strategy could "find an edge" against itself.
+- **`min_books` handling under `pinnacle_only`.** The current default `min_books=3` would reject every Pinnacle-only candidate (since `n_books_used = 1`). The implementer must either auto-override to 1 inside the function or update the script's call to pass `min_books=1` for that mode.
+- **CI-crosses-zero combos correctly flagged** and prominently called out — those cannot defend an R.6 default-flip.
+- **Default-arg change is backwards compatible.** Existing callers of all 3 functions in `consensus.py` (e.g. `main.py`, R.5's whole-period analysis) must continue to work without changes — the `consensus_mode="mean"` default preserves current behaviour.
+- **Script is a thin loop**, not a re-implementation of walk-forward logic — it should call `walk_forward_backtest()` from R.5.5a.
 
-**Carryover.** Once this lands, `compare_strategies.py` and any future model-overhaul work (Phase 7) inherits the walk-forward primitive directly (no third-party dep).
+**Carryover.** Once this lands, `compare_strategies.py` and any future model-overhaul work (Phase 7) inherits both the walk-forward primitive and the `consensus_mode` axis. R.6 has direct walk-forward evidence on `D_pinnacle_only` graduation — no longer dependent solely on slow-to-accumulate CLV data.
 
 ---
 
