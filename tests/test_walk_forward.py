@@ -80,3 +80,19 @@ def test_no_bets_when_edge_impossible():
     result = walk_forward_backtest(m, consensus_method="raw", min_edge=0.99, n_splits=5)
     assert (result["n_bets"] == 0).all(), "Expected 0 bets per fold at min_edge=0.99"
     assert (result["roi"] == 0.0).all(), "Expected roi=0 per fold when no bets placed"
+
+
+def test_loader_includes_zenodo_new_leagues():
+    """After Zenodo ingest, loader returns ≥50k rows across ≥15 leagues.
+
+    Skipped when data/raw/zenodo/ has no CSV files — R.5.5b is BLOCKED because
+    the Zenodo dataset only has aggregated odds (maxhome/avghome), not the
+    per-bookmaker triplets (B365H/BWH/…) that backtest_consensus() requires.
+    """
+    from pathlib import Path as _Path
+    zenodo_dir = _Path(__file__).resolve().parent.parent / "data" / "raw" / "zenodo"
+    if not any(zenodo_dir.glob("*.csv")):
+        pytest.skip("data/raw/zenodo/ has no CSVs — R.5.5b BLOCKED, schema incompatible")
+    m = load_backtest_data()
+    assert len(m) >= 50_000, f"Expected >=50k matches, got {len(m)}"
+    assert m["Div"].nunique() >= 15, f"Expected >=15 divisions, got {m['Div'].nunique()}"

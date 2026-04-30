@@ -1,4 +1,5 @@
 data/raw/
+data/raw/zenodo/
 data/processed/
 .env
 __pycache__/

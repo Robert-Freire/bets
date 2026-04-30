@@ -132,7 +132,7 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
 | R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies | Mon AM | pending |
 | R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | done |
-| R.5.5b | Zenodo 84k-match dataset adoption (Option C: 16 new leagues) | Thu–Fri (this week) | pending |
+| R.5.5b | Zenodo 84k-match dataset adoption (Option C: 16 new leagues) | Thu–Fri (this week) | **BLOCKED** — Zenodo schema has aggregated odds only (maxhome/avghome), no per-bookmaker triplets; see docs/ZENODO_INGEST_NOTES.md |
 | R.5.5c | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
 | R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5c |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
@@ -1137,7 +1137,7 @@ pytest -q
 
 - [ ] R.0–R.5 merged.
 - [ ] **R.5.5a scaffold merged** — primitive + loader in `src/betting/walk_forward.py`, 5 tests pass, no new third-party deps.
-- [ ] **R.5.5b Zenodo data adoption merged** (or BLOCKED with documented reason) — loader returns ≥50k matches / ≥15 leagues; existing 6 leagues' row counts unchanged; `docs/ZENODO_INGEST_NOTES.md` written.
+- [x] **R.5.5b BLOCKED** — Zenodo schema has aggregated odds only (no per-bookmaker triplets); `docs/ZENODO_INGEST_NOTES.md` written; skip-guarded test added; `.gitignore` updated; R.5.5c proceeds on 27k matches.
 - [ ] **R.5.5c walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
 - [ ] At least one variant graduated (R.6) with explicit walk-forward evidence, OR explicit "no graduation this week" note citing CI breadth.
 - [ ] R.7 schema migration done (independent of graduation).

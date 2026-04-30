@@ -111,15 +111,16 @@ logs/scan.log               Scanner output
 logs/closing_line.log       Closing-line script output
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (110 tests across 13 files; run with `pytest`)
+tests/                      pytest suite (126 tests across 14 files; run with `pytest`)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
-src/betting/strategies.py   8 paper strategy variants + evaluate_strategy() entry point
+src/betting/strategies.py   15 paper strategy variants (A–J, L–P; K deferred) + evaluate_strategy() entry point
 src/betting/consensus.py    Consensus computation helpers
 src/betting/kelly.py        Kelly criterion
+src/betting/walk_forward.py  Walk-forward backtest primitive (TimeSeriesSplit; Phase R.5.5a)
 logs/paper/                 Paper strategy CSVs (one per variant, same schema as bets.csv + strategy col)
 scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
-docs/STRATEGY_COMPARISON.md   Latest CLV comparison across all 8 strategy variants
+docs/STRATEGY_COMPARISON.md   Latest CLV comparison across all paper-portfolio strategy variants
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10)
 docs/APPROACH.md            Full research-backed architecture
 docs/BACKTEST.md            Shin-corrected backtest (2026-04-29): raw vs shin tables + interpretation
@@ -200,8 +201,14 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 8 | Betfair API auto-placement | Pending |
 | 9 | Pi / Azure infrastructure | Pending |
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
+| R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
+| R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`) | ✅ Done |
+| R.5.5b | Zenodo 84k-match dataset (BLOCKED — aggregated odds only; see `docs/ZENODO_INGEST_NOTES.md`) | ✅ Done (BLOCKED) |
+| R.4–R.10 | Weekend data collection · Mon analysis · graduation · schema · K (xG) · AH probe | Pending |
 
-Full roadmap: `docs/PLAN.md`.
+Full roadmap: `docs/PLAN.md`. 2026-04 sprint: `docs/PLAN_RESEARCH_2026-04.md`.
+
+**Variants in shadow (paper portfolio only — not flipped as defaults):** I_power_devig, J_sharp_weighted, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner still uses A_production logic.
 
 ## Research cycle (manual deep-read → variants → graduations)
 
