@@ -12,6 +12,8 @@ import numpy as np
 
 # Sharpness weights — seeded from datagolf.com/how-sharp-are-bookmakers.
 # Books not listed default to 1.0. Refine empirically after 4 weeks of CLV.
+# Pinnacle is intentionally absent: it is used as a separate anchor (pinnacle_cons),
+# not folded into the consensus mean.
 SHARPNESS_WEIGHTS: dict[str, float] = {
     # Sharp tier
     "betfair_ex_uk": 1.5, "smarkets": 1.5, "matchbook": 1.5,
