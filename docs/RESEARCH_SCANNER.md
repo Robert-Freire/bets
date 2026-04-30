@@ -2,7 +2,7 @@
 
 A scheduled job that surfaces external betting research and similar projects so we can adapt new strategies into `src/betting/strategies.py` as paper variants. Output lives in `docs/RESEARCH_FEED.md` — a running, deduped log of findings ranked by how easily we could adopt them.
 
-**Status: spec — not implemented.** Phasing below is delegation-ready: each phase is sized for one agent session (~30min–1.5h) with explicit Inputs / Outputs / Acceptance / Reviewer-focus blocks. Any agent (or future-me) can pick up a single phase from this doc alone, no prior conversation required.
+**Status: shipped (11.0–11.9 done; 11.10 deferred).** First scheduled cron fire: Mon 2026-05-04 10:00 UTC (curated). Phasing below was delegation-ready: each phase is sized for one agent session (~30min–1.5h) with explicit Inputs / Outputs / Acceptance / Reviewer-focus blocks. Any agent (or future-me) can pick up a single phase from this doc alone, no prior conversation required.
 
 ---
 

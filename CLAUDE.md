@@ -4,7 +4,7 @@
 
 A value betting scanner using the **Kaunitz consensus strategy**: compute the Shin-devigged fair probability across 30–40 bookmakers, then flag bets where a UK-licensed bookmaker's odds are significantly better than the consensus. CLV (closing-line value) against Pinnacle is the primary diagnostic for whether edge is real.
 
-*Note: the legacy backtest (+6.1% ROI at 2% edge) was computed on raw implied probabilities, not de-vigged. A corrected backtest is pending (Plan phase 1.5).*
+*Note: the legacy "+6.1% ROI at 2% edge" was computed on raw implied probabilities. The corrected Shin-devigged backtest is in [`docs/BACKTEST.md`](docs/BACKTEST.md).*
 
 ## Quick start
 
@@ -111,7 +111,7 @@ logs/scan.log               Scanner output
 logs/closing_line.log       Closing-line script output
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (16 tests; run with `pytest`)
+tests/                      pytest suite (110 tests across 13 files; run with `pytest`)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
 src/betting/strategies.py   8 paper strategy variants + evaluate_strategy() entry point
@@ -133,7 +133,7 @@ python3 app.py
 # Open http://localhost:5000
 ```
 
-Four stat panels: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg CLV** (green if >0) · **Drift toward you %** (should be >50% if sharp).
+Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg CLV** (green if >0, only shown once any bets have CLV) · **Drift toward you %** (only shown once drift data exists; should be >50% if sharp) · **Research** (latest run count + mode · date from `docs/RESEARCH_FEED.md`).
 
 Three bet sections:
 - **Placed — awaiting result**: logged stake, waiting to settle
@@ -184,7 +184,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 1 | Shin de-vigging + Pinnacle anchor | ✅ Done |
 | 2 | Risk management (rounding, caps, drawdown) | ✅ Done |
 | 3 | CLV + drift diagnostics | ✅ Done |
-| 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done (dispersion/outlier via strategies.py; notification dedupe pending Phase 4.4) |
+| 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done (dispersion/outlier via `strategies.py`; notification dedupe via `logs/notified.json` in `scan_odds.py`) |
 | 5 | New markets: totals, BTTS | ✅ Done |
 | 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done |
 | 5.6 | Phase 5.5 bugfix sweep (P0/P1) | ✅ Done |
@@ -194,7 +194,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
 | 9 | Pi / Azure infrastructure | Pending |
-| 11.0–11.9 | Research scanner (source scan → Claude → RESEARCH_FEED.md → dashboard tile → cron) | ✅ Done |
+| 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 
 Full roadmap: `docs/PLAN.md`.
 
