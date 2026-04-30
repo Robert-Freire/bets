@@ -70,6 +70,8 @@ def walk_forward_backtest(
     DataFrame with one row per fold and columns:
         fold_idx, n_bets, n_won, total_staked, total_pnl, roi, start_date, end_date
     """
+    # TimeSeriesSplit reserves the first n/(n_splits+1) rows as train-only; they never
+    # appear in any test fold. That is standard TSS semantics, not a loader bug.
     tscv = TimeSeriesSplit(n_splits=n_splits)
     rows = []
 
