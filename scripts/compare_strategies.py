@@ -253,6 +253,42 @@ def _per_sport_rows(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     return out
 
 
+_CONF_ORDER  = {"HIGH": 0, "MED": 1, "LOW": 2}
+_MKT_ORDER   = {"h2h": 0, "totals": 1, "btts": 2}
+_SIG_ORDER   = {"agrees": 0, "disagrees": 1, "no_signal": 2}
+
+
+def _model_bucket(signal) -> str:
+    if signal in ("?", "", None):
+        return "no_signal"
+    try:
+        return "agrees" if float(str(signal).lstrip("+")) > 0 else "disagrees"
+    except (ValueError, TypeError):
+        return "no_signal"
+
+
+def _sliced_rows(
+    entries: list[tuple[str, list[dict]]],
+    key_fn,
+    threshold: int = 5,
+) -> list[dict]:
+    """Group rows by (variant, slice_key), return rows where n_with_clv >= threshold."""
+    from collections import defaultdict
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for name, rows in entries:
+        for r in rows:
+            k = key_fn(r)
+            if k is not None:
+                grouped[(name, k)].append(r)
+
+    out = []
+    for (name, k), rows in grouped.items():
+        s = _stats(rows)
+        if s["n_with_clv"] >= threshold:
+            out.append({"slice_key": k, "variant": name, **s})
+    return out
+
+
 def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     """Pool unique bets across all paper strategies (one bet may flag in multiple strategies)."""
     seen: set[tuple] = set()
@@ -381,6 +417,73 @@ def build_report() -> str:
         for row in sport_rows:
             lines.append(
                 f"| {row['sport']} | {row['variant']} | {row['n_bets']} |"
+                f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
+            )
+
+    # ---- C.5: Per-confidence breakdown -------------------------------------
+    conf_rows = _sliced_rows(
+        entries,
+        lambda r: r.get("confidence") if r.get("confidence") in _CONF_ORDER else None,
+    )
+    if conf_rows:
+        conf_rows.sort(key=lambda x: (x["variant"], _CONF_ORDER.get(x["slice_key"], 99)))
+        lines += [
+            "",
+            "## CLV by confidence",
+            "",
+            "Rows where n_with_clv ≥ 5 per (variant, confidence) tier.",
+            "",
+            "| Confidence | Variant | Bets | CLV bets | Avg CLV | CLV >0 % |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in conf_rows:
+            lines.append(
+                f"| {row['slice_key']} | {row['variant']} | {row['n_bets']} |"
+                f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
+            )
+
+    # ---- C.7: Per-market breakdown -----------------------------------------
+    mkt_rows = _sliced_rows(
+        entries,
+        lambda r: r.get("market") if r.get("market") in _MKT_ORDER else None,
+    )
+    if mkt_rows:
+        mkt_rows.sort(key=lambda x: (x["variant"], _MKT_ORDER.get(x["slice_key"], 99)))
+        lines += [
+            "",
+            "## CLV by market",
+            "",
+            "Rows where n_with_clv ≥ 5 per (variant, market).",
+            "",
+            "| Market | Variant | Bets | CLV bets | Avg CLV | CLV >0 % |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in mkt_rows:
+            lines.append(
+                f"| {row['slice_key']} | {row['variant']} | {row['n_bets']} |"
+                f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
+            )
+
+    # ---- C.8: Model-signal stratification ----------------------------------
+    sig_rows = _sliced_rows(
+        entries,
+        lambda r: _model_bucket(r.get("model_signal")),
+    )
+    if sig_rows:
+        sig_rows.sort(key=lambda x: (x["variant"], _SIG_ORDER.get(x["slice_key"], 99)))
+        lines += [
+            "",
+            "## CLV by model signal",
+            "",
+            "Rows where n_with_clv ≥ 5 per (variant, model-signal bucket)."
+            " `agrees` = model edge > 0; `disagrees` = model edge ≤ 0; `no_signal` = `?` or missing.",
+            "",
+            "| Signal | Variant | Bets | CLV bets | Avg CLV | CLV >0 % |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in sig_rows:
+            lines.append(
+                f"| {row['slice_key']} | {row['variant']} | {row['n_bets']} |"
                 f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
             )
 

@@ -36,10 +36,10 @@ entries directly — no separate phase needed.
 | C.2 | 95% CI / SE on Avg CLV | High | Pre-weekend | ✅ done |
 | C.3 | Per-sport breakdown table | High | Pre-weekend | ✅ done |
 | C.4 | Drift-toward-you % per variant (wire `logs/drift.csv`) | Medium | Post first comparison | ✅ done |
-| C.5 | Per-confidence breakdown (HIGH / MED / LOW) | Medium | Post first comparison | pending |
+| C.5 | Per-confidence breakdown (HIGH / MED / LOW) | Medium | Post first comparison | ✅ done |
 | C.6 | Median CLV alongside mean | Medium | Pre-weekend (cheap) | ✅ done |
-| C.7 | Per-market breakdown (h2h / totals / btts) | Low | Backlog | pending |
-| C.8 | Model-signal stratification | Low | Backlog | pending |
+| C.7 | Per-market breakdown (h2h / totals / btts) | Low | Backlog | ✅ done |
+| C.8 | Model-signal stratification | Low | Backlog | ✅ done |
 | C.9 | Sample-size guardrail line in report | Low | Pre-weekend (cheap) | ✅ done |
 
 **Batchable groups** (single-PR-friendly):
