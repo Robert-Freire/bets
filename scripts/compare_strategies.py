@@ -150,6 +150,43 @@ def _bucket_stats(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _per_sport_rows(entries: list[tuple[str, list[dict]]]) -> list[dict]:
+    """Return qualifying (sport, variant) rows for the per-sport table.
+
+    Includes A_production for any sport where it has ≥1 CLV bet, and all other
+    variants where n_with_clv ≥ 10 in that sport.
+    """
+    # Group rows by (variant, sport)
+    from collections import defaultdict
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for name, rows in entries:
+        for r in rows:
+            sport = r.get("sport", "")
+            if sport:
+                grouped[(name, sport)].append(r)
+
+    out = []
+    for (name, sport), rows in grouped.items():
+        s = _stats(rows)
+        qualifies = (
+            (name == "A_production" and s["n_with_clv"] >= 1)
+            or s["n_with_clv"] >= 10
+        )
+        if qualifies:
+            out.append({"sport": sport, "variant": name, **s})
+
+    if not out:
+        return []
+
+    # EPL first, then alphabetical; within sport sort by avg_clv desc (None last)
+    def _sport_key(row):
+        sport_order = 0 if row["sport"] == "EPL" else 1
+        return (sport_order, row["sport"], row["avg_clv"] is None, -(row["avg_clv"] or 0))
+
+    out.sort(key=_sport_key)
+    return out
+
+
 def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     """Pool unique bets across all paper strategies (one bet may flag in multiple strategies)."""
     seen: set[tuple] = set()
@@ -247,6 +284,25 @@ def build_report() -> str:
         "*95% CI is `±1.96·σ/√n`. A variant whose CI bracket includes 0 has not yet"
         " shown a statistically distinguishable signal.*",
     ]
+
+    # ---- C.3: Per-sport breakdown ------------------------------------------
+    sport_rows = _per_sport_rows(entries)
+    if sport_rows:
+        lines += [
+            "",
+            "## CLV by sport",
+            "",
+            "A_production shown as baseline for any sport with ≥1 CLV bet;"
+            " other variants shown only where n_with_clv ≥ 10.",
+            "",
+            "| Sport | Variant | Bets | CLV bets | Avg CLV | CLV >0 % |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in sport_rows:
+            lines.append(
+                f"| {row['sport']} | {row['variant']} | {row['n_bets']} |"
+                f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
+            )
 
     # ---- Favourite-longshot bias slice -------------------------------------
     pooled = _dedupe_pool(entries)

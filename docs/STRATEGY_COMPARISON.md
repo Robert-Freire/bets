@@ -10,13 +10,13 @@ Run `python3 scripts/compare_strategies.py` to refresh.
 | Strategy | Bets | CLV bets | Avg CLV ± 95% CI | Med CLV | CLV >0 % | Avg Edge | Top books |
 |---|---|---|---|---|---|---|---|
 | [low n] A_production | 13 | 0 | — | — | — | 7.03% | — |
+| [low n] B_strict | 5 | 0 | — | — | — | 12.05% | — |
 | [low n] C_loose | 37 | 0 | — | — | — | 3.90% | — |
 | [low n] D_pinnacle_only | 22 | 0 | — | — | — | 5.70% | — |
 | [low n] E_exchanges_only | 12 | 0 | — | — | — | 7.36% | — |
 | [low n] F_model_primary | 100 | 0 | — | — | — | 0.59% | — |
 | [low n] G_proportional | 18 | 0 | — | — | — | 5.11% | — |
 | [low n] H_no_pinnacle | 13 | 0 | — | — | — | 7.03% | — |
-| [low n] B_strict | 0 | — | — | — | — | — | — |
 | [low n] I_power_devig | 0 | — | — | — | — | — | — |
 | [low n] L_quarter_kelly | 0 | — | — | — | — | — | — |
 | [low n] M_min_prob_15 | 0 | — | — | — | — | — | — |
