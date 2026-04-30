@@ -49,8 +49,8 @@ def _load_scan_odds(monkeypatch):
 # ── Test 10: count and uniqueness (run first for fast feedback) ────────────────
 
 def test_strategy_count_and_uniqueness():
-    # 8 original + I, L, M, N (R.1) + O (R.1.5) + P (R.1.6) + J (R.2) = 15
-    assert len(STRATEGIES) == 15, f"Expected 15 strategies, got {len(STRATEGIES)}"
+    # 8 original + I, L, M, N (R.1) + O (R.1.5) + P (R.1.6) + J (R.2) + K (R.8) = 16
+    assert len(STRATEGIES) == 16, f"Expected 16 strategies, got {len(STRATEGIES)}"
     names = [s.name for s in STRATEGIES]
     assert len(names) == len(set(names)), "Strategy names must be unique"
 
@@ -487,4 +487,103 @@ def test_variant_J_sharp_weights_shift_consensus_toward_sharp_books():
     assert j_h > a_h, (
         f"J HOME cons {j_h:.4f} should > A HOME cons {a_h:.4f} "
         "when sharp books (weight 1.5) strongly favour HOME and soft books are down-weighted"
+    )
+
+
+# ── R.8 tests (K_draw_bias) ───────────────────────────────────────────────────
+
+def _low_xg_team_data(home: str, away: str, q25: float = 1.2) -> dict:
+    """Synthetic team_xg with both teams below q25."""
+    return {
+        "xg_q25": q25,
+        "teams": {
+            home: {"avg_xg": round(q25 * 0.7, 3), "n": 5},
+            away: {"avg_xg": round(q25 * 0.6, 3), "n": 5},
+        },
+    }
+
+
+def _high_xg_team_data(home: str, away: str, q25: float = 1.2) -> dict:
+    """Synthetic team_xg with both teams above q25."""
+    return {
+        "xg_q25": q25,
+        "teams": {
+            home: {"avg_xg": round(q25 * 1.5, 3), "n": 5},
+            away: {"avg_xg": round(q25 * 1.8, 3), "n": 5},
+        },
+    }
+
+
+def _k_event(draw_odds: float = 3.40) -> dict:
+    """Event with 20 UK books + betfair at the given draw odds.
+
+    Base books have short draw odds (high consensus draw prob ~0.33) so that
+    betfair's draw at ≥3.20 shows a genuine ≥3% edge vs consensus.
+    """
+    base = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:19]
+    books = {b: (2.70, 2.85, 2.80) for b in base}  # short draw → high consensus draw prob
+    books["pinnacle"] = (2.65, 2.90, 2.85)
+    books["betfair_ex_uk"] = (2.70, draw_odds, 2.80)
+    return synthetic_event(h2h_prices=books)
+
+
+def test_variant_K_draw_bias_config():
+    k = _strategy("K_draw_bias")
+    assert k.draws_only is True
+    assert k.draw_odds_band == (3.20, 3.60)
+    assert k.require_low_xg is True
+    assert k.markets == ("h2h",)
+
+
+def test_variant_K_only_produces_draw_bets():
+    ev = _k_event(draw_odds=3.40)
+    xg = _low_xg_team_data("Arsenal", "Chelsea")
+    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
+    assert bets, "K_draw_bias should produce at least one bet on low-xG in-band fixture"
+    for bet in bets:
+        assert bet["side"] == "D", (
+            f"K_draw_bias must only produce draw bets; got side={bet['side']}"
+        )
+
+
+def test_variant_K_rejects_draw_outside_odds_band():
+    # Draw odds 3.70 — outside (3.20, 3.60) band → no K bets
+    ev = _k_event(draw_odds=3.70)
+    xg = _low_xg_team_data("Arsenal", "Chelsea")
+    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
+    draw_bets = [b for b in bets if b["side"] == "D"]
+    assert draw_bets == [], (
+        f"K_draw_bias must reject draw odds 3.70 (outside 3.20–3.60); got {draw_bets}"
+    )
+
+
+def test_variant_K_rejects_high_xg_fixture():
+    # Both teams above xg_q25 → K must not flag draw
+    ev = _k_event(draw_odds=3.40)
+    xg = _high_xg_team_data("Arsenal", "Chelsea")
+    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
+    draw_bets = [b for b in bets if b["side"] == "D"]
+    assert draw_bets == [], (
+        f"K_draw_bias must reject high-xG fixtures; got {draw_bets}"
+    )
+
+
+def test_variant_K_blocks_bets_when_no_xg_data():
+    # team_xg={} means no teams found → missing data is treated as "unknown = block"
+    # to prevent polluting paper data with band-only draw bets.
+    ev = _k_event(draw_odds=3.40)
+    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg={})
+    assert bets == [], (
+        f"K_draw_bias must block all bets when team_xg has no data; got {bets}"
+    )
+
+
+def test_variant_K_rejects_below_band_odds():
+    # Draw odds 3.10 — below the 3.20 floor → rejected
+    ev = _k_event(draw_odds=3.10)
+    xg = _low_xg_team_data("Arsenal", "Chelsea")
+    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
+    draw_bets = [b for b in bets if b["side"] == "D"]
+    assert draw_bets == [], (
+        f"K_draw_bias must reject draw odds 3.10 (below 3.20 floor); got {draw_bets}"
     )

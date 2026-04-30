@@ -5,8 +5,12 @@ Each StrategyConfig defines one variant of the value-bet scanner.
 evaluate_strategy() runs a variant on already-fetched events (no extra API calls).
 """
 
+import json
 import statistics
 from dataclasses import dataclass
+from pathlib import Path
+
+_XG_FILE = Path(__file__).parent.parent.parent / "logs" / "team_xg.json"
 
 try:
     from src.betting.devig import shin as _shin, proportional as _proportional, power as _power
@@ -73,6 +77,10 @@ class StrategyConfig:
     max_odds_shopping:   bool  = False           # O, P: flag at best-priced UK book per side
     # R.2 fields
     sharpness_weights:   dict | None = None      # J: book → weight; None = uniform
+    # R.8 fields
+    draw_odds_band:      tuple | None = None     # K: (min, max) decimal odds; D bets only
+    require_low_xg:      bool  = False           # K: both teams must be below xg_q25
+    draws_only:          bool  = False           # K: skip H/A sides entirely
 
 
 STRATEGIES: list[StrategyConfig] = [
@@ -187,6 +195,16 @@ STRATEGIES: list[StrategyConfig] = [
         description="Sharpness-weighted consensus per datagolf blind-return ranking",
         sharpness_weights=SHARPNESS_WEIGHTS,
     ),
+    # ── R.8: draw-bias variant (Predictology filter) ──────────────────────────
+    StrategyConfig(
+        name="K_draw_bias",
+        label="K: Draw-bias (Predictology)",
+        description="Draw bets only; draw odds 3.20–3.60 and both teams in bottom-xG quartile",
+        draws_only=True,
+        draw_odds_band=(3.20, 3.60),
+        require_low_xg=True,
+        markets=("h2h",),
+    ),
 ]
 
 
@@ -274,6 +292,7 @@ def _flag_bets(
     sport_key: str = "",
     model_signals: dict | None = None,
     api_to_fd: dict | None = None,
+    team_xg: dict | None = None,
 ) -> list[dict]:
     if model_signals is None:
         model_signals = {}
@@ -315,6 +334,8 @@ def _flag_bets(
                     best_by_side[side] = (b["book"], odds, b)
 
         for side in sides:
+            if strategy.draws_only and side != "D":
+                continue
             if side not in cons or side not in best_by_side:
                 continue
             if cons[side] < strategy.min_consensus_prob:
@@ -326,6 +347,21 @@ def _flag_bets(
                     continue
 
             book_key, odds, b = best_by_side[side]
+
+            if side == "D":
+                if strategy.draw_odds_band is not None:
+                    lo, hi = strategy.draw_odds_band
+                    if not (lo <= odds <= hi):
+                        continue
+                if strategy.require_low_xg:
+                    _td = (team_xg or {}).get("teams", {})
+                    _q25 = (team_xg or {}).get("xg_q25", 0.0)
+                    h_xg = _td.get(home, {}).get("avg_xg")
+                    a_xg = _td.get(away, {}).get("avg_xg")
+                    # Missing team → block (conservative); also gates out NBA/tennis/non-model leagues.
+                    if h_xg is None or a_xg is None or not (h_xg <= _q25 and a_xg <= _q25):
+                        continue
+
             fair_side = b["fair"].get(side, 1.0 / odds)
             edge_gross = cons[side] - fair_side
             eff_implied = _effective_implied_prob(odds, book_key)
@@ -380,6 +416,8 @@ def _flag_bets(
         if target_books is not None and b["book"] not in target_books:
             continue
         for side in sides:
+            if strategy.draws_only and side != "D":
+                continue
             if side not in cons:
                 continue
             odds = b.get(side)
@@ -387,6 +425,20 @@ def _flag_bets(
                 continue
             if not (1.2 <= odds <= 15.0):
                 continue
+
+            if side == "D":
+                if strategy.draw_odds_band is not None:
+                    lo, hi = strategy.draw_odds_band
+                    if not (lo <= odds <= hi):
+                        continue
+                if strategy.require_low_xg:
+                    _td = (team_xg or {}).get("teams", {})
+                    _q25 = (team_xg or {}).get("xg_q25", 0.0)
+                    h_xg = _td.get(home, {}).get("avg_xg")
+                    a_xg = _td.get(away, {}).get("avg_xg")
+                    # Missing team → block (conservative); also gates out NBA/tennis/non-model leagues.
+                    if h_xg is None or a_xg is None or not (h_xg <= _q25 and a_xg <= _q25):
+                        continue
 
             if cons[side] < strategy.min_consensus_prob:
                 continue
@@ -565,6 +617,7 @@ def evaluate_strategy(
     *,
     model_signals: dict | None = None,
     api_to_fd: dict | None = None,
+    team_xg: dict | None = None,
 ) -> list[dict]:
     """
     Run one strategy variant on a list of already-fetched events.
@@ -575,6 +628,12 @@ def evaluate_strategy(
         model_signals = {}
     if api_to_fd is None:
         api_to_fd = {}
+    if strategy.require_low_xg and team_xg is None:
+        try:
+            with open(_XG_FILE) as _f:
+                team_xg = json.load(_f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            team_xg = {}
 
     bets: list[dict] = []
 
@@ -591,6 +650,7 @@ def evaluate_strategy(
                 sport_key=sport_key,
                 model_signals=model_signals,
                 api_to_fd=api_to_fd,
+                team_xg=team_xg,
             ))
 
         if "totals" in strategy.markets:
@@ -599,6 +659,7 @@ def evaluate_strategy(
                     home, away, commence, "totals", pt,
                     books, impl, strategy,
                     sport_key=sport_key,
+                    team_xg=team_xg,
                 ))
 
         if "btts" in strategy.markets:
@@ -607,6 +668,7 @@ def evaluate_strategy(
                 home, away, commence, "btts", "",
                 books, impl, strategy,
                 sport_key=sport_key,
+                team_xg=team_xg,
             ))
 
     # Dedup: best edge per (fixture, market, line, side)

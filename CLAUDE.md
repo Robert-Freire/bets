@@ -90,6 +90,9 @@ Each region (`uk`, `eu`) counts as a separate API call.
 0  8  1,15 * *  Bi-weekly 8am    — sports discovery check
 0  3  * * *     3am daily        — bets.csv backup (14-day retention)
 
+# xG snapshot (feeds K_draw_bias filter)
+0  6  * * 1     Mon 06:00        — refresh logs/team_xg.json from Understat (last 5 matches/team)
+
 # Research scanner
 0 10 * * 1      Mon 10:00        — curated sources (Tier A change-watch + Tier B)
 0 10 1 * *      1st of month 10:00 — open-search (7 queries × 4 backends)
@@ -99,6 +102,7 @@ Each region (`uk`, `eu`) counts as a separate API call.
 
 ```
 scripts/scan_odds.py        Main scanner
+scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.json
 scripts/closing_line.py     Closing-line + drift snapshot (runs every 5 min)
 scripts/check_sports.py     Sports discovery (bi-weekly)
 scripts/model_signals.py    CatBoost signal cache generator
@@ -109,6 +113,7 @@ logs/closing_lines.csv      Pinnacle closing prob per bet at kick-off
 logs/drift.csv              Odds drift at T-60, T-15, T-1 before kick-off
 logs/scan.log               Scanner output
 logs/closing_line.log       Closing-line script output
+logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
 tests/                      pytest suite (126 tests across 14 files; run with `pytest`)
@@ -209,13 +214,13 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | R.5.5c | Walk-forward run + 3-view per-fold report (all-22 / production-6 / per-league × 16); adds `consensus_mode` axis (mean vs pinnacle_only) | Pending |
 | R.6 | Graduate winning **variants** (production-6 evidence) AND winning **leagues** (per-league evidence) → scanner defaults | Pending (conditional on R.5.5c) |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | ✅ Done |
-| R.8 | Draw-bias variant K (needs xG runtime hookup) | Pending |
+| R.8 | Draw-bias variant K (xG from Understat; `scripts/refresh_xg.py` weekly cron) | ✅ Done |
 | R.9 | Asian Handicap feasibility probe (The Odds API) | ✅ Done (`docs/AH_FEASIBILITY.md`; AH fetchable via `spreads` key; UK books too thin; Pinnacle anchor viable post-upgrade) |
 | R.10 | AH probability conversion module (planning only) | Blocked on CLV confirmation (gate: R.6 graduations + avg CLV>0 over ≥50 bets + sharp-weighted shadow signal; see `docs/AH_FEASIBILITY.md` §6) |
 
 Full roadmap: `docs/PLAN.md`. 2026-04 sprint: `docs/PLAN_RESEARCH_2026-04.md`.
 
-**Variants in shadow (paper portfolio only — not flipped as defaults):** I_power_devig, J_sharp_weighted, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner still uses A_production logic.
+**Variants in shadow (paper portfolio only — not flipped as defaults):** I_power_devig, J_sharp_weighted, K_draw_bias, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner still uses A_production logic.
 
 ## Research cycle (manual deep-read → variants → graduations)
 
