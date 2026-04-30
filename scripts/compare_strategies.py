@@ -9,6 +9,8 @@ Usage:
 """
 
 import csv
+import math
+import statistics
 import sys
 from collections import Counter
 from pathlib import Path
@@ -16,6 +18,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+from src.betting.strategies import STRATEGIES  # noqa: E402
 
 BETS_CSV  = _ROOT / "logs" / "bets.csv"
 PAPER_DIR = _ROOT / "logs" / "paper"
@@ -54,6 +58,12 @@ def _stats(rows: list[dict]) -> dict:
 
     avg_clv = sum(clv_values) / len(clv_values) if clv_values else None
     pos_clv = sum(1 for v in clv_values if v > 0) / len(clv_values) if clv_values else None
+    median_clv = statistics.median(clv_values) if clv_values else None
+
+    ci95_half = None
+    if len(clv_values) >= 2:
+        se = statistics.stdev(clv_values) / math.sqrt(len(clv_values))
+        ci95_half = 1.96 * se
 
     edge_values = []
     for r in rows:
@@ -79,6 +89,8 @@ def _stats(rows: list[dict]) -> dict:
         "n_bets": n_bets,
         "n_with_clv": n_with_clv,
         "avg_clv": avg_clv,
+        "median_clv": median_clv,
+        "ci95_half": ci95_half,
         "pos_clv": pos_clv,
         "avg_edge": avg_edge,
         "book_dist": top_books,
@@ -92,6 +104,15 @@ def _fmt(val, fmt=".2%", fallback="—") -> str:
         return format(val, fmt)
     except (ValueError, TypeError):
         return fallback
+
+
+def _fmt_clv_ci(avg_clv, ci95_half) -> str:
+    if avg_clv is None:
+        return "—"
+    base = format(avg_clv, ".2%")
+    if ci95_half is None:
+        return base
+    return f"{base} ± {format(ci95_half, '.2%')}"
 
 
 def _bucket_for(p: float) -> str | None:
@@ -152,7 +173,7 @@ def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
 
 
 def build_report() -> str:
-    entries = []
+    entries: list[tuple[str, list[dict]]] = []
 
     # Paper strategy CSVs (A_production is the canonical proxy for production)
     if PAPER_DIR.exists():
@@ -161,17 +182,27 @@ def build_report() -> str:
             if rows:
                 entries.append((path.stem, rows))
 
+    # C.1: include configured variants with no CSV yet (0-bet rows)
+    seen_names = {name for name, _ in entries}
+    for s in STRATEGIES:
+        if s.name not in seen_names:
+            entries.append((s.name, []))
+
     if not entries:
         return "No data found. Run the scanner first.\n"
 
-    # Compute stats and sort by avg_clv descending (None last)
+    # Compute stats and sort: active variants by avg_clv desc, then no-CLV, then 0-bet
     results = []
     for name, rows in entries:
         s = _stats(rows)
         results.append((name, s))
-    results.sort(key=lambda x: (x[1]["avg_clv"] is None, -(x[1]["avg_clv"] or 0)))
+    results.sort(key=lambda x: (
+        x[1]["n_bets"] == 0,
+        x[1]["avg_clv"] is None,
+        -(x[1]["avg_clv"] or 0),
+    ))
 
-    best_name = results[0][0] if results else ""
+    best_name = results[0][0] if results and results[0][1]["avg_clv"] is not None else ""
 
     lines = [
         "# Strategy Comparison",
@@ -179,17 +210,43 @@ def build_report() -> str:
         "Sorted by average CLV descending. Only rows with a Pinnacle close prob contribute to CLV stats.",
         "Run `python3 scripts/compare_strategies.py` to refresh.",
         "",
-        "| Strategy | Bets | CLV bets | Avg CLV | CLV >0 % | Avg Edge | Top books |",
-        "|---|---|---|---|---|---|---|",
+        # C.9: sample-size warning
+        "> **Sample size note.** Variants with `<10` CLV bets in this report are"
+        " indicative only. Per `RESEARCH_NOTES_2026-04.md` §6, graduation requires"
+        " ≥30 CLV bets across ≥3 weekends with positive Avg CLV CI bracket.",
+        "",
+        # C.1: note about 0-bet variants
+        "> Variants with 0 bets this period are listed for completeness; if a variant"
+        " you expect to fire shows 0, check its filter wiring (e.g. `K_draw_bias`"
+        " requires `logs/team_xg.json` and an alias-resolved team name).",
+        "",
+        "| Strategy | Bets | CLV bets | Avg CLV ± 95% CI | Med CLV | CLV >0 % | Avg Edge | Top books |",
+        "|---|---|---|---|---|---|---|---|",
     ]
 
     for name, s in results:
-        marker = " ★" if name == best_name and s["avg_clv"] is not None else ""
-        lines.append(
-            f"| {name}{marker} | {s['n_bets']} | {s['n_with_clv']} | "
-            f"{_fmt(s['avg_clv'])} | {_fmt(s['pos_clv'])} | "
-            f"{_fmt(s['avg_edge'])} | {s['book_dist'] or '—'} |"
-        )
+        marker = " ★" if name == best_name else ""
+        # C.9: low-n marker
+        low_n = s["n_with_clv"] < 10
+        prefix = "[low n] " if low_n else ""
+
+        if s["n_bets"] == 0:
+            # C.1: 0-bet row
+            lines.append(f"| {prefix}{name} | 0 | — | — | — | — | — | — |")
+        else:
+            clv_ci = _fmt_clv_ci(s["avg_clv"], s["ci95_half"])
+            lines.append(
+                f"| {prefix}{name}{marker} | {s['n_bets']} | {s['n_with_clv']} | "
+                f"{clv_ci} | {_fmt(s['median_clv'])} | {_fmt(s['pos_clv'])} | "
+                f"{_fmt(s['avg_edge'])} | {s['book_dist'] or '—'} |"
+            )
+
+    # C.2: note about CI interpretation
+    lines += [
+        "",
+        "*95% CI is `±1.96·σ/√n`. A variant whose CI bracket includes 0 has not yet"
+        " shown a statistically distinguishable signal.*",
+    ]
 
     # ---- Favourite-longshot bias slice -------------------------------------
     pooled = _dedupe_pool(entries)
