@@ -49,8 +49,8 @@ def _load_scan_odds(monkeypatch):
 # ── Test 10: count and uniqueness (run first for fast feedback) ────────────────
 
 def test_strategy_count_and_uniqueness():
-    # 8 original + I, L, M, N (R.1) + O (R.1.5) + P (R.1.6) = 14
-    assert len(STRATEGIES) == 14, f"Expected 14 strategies, got {len(STRATEGIES)}"
+    # 8 original + I, L, M, N (R.1) + O (R.1.5) + P (R.1.6) + J (R.2) = 15
+    assert len(STRATEGIES) == 15, f"Expected 15 strategies, got {len(STRATEGIES)}"
     names = [s.name for s in STRATEGIES]
     assert len(names) == len(set(names)), "Strategy names must be unique"
 
@@ -424,3 +424,67 @@ def test_variant_O_kaunitz_classic_config():
     assert o.max_odds_shopping is True
     assert o.min_books == 4
     assert o.markets == ("h2h",)
+
+
+# ── R.2 tests ─────────────────────────────────────────────────────────────────
+
+def test_variant_J_sharp_weighted_wired_to_sharpness_weights():
+    from src.betting.consensus import SHARPNESS_WEIGHTS
+    j = _strategy("J_sharp_weighted")
+    assert j.sharpness_weights is not None
+    assert j.sharpness_weights == SHARPNESS_WEIGHTS
+
+
+def test_sharpness_weights_unknown_book_defaults_to_1_0():
+    from src.betting.consensus import SHARPNESS_WEIGHTS
+    assert SHARPNESS_WEIGHTS.get("unknown_book_xyz", 1.0) == 1.0
+
+
+def test_variant_J_sharpness_weights_none_matches_A_production(sample_event):
+    # When sharpness_weights=None the weighted mean reduces to uniform → identical to A.
+    events = [sample_event]
+    a_bets = evaluate_strategy(events, "soccer_epl", _strategy("A_production"))
+    j_off = StrategyConfig(name="J_off", label="", description="", sharpness_weights=None)
+    j_off_bets = evaluate_strategy(events, "soccer_epl", j_off)
+    assert len(j_off_bets) == len(a_bets), (
+        f"sharpness_weights=None should match A_production bet count: "
+        f"{len(j_off_bets)} vs {len(a_bets)}"
+    )
+
+
+def test_variant_J_sharp_weights_shift_consensus_toward_sharp_books():
+    # 15 neutral UK books + 2 sharp UK books (betfair_ex_uk, smarkets) favouring HOME
+    # + 2 soft UK books (betfred_uk, coral) favouring AWAY + pinnacle neutral = 20 books.
+    # Under J, sharps (weight 1.5) outweigh softs (weight 0.7) → HOME cons rises vs A.
+    from src.betting.consensus import SHARPNESS_WEIGHTS
+
+    neutral = [b for b in sorted(UK_LICENSED_BOOKS)
+               if b not in {"betfair_ex_uk", "smarkets", "betfred_uk", "coral"}]  # 15 books
+    books = {b: (2.5, 3.3, 2.9) for b in neutral}
+    books["betfair_ex_uk"] = (1.80, 3.5, 5.0)   # sharp (1.5): strongly HOME
+    books["smarkets"]      = (1.82, 3.5, 5.0)   # sharp (1.5): strongly HOME
+    books["betfred_uk"]    = (5.50, 3.5, 1.75)  # soft (0.7): strongly AWAY
+    books["coral"]         = (5.50, 3.5, 1.75)  # soft (0.7): strongly AWAY
+    books["pinnacle"]      = (2.50, 3.3, 2.90)  # neutral anchor; reaches min_books=20
+
+    ev = synthetic_event(h2h_prices=books)
+
+    # Use min_edge=-1.0 to force at least one HOME bet regardless of edge
+    a_probe = StrategyConfig(name="_probe_a", label="", description="", min_edge=-1.0)
+    j_probe = StrategyConfig(
+        name="_probe_j", label="", description="",
+        min_edge=-1.0, sharpness_weights=SHARPNESS_WEIGHTS,
+    )
+    a_bets = evaluate_strategy([ev], "soccer_epl", a_probe)
+    j_bets = evaluate_strategy([ev], "soccer_epl", j_probe)
+
+    a_h = next((b["cons"] for b in a_bets if b["side"] == "H"), None)
+    j_h = next((b["cons"] for b in j_bets if b["side"] == "H"), None)
+
+    assert a_h is not None, "A probe must produce a HOME bet (check min_books vs fixture)"
+    assert j_h is not None, "J probe must produce a HOME bet"
+    # Sharps strongly favour HOME; up-weighting them raises J's HOME consensus above A's.
+    assert j_h > a_h, (
+        f"J HOME cons {j_h:.4f} should > A HOME cons {a_h:.4f} "
+        "when sharp books (weight 1.5) strongly favour HOME and soft books are down-weighted"
+    )

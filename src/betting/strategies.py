@@ -15,6 +15,11 @@ except ImportError:
     _DEVIG = False
 
 try:
+    from src.betting.consensus import SHARPNESS_WEIGHTS
+except ImportError:
+    SHARPNESS_WEIGHTS: dict[str, float] = {}  # type: ignore[misc]
+
+try:
     from src.betting.commissions import (
         commission_rate as _commission_rate,
         effective_odds as _effective_odds,
@@ -66,6 +71,8 @@ class StrategyConfig:
     raw_consensus:       bool  = False           # O: use 1/odds directly, skip devig
     kaunitz_alpha:       float = 0.0             # O: paper's α; replaces additive min_edge rule
     max_odds_shopping:   bool  = False           # O, P: flag at best-priced UK book per side
+    # R.2 fields
+    sharpness_weights:   dict | None = None      # J: book → weight; None = uniform
 
 
 STRATEGIES: list[StrategyConfig] = [
@@ -173,6 +180,13 @@ STRATEGIES: list[StrategyConfig] = [
         description="Production logic, but bet at the best-priced UK book on flagged outcome",
         max_odds_shopping=True,
     ),
+    # ── R.2: sharp-weighted consensus variant ─────────────────────────────────
+    StrategyConfig(
+        name="J_sharp_weighted",
+        label="J: Sharp-weighted",
+        description="Sharpness-weighted consensus per datagolf blind-return ranking",
+        sharpness_weights=SHARPNESS_WEIGHTS,
+    ),
 ]
 
 
@@ -228,9 +242,12 @@ def _compute_consensus(
     for b in books_data:
         if strategy.exclude_pinnacle and b["book"] == "pinnacle":
             continue
-        w = (strategy.pinnacle_weight
-             if strategy.consensus_mode == "weighted" and b["book"] == "pinnacle"
-             else 1.0)
+        if strategy.sharpness_weights is not None:
+            w = strategy.sharpness_weights.get(b["book"], 1.0)
+        elif strategy.consensus_mode == "weighted" and b["book"] == "pinnacle":
+            w = strategy.pinnacle_weight
+        else:
+            w = 1.0
         for s in sides:
             if s in b["fair"]:
                 side_accum[s].append((b["fair"][s], w))

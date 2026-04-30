@@ -10,6 +10,23 @@ import pandas as pd
 import numpy as np
 
 
+# Sharpness weights — seeded from datagolf.com/how-sharp-are-bookmakers.
+# Books not listed default to 1.0. Refine empirically after 4 weeks of CLV.
+SHARPNESS_WEIGHTS: dict[str, float] = {
+    # Sharp tier
+    "betfair_ex_uk": 1.5, "smarkets": 1.5, "matchbook": 1.5,
+    # Mid tier
+    "marathonbet": 1.0, "sportingbet": 1.0, "bwin": 1.0,
+    "betvictor": 1.0, "williamhill": 1.0, "betfair_sb_uk": 1.0,
+    # Soft tier (retail UK)
+    "betfred_uk": 0.7, "coral": 0.7, "ladbrokes_uk": 0.7,
+    "skybet": 0.7, "paddypower": 0.7, "boylesports": 0.7,
+    "leovegas": 0.7, "casumo": 0.7, "virginbet": 0.7,
+    "livescorebet": 0.7, "sport888": 0.7, "grosvenor": 0.7,
+    "betway": 0.7,
+}
+
+
 # All bookmaker odds columns available in football-data.co.uk (home/draw/away triplets)
 BOOKMAKER_GROUPS = {
     "B365": ("B365H", "B365D", "B365A"),

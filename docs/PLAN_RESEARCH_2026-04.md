@@ -126,8 +126,8 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.1 | Add 4 cheap variants (I, L, M, N) | Friday | done |
 | R.1.5 | Paper-faithful baseline variant (O_kaunitz_classic) | Friday | done |
 | R.1.6 | Max-odds shopping variant (P_max_odds_shopping) — optional | Friday if time | done |
-| R.2 | Sharp-weighted consensus variant (J) | Friday | pending |
-| R.3 | SBK availability probe → UK_LICENSED_BOOKS | Friday | pending |
+| R.2 | Sharp-weighted consensus variant (J) | Friday | done |
+| R.3 | SBK availability probe → UK_LICENSED_BOOKS | Friday | done |
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
 | R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies | Mon AM | pending |
 | R.5.5 | Walk-forward backtest refactor (sklearn `TimeSeriesSplit`) | Mon PM – Tue | pending |
@@ -899,6 +899,7 @@ pytest -q
 
 ## Open carryovers (not phased yet)
 
+- **SBK not in Odds API uk region** (R.3, checked 2026-04-30): `regions=uk&markets=h2h` returns 20 UK books; SBK key is absent. Note: `unibet_uk` IS present in the API but not currently in `UK_LICENSED_BOOKS` — low-priority addition for a future PR once we confirm it's properly licensed and odds quality is acceptable.
 - **Restriction-detection logging** (RESEARCH_NOTES §3.3): per-bookie max-stake limits hit on placement, manual log via dashboard. Lightweight but needs UI work.
 - **Mug-bet camouflage cron** (RESEARCH_NOTES §3.4): scheduled small bets to mask account profile. Only relevant once we hit a real restriction.
 - **Migrate `compare_strategies.py` to walk-forward** (follow-up to R.5.5): once the `sports-betting`-based primitive lands, port shadow-portfolio comparison to use the same splitter for fold-aware CLV variance reporting.
