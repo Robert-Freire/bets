@@ -85,7 +85,7 @@ For each PR, the reviewer bot:
 | Strategy comparison | `scripts/compare_strategies.py` |
 | Backtest entry (today) | `src/betting/consensus.py::backtest_consensus` |
 | Walk-forward primitive (after R.5.5a) | `src/betting/walk_forward.py` |
-| Backtest entry (after R.5.5b) | `scripts/walk_forward_backtest.py` |
+| Backtest entry (after R.5.5c) | `scripts/walk_forward_backtest.py` |
 | Tests | `tests/test_*.py` |
 | Bets log | `logs/bets.csv` |
 | Paper-portfolio logs | `logs/paper/<variant>.csv` |
@@ -132,8 +132,9 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
 | R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies | Mon AM | pending |
 | R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | done |
-| R.5.5b | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
-| R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5b |
+| R.5.5b | Zenodo 84k-match dataset adoption (Option C: 16 new leagues) | Thu–Fri (this week) | pending |
+| R.5.5c | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
+| R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5c |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
 | R.8 | Draw-bias variant (K) — needs xG runtime hookup | Thu–Fri | pending |
 | R.9 | Asian Handicap feasibility probe (The Odds API) | Thu–Fri | pending |
@@ -145,16 +146,16 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 R.0 ─┐
      ├─ R.1 ──┐
      ├─ R.1.5 ┤
-     ├─ R.1.6 ┼─ R.4 ─ R.5 ─┐
-     ├─ R.2 ──┤              ├─ R.5.5b ─ R.6 ─ R.7
-     ├─ R.3 ──┘              │
-     │                       │
-     └─ R.5.5a ──────────────┘
-                              ├─ R.8 (xG)
-                              └─ R.9 ─ R.10 (deferred)
+     ├─ R.1.6 ┼─ R.4 ─ R.5 ─────────────┐
+     ├─ R.2 ──┤                          ├─ R.5.5c ─ R.6 ─ R.7
+     ├─ R.3 ──┘                          │
+     │                                   │
+     └─ R.5.5a ─ R.5.5b (Zenodo data) ──┘
+                                         ├─ R.8 (xG)
+                                         └─ R.9 ─ R.10 (deferred)
 ```
 
-R.5.5a is independent of the weekend data chain and can be picked up immediately. R.5.5b joins the chain once both R.5 (Monday analysis) and R.5.5a (scaffold) are merged.
+R.5.5a (scaffold) and R.5.5b (Zenodo data adoption) are independent of the weekend data chain and can be picked up immediately. R.5.5c joins the chain once R.5 (Monday analysis), R.5.5a (scaffold), and R.5.5b (extra leagues) are all merged. R.5.5b alphabetical order matches dependency order: a → b → c.
 
 ---
 
@@ -574,7 +575,7 @@ grep -A1 "SBK" docs/PLAN_RESEARCH_2026-04.md | head -10
 
 **Tasks.**
 1. **§4.3 — bet-count comparison.** Run `python3 scripts/compare_strategies.py`. Note J's bet-count delta vs A in the output table. If > 50% drop, document under the "Findings — 2026-04 weekend" subsection (see task 5) the recommendation to ramp J's `min_edge` to 2.5% next sprint.
-2. **§4.5 — power vs Shin backtest.** Re-run the existing backtest entry point with `devig="power"`. Located in `src/betting/consensus.py::backtest_consensus`; called from `main.py` or directly. Add a third column to `docs/BACKTEST.md` next to `raw` and `shin`. **Whole-period only — superseded by R.5.5b's walk-forward.**
+2. **§4.5 — power vs Shin backtest.** Re-run the existing backtest entry point with `devig="power"`. Located in `src/betting/consensus.py::backtest_consensus`; called from `main.py` or directly. Add a third column to `docs/BACKTEST.md` next to `raw` and `shin`. **Whole-period only — superseded by R.5.5c's walk-forward.**
 3. **§4.6 — favourite-longshot bias on EPL h2h.** Create `scripts/analyze_longshot_bias.py`:
    ```python
    #!/usr/bin/env python3
@@ -631,7 +632,7 @@ grep -A1 "SBK" docs/PLAN_RESEARCH_2026-04.md | head -10
 5. Append a "**Findings — 2026-04 weekend**" subsection to `docs/RESEARCH_NOTES_2026-04.md` §8 with explicit one-line answers to questions §4.3, §4.5, §4.6 (and §4.4 if not done in R.3).
 
 **Acceptance.**
-- [ ] `docs/BACKTEST.md` has a `power` column (whole-period method — preliminary; R.5.5b supersedes with per-fold variance).
+- [ ] `docs/BACKTEST.md` has a `power` column (whole-period method — preliminary; R.5.5c supersedes with per-fold variance).
 - [ ] `scripts/analyze_longshot_bias.py` exists, runs cleanly, exits 0 (bias detected) or 1 (not detected) — never crashes.
 - [ ] `docs/LONGSHOT_BIAS_2026-04.md` written by the script, committed.
 - [ ] `docs/STRATEGY_COMPARISON.md` includes new variants.
@@ -657,17 +658,17 @@ grep -cE "^\| [IJLMN]_" docs/STRATEGY_COMPARISON.md  # >= 4
 grep -c "Findings — 2026-04 weekend" docs/RESEARCH_NOTES_2026-04.md  # >= 1
 ```
 
-**Note.** R.5's power-vs-Shin comparison uses the existing whole-period backtest. **It is preliminary.** Graduation decisions in R.6 must wait for R.5.5b's per-fold walk-forward numbers — a single whole-period ROI can be driven by a few good seasons and is not sufficient evidence to flip a default.
+**Note.** R.5's power-vs-Shin comparison uses the existing whole-period backtest. **It is preliminary.** Graduation decisions in R.6 must wait for R.5.5c's per-fold walk-forward numbers — a single whole-period ROI can be driven by a few good seasons and is not sufficient evidence to flip a default.
 
 ---
 
 ## Phase R.5.5a — Walk-forward scaffold: primitive + loader (~2h)
 
-**Goal.** Land a self-contained walk-forward backtest primitive built directly on `sklearn.model_selection.TimeSeriesSplit` (already an indirect dependency via CatBoost — no new packages). Verify it with focused tests, but **do not run the full 15-combo backtest yet** — that's R.5.5b.
+**Goal.** Land a self-contained walk-forward backtest primitive built directly on `sklearn.model_selection.TimeSeriesSplit` (already an indirect dependency via CatBoost — no new packages). Verify it with focused tests, but **do not run the full 15-combo backtest yet** — that's R.5.5c.
 
 **Why no third-party walk-forward package.** `georgedouzas/sports-betting` was considered and rejected. The walk-forward primitive is ~30 lines of fold iteration on top of `TimeSeriesSplit` — not enough surface to justify a runtime dependency on a single-maintainer package on the hot path of graduation evidence. Bugs there (or unmaintained drift on Python/sklearn upgrades) would silently corrupt the per-fold ROI numbers we're using to defend default-flips. At our scale (~4,500 EPL matches × 15 `(devig, min_edge)` combos = 75 backtest runs), serial execution is seconds-to-minutes; we don't need joblib parallelism. Owning the loop also makes determinism + edge-case tests trivial to write.
 
-**Why split this off from R.5.5b.** R.5.5a is independent of the weekend data chain (R.4 → R.5) and can be picked up immediately. With the primitive landed, R.5.5b on Mon/Tue collapses to "loop over `(devig, min_edge)` combos, write the report."
+**Why split this off from R.5.5c.** R.5.5a is independent of the weekend data chain (R.4 → R.5) and can be picked up immediately. With the primitive landed, R.5.5c on Mon/Tue collapses to "loop over `(devig, min_edge)` combos, write the report."
 
 **Inputs.** R.0–R.3 done (already on `main`). No internet/install steps needed — `sklearn.model_selection.TimeSeriesSplit` is already pulled in by CatBoost (`python3 -c "from sklearn.model_selection import TimeSeriesSplit"` should already succeed).
 
@@ -682,7 +683,7 @@ grep -c "Findings — 2026-04 weekend" docs/RESEARCH_NOTES_2026-04.md  # >= 1
   4. Determinism: two identical calls return DataFrames with identical numeric columns (use `pd.testing.assert_frame_equal`).
   5. Sanity: on a tiny fabricated DataFrame where no fixture clears `min_edge` (e.g. `min_edge=0.99`), every fold reports `n_bets=0` and `roi=0`.
 
-**Out of scope (deferred to R.5.5b).**
+**Out of scope (deferred to R.5.5c).**
 - `scripts/walk_forward_backtest.py` (the entry script that loops over the 15 combos).
 - The 95% CI aggregation across folds.
 - Any changes to `docs/BACKTEST.md`.
@@ -721,7 +722,7 @@ pytest -q
 - [ ] `tests/test_walk_forward.py` passes (5 tests).
 - [ ] `pytest -q` overall still passes — no regressions.
 - [ ] **No new entries in `requirements*.txt`** — sklearn is already an indirect dep via CatBoost.
-- [ ] PR body notes the sklearn version observed (so R.5.5b inherits the same constraint).
+- [ ] PR body notes the sklearn version observed (so R.5.5c inherits the same constraint).
 
 **Verification commands.**
 ```bash
@@ -771,17 +772,138 @@ pytest -q
 - Determinism: no `random_state` knobs, no nondeterministic dict iteration in the output. The test `pd.testing.assert_frame_equal` over two identical calls catches accidental nondeterminism.
 - No new entries in `requirements*.txt`. The point of this phase is to NOT take on a third-party walk-forward dep — verify by greppping.
 
-**Carryover.** R.5.5b imports `walk_forward_backtest` and loops it over `(consensus_method, min_edge)` combos to produce the per-fold report + 95% CI aggregation in `docs/BACKTEST.md`.
+**Carryover.** R.5.5b extends the loader to ingest the Zenodo 84k-match dataset; R.5.5c then imports `walk_forward_backtest` and loops it over `(consensus_method, min_edge)` combos to produce the per-fold report + 95% CI aggregation in `docs/BACKTEST.md`.
 
 ---
 
-## Phase R.5.5b — Walk-forward run + per-fold report (~30 min)
+## Phase R.5.5b — Zenodo 84k-match dataset adoption (Option C: 16 new leagues) (~3–4h)
+
+**Goal.** Augment `data/raw/` with the leagues from the Zenodo 84k-match dataset (Hegarty & Whelan 2025, <https://zenodo.org/records/12673394>) that we **don't currently scan**, increasing the loader's coverage from ~27k matches / 6 leagues to ~50–60k matches / ~22 leagues. Existing 6 leagues (`D1, D2, E0, E1, F1, I1`) remain untouched — no overlap, no dedup, no risk to current backtest output.
+
+**Why now.** R.5.5c's per-fold 95% CI tightens with more data, which directly affects R.6 graduation defensibility. Cross-league diversity also tests generalisability — the production scanner already runs on 6 leagues, so the backtest should reflect that breadth.
+
+**Why Option C (only new leagues) over A/B.** Three approaches were considered:
+- **A. Replace pre-2022 with Zenodo, keep current data for 2022+.** Cleanest in principle but creates merge complexity over 7 overlapping seasons across our existing 6 leagues.
+- **B. Concat everything, dedup on `(Date, HomeTeam, AwayTeam)`.** Simple but risks duplicate rows skewing fold ROIs if dedup is imperfect (team-name normalisation across two sources is its own rabbit hole).
+- **C. Add only the leagues we don't currently have.** No overlap, no dedup, lowest risk, biggest signal-per-hour. **Selected.**
+
+**Inputs.** R.5.5a done (`src/betting/walk_forward.py` exists; we extend its loader). Internet access. Disk space ~50–100MB.
+
+**Outputs.**
+- `data/raw/zenodo/` directory containing the new-league CSVs from Zenodo (gitignored — too large to commit).
+- `.gitignore` entry: `data/raw/zenodo/`.
+- Updated `src/betting/walk_forward.py::load_backtest_data()` reading the Zenodo CSVs **after** the existing CSVs and filtering to leagues not already present.
+- `docs/ZENODO_INGEST_NOTES.md` — short doc summarising: which league codes were added, schema mapping decisions (any column-name translations or drops), per-league match counts.
+
+**Out of scope.**
+- No changes to `backtest_consensus()` — Zenodo data must be normalised at the loader boundary to the shape `backtest_consensus()` already expects.
+- No replacement of existing `D1/D2/E0/E1/F1/I1/*.csv` files.
+- No new tests beyond a sanity test in `tests/test_walk_forward.py` confirming the size/league increase.
+
+**Tasks.**
+1. **Download Zenodo dataset.** Fetch from <https://zenodo.org/records/12673394> into `data/raw/zenodo/`. Verify checksum if Zenodo publishes one. Add `data/raw/zenodo/` to `.gitignore` (commit the .gitignore change but not the data).
+2. **Inspect schema.** Pick one league's CSV. Compare column names, date format, and `FTR` encoding to our existing football-data.co.uk shape. Note differences in `docs/ZENODO_INGEST_NOTES.md`.
+3. **Identify new league codes.** Our existing leagues: `{D1, D2, E0, E1, F1, I1}`. Zenodo's 22 leagues likely include `SP1` (La Liga), `SP2`, `N1` (Eredivisie), `P1` (Primeira), `B1` (Belgian Pro), `G1` (Greek Super), `T1` (Turkish Süper), `SC0/SC1/SC2/SC3` (Scottish tiers), and others. Anything not in our existing set is new. Filter Zenodo to just the new leagues.
+4. **Schema normalisation.** If column names differ (e.g. `Home`/`Away` vs `HomeTeam`/`AwayTeam`), write a small renaming step in the loader. If `FTR` encoding differs, normalise. If a Zenodo CSV is missing critical columns (`Date`, `FTR`, at least one bookmaker triple), skip that file and log it in the ingest notes — do NOT silently fabricate columns.
+5. **Loader update.** Extend `load_backtest_data()` to read `data/raw/zenodo/*.csv` after the existing CSVs. Filter rows to leagues NOT already present in the existing data. Apply the schema-normalisation step. Concatenate, sort by Date.
+6. **Sanity test.** Add one test to `tests/test_walk_forward.py`: `test_loader_includes_zenodo_new_leagues` — asserts `len(load_backtest_data()) >= 50000` and `m["Div"].nunique() >= 15`. Skip the test (pytest skip with reason) if `data/raw/zenodo/` is empty, so CI doesn't fail in environments without the dataset.
+7. **Ingest notes doc.** Write `docs/ZENODO_INGEST_NOTES.md`: leagues added (list of Div codes + match counts), schema decisions (column renames, FTR normalisation if any), any files dropped and why.
+
+**Pre-flight checks.**
+```bash
+# Confirm existing state (baseline for comparison)
+python3 -c "
+from src.betting.walk_forward import load_backtest_data
+m = load_backtest_data()
+print(f'Baseline: {len(m)} matches across {m[\"Div\"].nunique()} divisions')
+print(f'Existing divisions: {sorted(m[\"Div\"].unique())}')
+"
+
+# Confirm download dir doesn't already exist (clean slate)
+test ! -d data/raw/zenodo && echo "OK: clean slate"
+```
+
+**Order of operations.**
+1. Add `data/raw/zenodo/` to `.gitignore` first — prevents accidental commit of large files mid-implementation.
+2. Download Zenodo dataset. Inspect one CSV manually before writing code.
+3. Decide schema normalisation: if columns line up cleanly, the loader extension is ~5 lines. If they diverge, write a renaming dict.
+4. Extend `load_backtest_data()`. Smoke-test at the REPL: confirm match count + division count meet acceptance bar.
+5. Add the sanity test (with skip-if-no-data guard).
+6. Run `pytest -q` — full suite must still pass.
+7. Write ingest notes doc.
+8. Commit.
+
+**Acceptance.**
+- [ ] `data/raw/zenodo/` exists locally; gitignored.
+- [ ] `load_backtest_data()` returns ≥ 50k rows (was ~27k) and ≥ 15 unique `Div` values (was 6).
+- [ ] **Existing 6 leagues' match counts unchanged** — `D1/D2/E0/E1/F1/I1` row counts must match the pre-R.5.5b baseline (verify by running the pre-flight check before and after).
+- [ ] All R.5.5a tests pass; full `pytest -q` passes.
+- [ ] `docs/ZENODO_INGEST_NOTES.md` exists with leagues, schema decisions, per-league counts.
+- [ ] No new entries in `requirements*.txt`.
+
+**Verification commands.**
+```bash
+# Match count + division count meet bar
+python3 -c "
+from src.betting.walk_forward import load_backtest_data
+m = load_backtest_data()
+print(f'Total: {len(m)} matches; {m[\"Div\"].nunique()} divisions')
+assert len(m) >= 50000, f'Expected >=50k, got {len(m)}'
+assert m['Div'].nunique() >= 15, f'Expected >=15 divisions, got {m[\"Div\"].nunique()}'
+print('OK')
+"
+
+# Existing leagues' counts unchanged from baseline
+python3 -c "
+from src.betting.walk_forward import load_backtest_data
+m = load_backtest_data()
+for div in ['D1', 'D2', 'E0', 'E1', 'F1', 'I1']:
+    n = (m['Div'] == div).sum()
+    print(f'{div}: {n}')
+"
+# Compare each line against the pre-flight baseline output.
+
+# Walk-forward end-to-end on combined data
+python3 -c "
+from src.betting.walk_forward import load_backtest_data, walk_forward_backtest
+m = load_backtest_data()
+result = walk_forward_backtest(m, consensus_method='shin', min_edge=0.02, n_splits=5)
+print(result.to_string())
+assert len(result) == 5
+print('OK: 5-fold walk-forward succeeds on combined dataset')
+"
+
+# Tests pass
+pytest -q tests/test_walk_forward.py
+pytest -q
+
+# Ingest notes exist
+test -f docs/ZENODO_INGEST_NOTES.md && grep -q "leagues added" docs/ZENODO_INGEST_NOTES.md && echo OK
+
+# .gitignore covers zenodo dir
+grep -q "data/raw/zenodo" .gitignore && echo OK
+```
+
+**Reviewer focus.**
+- **Filter must exclude already-present leagues.** Accidentally re-loading EPL from Zenodo would create duplicate rows; verify the filter step happens BEFORE the concat. The "existing leagues' counts unchanged" check above catches this.
+- **Schema mapping correctness.** If Zenodo uses different column names (e.g. `Home` instead of `HomeTeam`), the loader must rename — silently dropping a column would lose half the bookmaker data.
+- **Date parsing.** Zenodo's date format may differ from football-data.co.uk's DD/MM/YYYY. The existing `format="mixed", dayfirst=True` parser is permissive but not infallible. Check fold boundaries in walk-forward output for any 1900-01-01 sentinel dates that would indicate parse failures.
+- **FTR presence.** Matches without a result (e.g. abandoned games, in-progress at dataset cut) should be dropped at load time, not silently included with NaN.
+- **`.gitignore` first.** Reviewer should verify the gitignore commit happened before any large data was staged. `git log --diff-filter=A -- 'data/raw/zenodo/*'` should return empty.
+
+**Decision deferred to phase execution.** If Zenodo's schema diverges so much from football-data.co.uk that the mapping work exceeds 4h, document the divergence in `docs/ZENODO_INGEST_NOTES.md` and mark the phase **BLOCKED** in the status tracker. R.5.5c can still proceed on the existing 27k matches — the gain from Zenodo is *nice-to-have*, not load-bearing for graduations.
+
+**Carryover.** R.5.5c's walk-forward output now covers ~22 leagues × 5 folds. R.6's graduation criteria interpret per-fold consistency as **cross-league consistency** — a stricter bar than EPL-only would have been.
+
+---
+
+## Phase R.5.5c — Walk-forward run + per-fold report (~30 min)
 
 **Goal.** Use the R.5.5a scaffold to run a walk-forward backtest with `TimeSeriesSplit(5)` over `raw` / `shin` / `power` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. Write per-fold ROI + bet counts, plus aggregate mean ± 95% CI, into `docs/BACKTEST.md`. Flag any edge×method combo whose CI crosses zero.
 
 **Why now.** Whole-period ROI hides per-season variance. Walk-forward reveals consistency. Required for any defensible default-flip in R.6.
 
-**Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`).
+**Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`). R.5.5b done (Zenodo data ingested, loader returns ≥50k matches across ≥15 leagues) — OR R.5.5b explicitly BLOCKED, in which case R.5.5c proceeds on the existing 27k matches and the PR body must note the smaller dataset.
 
 **Outputs.**
 - `scripts/walk_forward_backtest.py` — entry script: loads data via `load_backtest_data()`, loops `walk_forward_backtest()` over the 15 `(consensus_method, min_edge)` combos, aggregates per-fold ROI + 95% CI per combo, writes results.
@@ -827,9 +949,9 @@ pytest -q
 **Goal.** Promote variants from shadow to scanner defaults if they meet bar.
 
 **Bar for graduation.**
-- Variant has shadow data ≥ 50 settled bets across the existing portfolio (won't be reached this weekend — most will need 4–6 weeks). For *immediate* graduation candidates from R.5/R.5.5b, we apply a softer bar:
+- Variant has shadow data ≥ 50 settled bets across the existing portfolio (won't be reached this weekend — most will need 4–6 weeks). For *immediate* graduation candidates from R.5/R.5.5c, we apply a softer bar:
   - **M_min_prob_15**: graduates immediately if §4.6 shows decile-1 underperformance ≥ 5pp on existing settled history. Bias is empirical fact, not a strategy hypothesis.
-  - **I_power_devig**: graduates only if R.5.5b's **walk-forward** numbers show `power` ≥ `shin` ROI at 2–3% edges in **≥ 4 of 5 folds** AND the aggregate 95% CI does not cross Shin's mean. Whole-period dominance from R.5 alone is **insufficient** — we need consistency across time.
+  - **I_power_devig**: graduates only if R.5.5c's **walk-forward** numbers show `power` ≥ `shin` ROI at 2–3% edges in **≥ 4 of 5 folds** AND the aggregate 95% CI does not cross Shin's mean. Whole-period dominance from R.5 alone is **insufficient** — we need consistency across time.
   - **J_sharp_weighted**, **L_quarter_kelly**, **N_competitive_only**: stay in shadow until ≥ 50 settled bets *and* their inclusion in the walk-forward backtest (follow-up PR) shows positive aggregate ROI.
 
 **Tasks (conditional on R.5 results).**
@@ -842,7 +964,7 @@ pytest -q
 - [ ] Each graduating variant has a one-paragraph promotion note in the PR body explaining the evidence (which fold counts, which CI bounds).
 - [ ] No graduation happens silently — even immediate ones get explicit sign-off in commit message.
 - [ ] CLAUDE.md "How the scanner works" section updated to reflect new defaults.
-- [ ] If nothing graduates: explicit `## No graduation this week` section in PR body explaining why (citing CI breadth from R.5.5b).
+- [ ] If nothing graduates: explicit `## No graduation this week` section in PR body explaining why (citing CI breadth from R.5.5c).
 
 **Verification commands.**
 ```bash
@@ -991,8 +1113,8 @@ pytest -q
 - **SBK not in Odds API uk region** (R.3, checked 2026-04-30): `regions=uk&markets=h2h` returns 20 UK books; SBK key is absent. Note: `unibet_uk` IS present in the API but not currently in `UK_LICENSED_BOOKS` — low-priority addition for a future PR once we confirm it's properly licensed and odds quality is acceptable.
 - **Restriction-detection logging** (RESEARCH_NOTES §3.3): per-bookie max-stake limits hit on placement, manual log via dashboard. Lightweight but needs UI work.
 - **Mug-bet camouflage cron** (RESEARCH_NOTES §3.4): scheduled small bets to mask account profile. Only relevant once we hit a real restriction.
-- **Migrate `compare_strategies.py` to walk-forward** (follow-up to R.5.5b): once `walk_forward_backtest()` lands, port shadow-portfolio comparison to call it directly for fold-aware CLV variance reporting.
-- **Zenodo 84k-match dataset** (Hegarty & Whelan): replace football-data.co.uk EPL CSV (~4.5k matches, 1 league, 6 books) with broader European dataset (84k matches, 22 leagues, 40-60 books). 7× more data. Phase 7 follow-up.
+- **Migrate `compare_strategies.py` to walk-forward** (follow-up to R.5.5c): once `walk_forward_backtest()` lands, port shadow-portfolio comparison to call it directly for fold-aware CLV variance reporting.
+- ~~**Zenodo 84k-match dataset**~~ — promoted from carryover to **R.5.5b**, scoped as Option C (16 new leagues only, no overlap with existing 6). See R.5.5b for details.
 - **`pybettor` evaluation** (RESEARCH_NOTES §9.4): 30-min skim of `ian-shepherd/pybettor` to determine if any utilities replace what we currently maintain. Decision: dep or reference.
 - **ELO prior variant `Q_elo_prior`** (RESEARCH_NOTES §9.3): WagerBrain's `elo_prob(elo_diff)` is a cheap model-agreement signal. Could substitute for CatBoost on leagues we don't have CatBoost coverage for (Championship, Bundesliga 2, NBA, tennis). Phase 7-adjacent.
 - **Asian Handicap as second anchor** (RESEARCH_NOTES §7.1): if R.9 says AH is fetchable, implement Hegarty & Whelan's closed-form prob conversion (Eqs 6–28) in `src/betting/asian_handicap.py`. Use AH-derived prob alongside Pinnacle h2h as a *second* anchor (averaging the two when both available). The point: AH is the efficient market — it's the strongest external probability signal we could integrate.
@@ -1015,7 +1137,8 @@ pytest -q
 
 - [ ] R.0–R.5 merged.
 - [ ] **R.5.5a scaffold merged** — primitive + loader in `src/betting/walk_forward.py`, 5 tests pass, no new third-party deps.
-- [ ] **R.5.5b walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
+- [ ] **R.5.5b Zenodo data adoption merged** (or BLOCKED with documented reason) — loader returns ≥50k matches / ≥15 leagues; existing 6 leagues' row counts unchanged; `docs/ZENODO_INGEST_NOTES.md` written.
+- [ ] **R.5.5c walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
 - [ ] At least one variant graduated (R.6) with explicit walk-forward evidence, OR explicit "no graduation this week" note citing CI breadth.
 - [ ] R.7 schema migration done (independent of graduation).
 - [ ] R.9 AH feasibility note written.
