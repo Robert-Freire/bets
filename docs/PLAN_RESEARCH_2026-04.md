@@ -190,7 +190,7 @@ grep -c "corrected backtest is pending" CLAUDE.md
 # Should print >= 1
 grep -c "docs/BACKTEST.md" CLAUDE.md
 
-# Should print exactly 1 (the new line)
+# Should print >= 1
 grep -c "Shin-corrected" CLAUDE.md
 ```
 

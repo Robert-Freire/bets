@@ -317,6 +317,8 @@ def test_variant_I_power_devig_bet_count_similar_to_G(sample_event):
 
 
 def test_variant_L_quarter_kelly_same_count_and_fraction(sample_event):
+    from src.betting.risk import compute_raw_stake
+
     events = [sample_event]
     a_bets = evaluate_strategy(events, "soccer_epl", _strategy("A_production"))
     l_bets = evaluate_strategy(events, "soccer_epl", _strategy("L_quarter_kelly"))
@@ -327,6 +329,16 @@ def test_variant_L_quarter_kelly_same_count_and_fraction(sample_event):
         assert bet["kelly_fraction"] == 0.4, (
             f"L_quarter_kelly bet kelly_fraction={bet['kelly_fraction']}, expected 0.4"
         )
+
+    # Verify computed stake is exactly 0.8× at a controlled sub-cap edge.
+    # cons=0.32, odds=3.6 → uncapped kelly_a=2.9% of bankroll (< 5% cap).
+    bankroll = 1000.0
+    a_stake = compute_raw_stake(0.32, 3.6, bankroll, "", 0.5)
+    l_stake = compute_raw_stake(0.32, 3.6, bankroll, "", 0.4)
+    assert a_stake < 0.05 * bankroll, "Test fixture must be sub-cap for a meaningful ratio check"
+    assert abs(l_stake / a_stake - 0.8) < 1e-9, (
+        f"L stake ({l_stake:.4f}) should be exactly 0.8× A stake ({a_stake:.4f})"
+    )
 
 
 def test_variant_M_rejects_longshot_bets():

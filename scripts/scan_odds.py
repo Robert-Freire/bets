@@ -828,7 +828,9 @@ def main():
     for vb in output_bets:
         vb["_bucket"] = "model" if vb["edge"] < MIN_EDGE else "kaunitz"
 
-    # Compute raw stakes then apply full risk pipeline
+    # Compute raw stakes then apply full risk pipeline.
+    # Production bets always use default half-Kelly (A_production).
+    # If a graduated variant has kelly_fraction != 0.5, thread vb["kelly_fraction"] here.
     for vb in output_bets:
         if _RISK:
             vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL, vb["book"])
