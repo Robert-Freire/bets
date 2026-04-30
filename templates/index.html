@@ -163,6 +163,17 @@
     </div>
   </div>
   {% endif %}
+  {% if stats.clv_breakdown %}
+  <div class="stat">
+    <div class="stat-label">CLV by devig</div>
+    {% for method, val in stats.clv_breakdown.items() %}
+    <div class="stat-value {% if val > 0 %}pos{% elif val < 0 %}neg{% else %}neu{% endif %}"
+         title="{{ method }}">
+      {{ method }}: {{ '+' if val > 0 else '' }}{{ val }}%
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% if stats.drift_toward_pct is not none %}
   <div class="stat">
     <div class="stat-label">Drift toward you</div>

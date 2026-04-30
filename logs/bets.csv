@@ -1,1 +1,1 @@
-scanned_at,sport,market,line,home,away,kickoff,side,book,odds,impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,outlier_z,stake,result
+scanned_at,sport,market,line,home,away,kickoff,side,book,odds,impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,outlier_z,devig_method,weight_scheme,stake,result

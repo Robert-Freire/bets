@@ -1,6 +1,6 @@
-scanned_at,strategy,sport,market,line,home,away,kickoff,side,book,odds,impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,outlier_z,stake,pinnacle_close_prob,clv_pct
-2026-04-29 13:12 UTC,B_strict,EPL,h2h,,West Ham United,Arsenal,2026-05-10 15:30,DRAW,smarkets,4.1,0.2439,0.2476,-0.0209,0.1038,4.038,0.02,0.2267,0.23,31,HIGH,+0.237,0.02,0.0,0.0,,
-2026-04-29 13:12 UTC,B_strict,EPL,h2h,,West Ham United,Arsenal,2026-05-10 15:30,AWAY,smarkets,1.66,0.6024,0.6072,-0.0268,0.1436,1.6468,0.02,0.5805,0.5852,31,HIGH,-0.245,0.028,0.0,0.0,,
-2026-04-29 13:12 UTC,B_strict,Bundesliga,h2h,,FSV Mainz 05,Union Berlin,2026-05-10 17:30,DRAW,smarkets,3.3,0.303,0.3073,-0.061,0.0759,3.254,0.02,0.2464,0.2496,30,HIGH,?,0.0162,0.0,0.0,,
-2026-04-29 13:12 UTC,B_strict,Bundesliga 2,h2h,,Elversberg,SC Paderborn,2026-05-03 11:30,DRAW,smarkets,3.95,0.2532,0.257,-0.0204,0.0532,3.891,0.02,0.2366,0.233,38,HIGH,?,0.0101,0.0,0.0,,
-2026-04-29 13:12 UTC,B_strict,Bundesliga 2,h2h,,Karlsruher SC,SV Darmstadt 98,2026-05-03 11:30,AWAY,betfair_ex_uk,2.16,0.463,0.4757,-0.0565,0.226,2.102,0.05,0.4192,0.4248,38,HIGH,-0.028,0.0382,0.0,0.0,,
+scanned_at,strategy,sport,market,line,home,away,kickoff,side,book,odds,impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,outlier_z,devig_method,weight_scheme,stake,pinnacle_close_prob,clv_pct
+2026-04-29 13:12 UTC,B_strict,EPL,h2h,,West Ham United,Arsenal,2026-05-10 15:30,DRAW,smarkets,4.1,0.2439,0.2476,-0.0209,0.1038,4.038,0.02,0.2267,0.23,31,HIGH,+0.237,0.02,0.0,shin,pinnacle_weighted,0.0,,
+2026-04-29 13:12 UTC,B_strict,EPL,h2h,,West Ham United,Arsenal,2026-05-10 15:30,AWAY,smarkets,1.66,0.6024,0.6072,-0.0268,0.1436,1.6468,0.02,0.5805,0.5852,31,HIGH,-0.245,0.028,0.0,shin,pinnacle_weighted,0.0,,
+2026-04-29 13:12 UTC,B_strict,Bundesliga,h2h,,FSV Mainz 05,Union Berlin,2026-05-10 17:30,DRAW,smarkets,3.3,0.303,0.3073,-0.061,0.0759,3.254,0.02,0.2464,0.2496,30,HIGH,?,0.0162,0.0,shin,pinnacle_weighted,0.0,,
+2026-04-29 13:12 UTC,B_strict,Bundesliga 2,h2h,,Elversberg,SC Paderborn,2026-05-03 11:30,DRAW,smarkets,3.95,0.2532,0.257,-0.0204,0.0532,3.891,0.02,0.2366,0.233,38,HIGH,?,0.0101,0.0,shin,pinnacle_weighted,0.0,,
+2026-04-29 13:12 UTC,B_strict,Bundesliga 2,h2h,,Karlsruher SC,SV Darmstadt 98,2026-05-03 11:30,AWAY,betfair_ex_uk,2.16,0.463,0.4757,-0.0565,0.226,2.102,0.05,0.4192,0.4248,38,HIGH,-0.028,0.0382,0.0,shin,pinnacle_weighted,0.0,,

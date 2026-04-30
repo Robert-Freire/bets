@@ -29,6 +29,7 @@ FIELDS = [
     "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
     "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
     "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
+    "devig_method", "weight_scheme",
     "stake", "result", "actual_stake", "pnl",
     "pinnacle_close_prob", "clv_pct",
 ]
@@ -51,6 +52,8 @@ def _normalise_row(row: dict, source: str) -> None:
     row.setdefault("model_signal", "?")
     row.setdefault("dispersion", "")
     row.setdefault("outlier_z", "")
+    row.setdefault("devig_method", "shin")
+    row.setdefault("weight_scheme", "uniform")
 
 
 def _read_csv_file(path: Path, source: str) -> list[dict]:
@@ -181,6 +184,7 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
             "n": 0, "staked": 0, "pnl": 0, "roi": 0,
             "won": 0, "lost": 0, "void": 0,
             "avg_clv": None, "clv_pos_rate": None, "bets_w_clv": 0,
+            "clv_breakdown": None,
             "drift_toward_pct": None,
         }
 
@@ -192,16 +196,25 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
     roi    = (pnl / staked * 100) if staked > 0 else 0
 
     clv_vals = []
+    clv_by_method: dict = {}
     for b in placed:
         raw = b.get("clv_pct", "")
         if raw:
             try:
-                clv_vals.append(float(raw))
+                v = float(raw)
+                clv_vals.append(v)
+                method = b.get("devig_method") or "shin"
+                clv_by_method.setdefault(method, []).append(v)
             except ValueError:
                 pass
     avg_clv      = round(sum(clv_vals) / len(clv_vals) * 100, 2) if clv_vals else None
     clv_pos_rate = round(sum(1 for v in clv_vals if v > 0) / len(clv_vals) * 100) if clv_vals else None
     bets_w_clv   = len(clv_vals)
+    clv_breakdown = (
+        {m: round(sum(v) / len(v) * 100, 2) for m, v in clv_by_method.items()}
+        if len(clv_by_method) >= 2 and all(len(v) >= 20 for v in clv_by_method.values())
+        else None
+    )
 
     drift_toward_pct = None
     if drift:
@@ -228,6 +241,7 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
         "avg_clv": avg_clv,
         "clv_pos_rate": clv_pos_rate,
         "bets_w_clv": bets_w_clv,
+        "clv_breakdown": clv_breakdown,
         "drift_toward_pct": drift_toward_pct,
     }
 

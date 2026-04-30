@@ -295,14 +295,12 @@ def fetch_odds(sport_key: str) -> tuple[list, str]:
 
 
 def _devig_book(entries: dict) -> dict[str, float]:
-    """De-vig any N-outcome market using Shin (1993). Falls back to proportional."""
+    """De-vig any N-outcome market using Shin (1993). Raises on bad odds rather than
+    silently mislabeling the devig_method in the output row."""
     sides = list(entries.keys())
     raw = [1.0 / entries[s] for s in sides]
     if _DEVIG:
-        try:
-            fair = _shin_devig(raw)
-        except Exception:
-            fair = _proportional_devig(raw)
+        fair = _shin_devig(raw)
     else:
         fair = [r / sum(raw) for r in raw]
     return dict(zip(sides, fair))
@@ -622,14 +620,34 @@ _PAPER_FIELDNAMES = [
     "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
     "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
     "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
+    "devig_method", "weight_scheme",
     "stake", "pinnacle_close_prob", "clv_pct",
 ]
 
 _H2H_SIDE = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
 
 
+def _paper_provenance(strategy) -> tuple[str, str]:
+    """Return (devig_method, weight_scheme) for a StrategyConfig."""
+    if getattr(strategy, "raw_consensus", False):
+        return "raw", "uniform"
+    devig = getattr(strategy, "devig", "shin")
+    weights = getattr(strategy, "sharpness_weights", None)
+    consensus_mode = getattr(strategy, "consensus_mode", "mean")
+    if weights:
+        weight_scheme = "sharp_v1"
+    elif consensus_mode == "pinnacle_only":
+        weight_scheme = "pinnacle_only"
+    elif consensus_mode == "weighted":
+        weight_scheme = "pinnacle_weighted"
+    else:
+        weight_scheme = "uniform"
+    return devig, weight_scheme
+
+
 def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
-                      sport_label: str, now: str, scan_date: str, bankroll: float = 1000.0):
+                      sport_label: str, now: str, scan_date: str, bankroll: float = 1000.0,
+                      strategy=None):
     """Write paper strategy bets to logs/paper/<strategy_name>.csv."""
     if not paper_bets:
         return
@@ -684,6 +702,8 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "model_signal": vb.get("model_signal", "?"),
             "dispersion": round(vb.get("dispersion", 0.0), 4),
             "outlier_z": round(vb.get("outlier_z", 0.0), 3),
+            "devig_method": _paper_provenance(strategy)[0] if strategy else "shin",
+            "weight_scheme": _paper_provenance(strategy)[1] if strategy else "uniform",
             # Per-bet Kelly stake — uses strategy's kelly_fraction (default 0.5 = half-Kelly)
             "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], bankroll, vb["book"],
                                               vb.get("kelly_fraction", 0.5)), 2),
@@ -803,7 +823,7 @@ def main():
                         )
                         _append_paper_csv(strategy.name, paper_bets,
                                           sport_label=label, now=now, scan_date=scan_date,
-                                          bankroll=BANKROLL)
+                                          bankroll=BANKROLL, strategy=strategy)
                     except Exception as pe:
                         print(f"[paper:{strategy.name}] ERROR for {label}: {pe}")
         except Exception as e:
@@ -926,6 +946,10 @@ def main():
             "n_books": vb["n_books"],
             "confidence": vb["confidence"],
             "model_signal": vb.get("model_signal", "?"),
+            "dispersion": round(vb.get("dispersion", 0.0), 4),
+            "outlier_z": round(vb.get("outlier_z", 0.0), 3),
+            "devig_method": "shin",
+            "weight_scheme": "uniform",
             "stake": vb["stake"],
             "result": "",
         })
@@ -939,6 +963,7 @@ def main():
             "edge", "edge_gross", "effective_odds", "commission_rate",
             "consensus", "pinnacle_cons",
             "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
+            "devig_method", "weight_scheme",
             "stake", "result"
         ], extrasaction="ignore")
         if write_header:
