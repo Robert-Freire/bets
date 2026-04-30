@@ -122,6 +122,11 @@ scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMP
 docs/STRATEGY_COMPARISON.md   Latest CLV comparison across all 8 strategy variants
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10)
 docs/APPROACH.md            Full research-backed architecture
+docs/BACKTEST.md            Shin-corrected backtest (2026-04-29): raw vs shin tables + interpretation
+docs/RESEARCH_NOTES_2026-04.md  Manual deep-read findings (April 2026); TL;DR at top
+docs/PLAN_RESEARCH_2026-04.md   Implementation plan from above; bot-executable + bot-verifiable
+docs/RESEARCH_SCANNER.md    Automated scanner spec (Phases 11.0–11.9 shipped) + post-2026-04 improvements
+docs/RESEARCH_FEED.md       Auto-generated weekly findings (newest first)
 src/                        Statistical models (Dixon-Coles, pi-ratings, CatBoost)
 data/raw/                   Football-data.co.uk CSVs + Understat xG
 ```
@@ -197,6 +202,17 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 
 Full roadmap: `docs/PLAN.md`.
+
+## Research cycle (manual deep-read → variants → graduations)
+
+The automated scanner (`docs/RESEARCH_SCANNER.md`) writes shallow findings weekly to `docs/RESEARCH_FEED.md`. Quarterly (or signal-triggered), do a manual deep-read pass that produces:
+
+1. `docs/RESEARCH_NOTES_<YYYY-MM>.md` — judgement-laden findings; reads actual code from comparable repos and PDFs in full.
+2. `docs/PLAN_RESEARCH_<YYYY-MM>.md` — phased implementation plan derived from the notes; each phase = one PR, with explicit Acceptance, Verification, and Reviewer-focus blocks (bot-implementable, bot-verifiable).
+3. PRs landing variants in `src/betting/strategies.py` as Phase 5.5 paper portfolio.
+4. After ≥50 settled bets per variant + walk-forward backtest evidence, graduations flip scanner defaults.
+
+Latest cycle: **2026-04** — see `docs/RESEARCH_NOTES_2026-04.md` (TL;DR at top) and `docs/PLAN_RESEARCH_2026-04.md` (phases R.0 → R.10).
 
 ## Research foundation
 

@@ -667,6 +667,99 @@ Only do these if 11.0–11.9 have been live for ≥1 month and we have at least 
 
 ---
 
+## Identified improvements (post-2026-04 manual review)
+
+A manual deep-read pass on the same 37 sources (output: `docs/RESEARCH_NOTES_2026-04.md`) surfaced ideas the automated scanner missed. The gaps below are **diagnoses for future scanner phases** — not committed work for the 2026-04 sprint, but documented here so the next research cycle can pick them up.
+
+### 11.11 — GitHub repo deep-fetch (not just README)
+
+**Diagnosis.** The current `fetch.py` GitHub handler (Phase 11.2 task 1) pulls only `README.md` + 10 most recent commit messages. This caused us to **miss the actual paper-faithful Kaunitz formula** — it lives in `konstanzer/online-sports-betting/odds_model.py` (a 3KB Python file) and `Lisandro79/BeatTheBookie/src/strategies/beatTheBookie.m` (1.9KB MATLAB). The README only paraphrases.
+
+The automated feed scored these repos low on adoptability ("comparable algo," "Kaunitz reproduction") because Claude couldn't see the actual implementation.
+
+**Proposed fix.** Extend the GitHub repo handler with a "key files" pass:
+1. After fetching README, scan it for keywords: `strategy`, `algorithm`, `betting`, `odds_model`, `consensus`, `kelly`, `devig`, etc.
+2. List repo top-level + one-level-deep `*.py` / `*.m` / `*.R` files via `gh api repos/{o}/{r}/contents` and `gh api repos/{o}/{r}/contents/{src_dir}`.
+3. Fetch up to **2 files** ≤ 5 KB each that are most likely to be the strategy implementation (heuristic: filename contains keyword from step 1 OR is the largest *.py file in `src/` or `strategies/`).
+4. Concatenate all text into a single bundle ≤ 20 KB cap (existing).
+
+**Estimated effort.** ~1.5h. Touches `scripts/research_lib/fetch.py` (new `_fetch_github_repo_with_code()` helper) + tests with canned `gh api` fixtures.
+
+**Risk.** Increases per-source bytes. May push more bootstrap runs over the 200 KB Claude-call segment cap → more batches. Mitigation: cap key-files to 10 KB combined per repo.
+
+### 11.12 — PDF support via `pdftotext`
+
+**Diagnosis.** Phase 11.2 task 2 explicitly skips PDFs ("Aldous Berkeley PDF will be skipped — fine, the URL is logged"). We discovered during the manual pass that `poppler-utils` is now installed locally. The MacLean/Thorp/Ziemba "Good and bad properties of the Kelly criterion" paper (the Aldous-hosted PDF) contains the **20:2:1 mean/variance/covariance error sensitivity** finding, which is foundational for our half-Kelly choice. The scanner missed it entirely.
+
+**Proposed fix.** When `Content-Type: application/pdf` (or URL ends `.pdf`):
+1. Save body to a temp file.
+2. Shell out: `pdftotext -layout <tmp> -` → captured stdout.
+3. Apply 20 KB cap as for HTML.
+4. Cleanup temp file.
+
+If `pdftotext` is not on PATH (Pi without poppler-utils installed), fall back to current skip behaviour with a `status="skip"` note `"pdftotext not available"`.
+
+**Estimated effort.** ~45 min. Touches `fetch.py` only.
+
+**Risk.** PDFs can be huge (multi-MB) — must enforce a hard download size cap (e.g. 5 MB) before running pdftotext. Otherwise OOM on the Pi.
+
+### 11.13 — JS-rendered content fallback (or explicit skip list)
+
+**Diagnosis.** Pinnacle's own CLV article (`https://www.pinnacle.com/betting-resources/en/educational/what-is-closing-line-value-clv-in-sports-betting`) is JS-rendered. Our `requests + BeautifulSoup` handler returns essentially nothing useful from it. Several Tier-A sources fall in this category. Currently they silently produce empty fetches — Claude has no signal that the page exists.
+
+**Proposed fix (cheap)**. Maintain an explicit `JS_RENDERED_SKIP` set in `fetch.py`. Match URL prefix → return `status="skip", error="js-rendered, manual review needed"`. Forces these into a separate manual-review queue (could be a new section in `RESEARCH_FEED.md`).
+
+**Proposed fix (heavy, optional)**. Add `playwright` as a fallback. Significant dep weight — deferred unless we need it.
+
+**Estimated effort.** Cheap path: 20 min. Heavy: 3h+ + ongoing maintenance.
+
+### 11.14 — Three-stage research pipeline documentation
+
+**Diagnosis.** The scanner was always intended to feed into a deeper review. We just executed that review for the first time (2026-04) and produced `RESEARCH_NOTES_2026-04.md` and `PLAN_RESEARCH_2026-04.md`. The pattern works but isn't documented anywhere. Future research cycles will either repeat the same ad-hoc work or skip the deep-review step.
+
+**Proposed fix.** Add a `## Research cycle workflow` section near the top of this doc:
+
+```
+1. Automated weekly scan → RESEARCH_FEED.md (this doc, Phases 11.0–11.9)
+2. Quarterly (or signal-triggered) manual deep-read → RESEARCH_NOTES_<YYYY-MM>.md
+   - Triggered when: ≥3 high-adopt findings in feed, OR a new comparable repo
+     appears with adopt-ability ≥4, OR an external paper is published in a
+     directly-related domain.
+   - Reads actual code from comparable repos (not just READMEs).
+   - Reads PDFs in full if pdftotext available locally.
+   - Writes one-paragraph implications per finding.
+3. From notes → PLAN_RESEARCH_<YYYY-MM>.md
+   - Phased like this doc: each phase = one PR, with explicit Acceptance,
+     Verification, and Reviewer-focus blocks.
+   - Bot-implementable, bot-verifiable.
+4. Phases merged → variants live in shadow → graduations into scanner defaults
+   per Phase 5.5 cadence.
+```
+
+**Estimated effort.** 30 min (just doc).
+
+### 11.15 — Surface "deep-dive needed" tags in the feed
+
+**Diagnosis.** `RESEARCH_FEED.md` currently outputs adopt-ability scores but no flag for "this looks promising but the README isn't enough — go look at the code." A finding from a Tier-B repo with adopt-ability ≥ 4 should imply a code-deep-dive. Right now the human has to remember to do it.
+
+**Proposed fix.** Update `PROMPT_TEMPLATE` (Phase 11.4 verbatim block) to add a 4th category:
+
+```
+- **DEEP-DIVE** — <when warranted: "code-level review needed before adopting">.
+```
+
+Trigger condition (in the prompt): `STRATEGY` finding from a Tier-B repo with adopt-ability ≥ 4.
+
+The dashboard tile (Phase 11.8) gains a `Research deep-dives pending: N` count parallel to the findings count.
+
+**Estimated effort.** 1h. Touches prompt template, feed-writer regex, dashboard helper.
+
+### Priority and ordering
+
+If we ship one of these, ship **11.11 (GitHub deep-fetch)** first — it directly addresses the gap that caused us to miss the Kaunitz formula for 2 years. 11.12 (PDF) is the easiest by far. 11.14 (workflow doc) is free and unlocks the next cycle. 11.13 (JS skip) is cheap but low-impact. 11.15 (deep-dive tag) only matters once 11.11 is in.
+
+---
+
 ## Risks / things to watch
 
 - **Subprocess output drift.** If `claude` CLI changes default output format between versions, parsing breaks. Pinned to `--output-format text` and snapshot-tested in Phase 11.4.
