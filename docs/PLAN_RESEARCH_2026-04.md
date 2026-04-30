@@ -134,7 +134,7 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | done |
 | R.5.5b | Add 16 new leagues from football-data.co.uk to backtest data | Thu–Fri (this week) | done — 91k matches / 22 leagues; see docs/FDCO_INGEST_NOTES.md |
 | R.5.5c | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
-| R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5c |
+| R.6 | Graduate winning variants AND winning leagues → scanner defaults | Wed | conditional on R.5.5c |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
 | R.8 | Draw-bias variant (K) — needs xG runtime hookup | Thu–Fri | pending |
 | R.9 | Asian Handicap feasibility probe (The Odds API) | Thu–Fri | pending |
@@ -780,7 +780,7 @@ pytest -q
 
 **Goal.** Augment `data/raw/` with 16 new league codes from football-data.co.uk that we **don't currently have** (`B1, E2, E3, EC, F2, G1, I2, N1, P1, SC0, SC1, SC2, SC3, SP1, SP2, T1`), increasing the loader's coverage from ~27k matches / 6 leagues to ~55k+ matches / ~22 leagues. Existing 6 leagues (`D1, D2, E0, E1, F1, I1`) remain untouched — no overlap, no dedup, no schema mapping, no loader changes.
 
-**Why now.** R.5.5c's per-fold 95% CI tightens with more data, which directly affects R.6 graduation defensibility. Cross-league diversity also tests generalisability — the production scanner already runs on 6 leagues, so the backtest should reflect that breadth.
+**Why now — dual purpose.** (1) **Strategy generalisability.** R.5.5c's per-fold 95% CI tightens with more data, and cross-league diversity tests whether a strategy variant works beyond the 6 leagues we currently scan. (2) **Scanner-expansion feasibility study.** Several of the 16 candidate leagues (notably La Liga / SP1, Serie B / I2, Ligue 2 / F2, Eredivisie / N1) are major football leagues we **don't currently scan in production** — La Liga is explicitly excluded per CLAUDE.md ("too noisy, not enough UK bookmaker coverage yet"), but that call was made before Shin devigging, dispersion filters, and paper portfolios. R.5.5b's data ingestion + R.5.5c's per-league walk-forward results give us the empirical basis to **re-evaluate which excluded leagues should be added to the production scanner** in R.6 — alongside the strategy-variant graduation question.
 
 **Why football-data.co.uk** (and not Zenodo, which the original phase plan targeted). The Zenodo 84k-match dataset (Hegarty & Whelan 2025) was investigated first because it's the canonical broader European dataset cited in the literature, but it ships only **aggregated odds** (`maxhome`, `avghome`, ...) — not per-bookmaker triplets — which our consensus strategy cannot use (it needs cross-book dispersion). Full schema comparison + rationale: `docs/ZENODO_INGEST_NOTES.md`. football-data.co.uk has all 16 candidate leagues with the **identical schema** as our existing 6 (`B365H/D/A`, `BWH/D/A`, `IWH/D/A`, `PSH/D/A`, `WHH/D/A`, `VCH/D/A`, plus `Date`, `Div`, `HomeTeam`, `AwayTeam`, `FTR`). A spike against `SP1_2324`, `G1_2324`, `SC3_2324` confirmed:
 - 6/12 books from `BOOKMAKER_GROUPS` present per row.
@@ -904,9 +904,9 @@ test -f scripts/refresh_fdco_data.py && python3 -c "import scripts.refresh_fdco_
 
 ## Phase R.5.5c — Walk-forward run + per-fold report (~1–1.5h)
 
-**Goal.** Use the R.5.5a scaffold to run a walk-forward backtest with `TimeSeriesSplit(5)` over **30 combos**: `consensus_method ∈ {raw, shin, power}` × `consensus_mode ∈ {mean, pinnacle_only}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. Write per-fold ROI + bet counts, plus aggregate mean ± 95% CI, into `docs/BACKTEST.md`. Flag any combo whose CI crosses zero. The `consensus_mode` axis directly tests the question **"does the consensus-of-many-books complexity earn its keep, or would Pinnacle-anchor alone have done as well?"** — material evidence for R.6 graduations.
+**Goal.** Use the R.5.5a scaffold to run a walk-forward backtest with `TimeSeriesSplit(5)` over **30 combos**: `consensus_method ∈ {raw, shin, power}` × `consensus_mode ∈ {mean, pinnacle_only}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. Output **three views** to `docs/BACKTEST.md`: (i) all 22 leagues aggregated, (ii) production-6 leagues only (`{D1, D2, E0, E1, F1, I1}`) — the subset our scanner currently runs on, the right basis for variant graduations, (iii) per-league walk-forward ROI for each of the 16 currently-excluded leagues — the basis for R.6's scanner-expansion decision. Flag any combo whose CI crosses zero. The `consensus_mode` axis directly tests **"does the consensus-of-many-books complexity earn its keep?"**; the per-league view answers **"which currently-excluded leagues should we add to the production scanner?"**
 
-**Why now.** Whole-period ROI hides per-season variance. Walk-forward reveals consistency. The Pinnacle-only comparison is what tells us whether `D_pinnacle_only` should graduate to the production default; without it, R.6 would only have CLV-from-shadow evidence (slow to accumulate).
+**Why now.** Whole-period ROI hides per-season variance; walk-forward reveals consistency. The two-view structure separates two distinct decisions R.6 has to make: which **strategy variant** to graduate (decided on production-6 walk-forward to match what we'd actually act on), and which **leagues** to add to the production scanner (decided per-league on the 16 currently-excluded ones). Without the production-6 view, variant-graduation evidence would be polluted by leagues we never bet on; without the per-league view, league-graduation has no empirical basis.
 
 **Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`). R.5.5b done (16 new leagues from football-data.co.uk added to `data/raw/`; loader returns ≥50k matches across ≥15 leagues).
 
@@ -925,19 +925,29 @@ test -f scripts/refresh_fdco_data.py && python3 -c "import scripts.refresh_fdco_
    - Same fixture with `B365H=2.50` — no flag (no edge).
    - Fixture missing all `PS*` columns → `n_books_used=0`, no bet flagged.
    - Smoke: `consensus_mode="pinnacle_only"` does NOT flag a bet at Pinnacle itself even when its own price is theoretically beatable.
-5. **Write `scripts/walk_forward_backtest.py`.** Loop the **30 combos**: `consensus_method ∈ {raw, shin, power}` × `consensus_mode ∈ {mean, pinnacle_only}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}`. For each: call `walk_forward_backtest(matches, consensus_method=..., consensus_mode=..., min_edge=..., n_splits=5)` (R.5.5a's primitive needs to forward the new kwarg — already does via `**kwargs`); capture the 5-row per-fold DataFrame.
-6. **Aggregate.** For each combo: mean ROI ± 95% CI (t-distribution, n=5: `scipy.stats.t.ppf(0.975, 4) ≈ 2.776`).
-7. **Append walk-forward section to `docs/BACKTEST.md`.** Two parallel 3×5 tables (one per `consensus_mode`), each cell holding `ROI% ± CI` and `n_bets`. Plus a head-to-head summary: per `(devig × edge)` cell, which mode wins on aggregate ROI, and whether the difference's CI crosses zero (i.e. statistically distinguishable).
-8. **Interpretation note.** Mark CI-crosses-zero combos. Explicitly answer: "does `pinnacle_only` match or beat `mean` at any `(devig, edge)` combo with non-overlapping CI?" — that's the R.6-relevant signal for graduating `D_pinnacle_only` to production.
+5. **Write `scripts/walk_forward_backtest.py`.** Three nested loops:
+   - **View 1 — all 22 leagues**: loop the 30 combos on the full dataset.
+   - **View 2 — production-6 only**: loop the 30 combos on `matches[matches["Div"].isin({"D1","D2","E0","E1","F1","I1"})]`. **This is the variant-graduation evidence basis** — what R.6 reads to decide which strategy variant flips the default.
+   - **View 3 — per-league for the 16 candidates**: for each currently-excluded league code (`B1, E2, E3, EC, F2, G1, I2, N1, P1, SC0, SC1, SC2, SC3, SP1, SP2, T1`), run the **leading combo only** (best (`devig`, `mode`, `min_edge`) from view 2) on `matches[matches["Div"] == league]`. **This is the league-graduation evidence basis** — what R.6 reads to decide which excluded leagues to add to production.
+   - For each: call `walk_forward_backtest(filtered_matches, consensus_method=..., consensus_mode=..., min_edge=..., n_splits=5)` (R.5.5a's primitive forwards kwargs already); capture the 5-row per-fold DataFrame.
+6. **Aggregate.** For each combo (and each per-league run): mean ROI ± 95% CI (t-distribution, n=5: `scipy.stats.t.ppf(0.975, 4) ≈ 2.776`).
+7. **Append walk-forward section to `docs/BACKTEST.md`.** Three sub-sections:
+   - **Walk-forward — all 22 leagues**: two parallel 3×5 tables (one per `consensus_mode`), each cell `ROI% ± CI / n_bets`.
+   - **Walk-forward — production-6 only**: same shape; this is the **graduation-relevant** view, called out clearly.
+   - **Walk-forward — excluded-league candidates**: one row per excluded league code, columns `n_matches, n_bets, mean_roi, ci_low, ci_high, ci_crosses_zero`. Sort by `ci_low` descending — leagues at the top are the strongest expansion candidates.
+   - Plus head-to-head: per `(devig × edge)` cell, which `consensus_mode` wins on production-6 aggregate ROI, and whether the difference's CI crosses zero.
+8. **Interpretation notes** (two explicit yes/no answers in the doc):
+   - **Strategy variant**: "Does `pinnacle_only` match or beat `mean` at any `(devig, edge)` combo on production-6 with non-overlapping CI?" — R.6 reads this to decide on `D_pinnacle_only` graduation.
+   - **Excluded leagues**: "Which of the 16 currently-excluded leagues show positive walk-forward ROI on the leading combo with CI not crossing zero?" — R.6 reads this to decide which leagues to promote into the production scanner.
 
 **Acceptance.**
 - [ ] `compute_consensus` / `find_consensus_bets` / `backtest_consensus` accept `consensus_mode` kwarg with default `"mean"` (preserves current behaviour for all existing callers).
 - [ ] `tests/test_consensus_pinnacle_only.py` passes (4 tests).
-- [ ] `scripts/walk_forward_backtest.py` runs end-to-end on the existing dataset and produces 30 combo rows.
-- [ ] `docs/BACKTEST.md` walk-forward section exists with both `consensus_mode` values × all 3 consensus methods × 5 edge thresholds.
+- [ ] `scripts/walk_forward_backtest.py` runs end-to-end and produces all three views (all-22, production-6, per-league × 16).
+- [ ] `docs/BACKTEST.md` walk-forward section exists with the three sub-sections explicitly named: "all 22 leagues", "production-6 only", "excluded-league candidates".
 - [ ] Per-fold variance reported. Aggregate mean ± 95% CI annotated.
-- [ ] CI-crosses-zero combos explicitly flagged in the interpretation note.
-- [ ] Head-to-head `mean` vs `pinnacle_only` summary present, with explicit yes/no answer to the "does complexity earn its keep" question.
+- [ ] CI-crosses-zero combos explicitly flagged.
+- [ ] Two explicit yes/no answers present: (a) does `pinnacle_only` beat `mean` on production-6? (b) which excluded leagues qualify for production-scanner promotion?
 - [ ] No regressions in `pytest -q` — the default-arg change must not break any existing test.
 
 **Verification commands.**
@@ -949,14 +959,18 @@ python3 scripts/walk_forward_backtest.py 2>&1 | tail -20
 grep -c "Walk-forward" docs/BACKTEST.md  # >= 1
 grep -cE "(95% CI|confidence interval|fold)" docs/BACKTEST.md  # >= 1
 
+# Three views present
+grep -cE "all 22 leagues|production-6|excluded-league candidates" docs/BACKTEST.md  # >= 3
+
 # Both consensus modes present
-grep -A60 "Walk-forward" docs/BACKTEST.md | grep -cE "(mean|pinnacle_only)"  # >= 2
+grep -A100 "Walk-forward" docs/BACKTEST.md | grep -cE "(mean|pinnacle_only)"  # >= 2
 
 # All 3 consensus methods present
-grep -A60 "Walk-forward" docs/BACKTEST.md | grep -cE "(raw|shin|power)"  # >= 3
+grep -A100 "Walk-forward" docs/BACKTEST.md | grep -cE "(raw|shin|power)"  # >= 3
 
-# Head-to-head answer present
+# Both yes/no answers present
 grep -iE "(does .* earn|complexity|pinnacle.*beat|mean.*beat)" docs/BACKTEST.md | head -3
+grep -iE "(qualify for|excluded.*league|league.*promot|expand.*scanner)" docs/BACKTEST.md | head -3
 
 # Backwards compatibility — existing callers without consensus_mode still work
 python3 -c "
@@ -976,6 +990,8 @@ pytest -q  # no regressions
 - **Pinnacle excluded from bet candidates in `pinnacle_only` mode.** Re-read the iteration in `find_consensus_bets` — confirm `if consensus_mode == "pinnacle_only" and book == "PS": continue`. Without this, the strategy could "find an edge" against itself.
 - **`min_books` handling under `pinnacle_only`.** The current default `min_books=3` would reject every Pinnacle-only candidate (since `n_books_used = 1`). The implementer must either auto-override to 1 inside the function or update the script's call to pass `min_books=1` for that mode.
 - **CI-crosses-zero combos correctly flagged** and prominently called out — those cannot defend an R.6 default-flip.
+- **Production-6 filter uses the canonical set** `{"D1","D2","E0","E1","F1","I1"}`. This is what the live scanner currently runs on per CLAUDE.md "Sports scanned"; using a different set would mismatch graduation evidence vs. production reality.
+- **Per-league CI is honest with low n.** Some excluded leagues (smaller ones) may produce <50 bets in 5 folds. The CI for those will be very wide. Don't use `ci_crosses_zero=False` alone as a graduation gate without also checking `n_bets >= 50` per league.
 - **Default-arg change is backwards compatible.** Existing callers of all 3 functions in `consensus.py` (e.g. `main.py`, R.5's whole-period analysis) must continue to work without changes — the `consensus_mode="mean"` default preserves current behaviour.
 - **Script is a thin loop**, not a re-implementation of walk-forward logic — it should call `walk_forward_backtest()` from R.5.5a.
 
@@ -983,27 +999,50 @@ pytest -q  # no regressions
 
 ---
 
-## Phase R.6 — Graduate winning variants → scanner defaults (~1.5h, conditional)
+## Phase R.6 — Graduate winning variants AND winning leagues → scanner defaults (~2h, conditional)
 
-**Goal.** Promote variants from shadow to scanner defaults if they meet bar.
+**Goal.** Two parallel decisions, both based on R.5.5c's walk-forward evidence:
+1. **Variant graduation** — promote a strategy variant from shadow portfolio to scanner default if it beats production on the **production-6 walk-forward** view.
+2. **League graduation** — promote one or more currently-excluded leagues into the production scanner if R.5.5c's per-league walk-forward shows positive ROI with non-overlapping CI.
 
-**Bar for graduation.**
+These are independent decisions and can land in the same PR or be split.
+
+**Bar for variant graduation.**
 - Variant has shadow data ≥ 50 settled bets across the existing portfolio (won't be reached this weekend — most will need 4–6 weeks). For *immediate* graduation candidates from R.5/R.5.5c, we apply a softer bar:
   - **M_min_prob_15**: graduates immediately if §4.6 shows decile-1 underperformance ≥ 5pp on existing settled history. Bias is empirical fact, not a strategy hypothesis.
-  - **I_power_devig**: graduates only if R.5.5c's **walk-forward** numbers show `power` ≥ `shin` ROI at 2–3% edges in **≥ 4 of 5 folds** AND the aggregate 95% CI does not cross Shin's mean. Whole-period dominance from R.5 alone is **insufficient** — we need consistency across time.
+  - **I_power_devig**: graduates only if R.5.5c's **production-6 walk-forward** shows `power` ≥ `shin` ROI at 2–3% edges in **≥ 4 of 5 folds** AND the aggregate 95% CI does not cross Shin's mean. Whole-period dominance from R.5 alone is **insufficient**.
+  - **D_pinnacle_only**: graduates only if R.5.5c's **production-6 walk-forward** head-to-head shows `pinnacle_only` ≥ `mean` ROI at the leading `(devig, edge)` combo with non-overlapping CI. If the difference is statistically a wash, do NOT graduate — the production complexity earns its keep on the "do no harm" bar.
   - **J_sharp_weighted**, **L_quarter_kelly**, **N_competitive_only**: stay in shadow until ≥ 50 settled bets *and* their inclusion in the walk-forward backtest (follow-up PR) shows positive aggregate ROI.
 
-**Tasks (conditional on R.5 results).**
-1. If M graduates: add `MIN_CONSENSUS_PROB = 0.15` constant to `scripts/scan_odds.py` and apply pre-flag. Variant `M_min_prob_15` retired from STRATEGIES (or kept for regression comparison — decide).
-2. If I graduates: change default `devig` in production scanner from `shin` to `power`, OR add a runtime flag and start shipping `power` for new bets.
-3. Update `CLAUDE.md` "How the scanner works" section to reflect the new defaults.
-4. Update `docs/PLAN.md` Phase 1 table — annotate the change.
+**Bar for league graduation.**
+- Per excluded league (R.5.5c's view 3): graduate if **all three** hold:
+  1. **Walk-forward CI does not cross zero** at the leading `(devig, mode, edge)` combo.
+  2. `n_bets >= 50` over the 5 folds (otherwise CI is vacuously narrow due to sample-size limits).
+  3. Avg `n_books_used >= 3` per match in the most-recent 2 seasons (confirms book coverage holds today, not just historically).
+- "La Liga is excluded" was specifically called out in CLAUDE.md as "too noisy, not enough UK bookmaker coverage yet." If SP1 graduates, the commit message must explicitly retire that justification with the new evidence.
+
+**Tasks (conditional on R.5.5c results).**
+1. **Variant graduation** (if any qualify):
+   - If M graduates: add `MIN_CONSENSUS_PROB = 0.15` to `scripts/scan_odds.py` and apply pre-flag.
+   - If I graduates: change default `devig` from `shin` to `power` (or add a runtime flag).
+   - If D graduates: change `consensus_mode` default; remove `D_pinnacle_only` from STRATEGIES (now production) and consider re-adding `A_consensus_legacy` as a shadow check.
+2. **League graduation** (if any qualify):
+   - Add the league code to the production scanner's league-list config in `scripts/scan_odds.py` (look for existing league configuration; copy a 6th-league entry as the template).
+   - Set `min_books` per the new league per its R.5.5c sample (most likely 20, matching existing leagues).
+   - Add a row to CLAUDE.md "Sports scanned" table.
+   - **Important**: any league that graduates also flips on for paper-portfolio shadow runs of variants I/J/L/M/N/O/P automatically — verify the strategies.py `markets` filter doesn't exclude the new league code.
+3. **Documentation**:
+   - Update `CLAUDE.md` "How the scanner works" section.
+   - Update `docs/PLAN.md` Phase 1 table.
+   - If La Liga (SP1) graduated: explicitly remove the "La Liga excluded — too noisy, not enough UK bookmaker coverage yet" line from CLAUDE.md and replace with a one-line note pointing at the R.5.5c evidence.
 
 **Acceptance.**
-- [ ] Each graduating variant has a one-paragraph promotion note in the PR body explaining the evidence (which fold counts, which CI bounds).
+- [ ] Each graduating **variant** has a one-paragraph promotion note in the PR body citing production-6 walk-forward evidence (fold counts, CI bounds).
+- [ ] Each graduating **league** has a one-paragraph promotion note citing per-league walk-forward evidence (CI bounds, n_bets, recent-seasons book coverage).
 - [ ] No graduation happens silently — even immediate ones get explicit sign-off in commit message.
-- [ ] CLAUDE.md "How the scanner works" section updated to reflect new defaults.
-- [ ] If nothing graduates: explicit `## No graduation this week` section in PR body explaining why (citing CI breadth from R.5.5c).
+- [ ] CLAUDE.md "How the scanner works" + "Sports scanned" sections updated.
+- [ ] If La Liga graduates: the "too noisy" justification is explicitly retired in CLAUDE.md.
+- [ ] If nothing graduates: explicit `## No graduation this week` section in PR body explaining why (citing CI breadth and/or n_bets shortfalls from R.5.5c).
 
 **Verification commands.**
 ```bash
