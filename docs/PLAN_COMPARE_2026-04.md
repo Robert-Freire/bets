@@ -35,7 +35,7 @@ entries directly — no separate phase needed.
 | C.1 | Show 0-bet variants in comparison report | High | Pre-weekend | ✅ done |
 | C.2 | 95% CI / SE on Avg CLV | High | Pre-weekend | ✅ done |
 | C.3 | Per-sport breakdown table | High | Pre-weekend | ✅ done |
-| C.4 | Drift-toward-you % per variant (wire `logs/drift.csv`) | Medium | Post first comparison | pending |
+| C.4 | Drift-toward-you % per variant (wire `logs/drift.csv`) | Medium | Post first comparison | ✅ done |
 | C.5 | Per-confidence breakdown (HIGH / MED / LOW) | Medium | Post first comparison | pending |
 | C.6 | Median CLV alongside mean | Medium | Pre-weekend (cheap) | ✅ done |
 | C.7 | Per-market breakdown (h2h / totals / btts) | Low | Backlog | pending |

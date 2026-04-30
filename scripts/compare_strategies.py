@@ -23,6 +23,7 @@ from src.betting.strategies import STRATEGIES  # noqa: E402
 
 BETS_CSV  = _ROOT / "logs" / "bets.csv"
 PAPER_DIR = _ROOT / "logs" / "paper"
+DRIFT_CSV = _ROOT / "logs" / "drift.csv"
 OUT_DOC   = _ROOT / "docs" / "STRATEGY_COMPARISON.md"
 
 # Buckets for favourite-longshot bias slice. Bounds are [lo, hi).
@@ -44,7 +45,49 @@ def _read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def _stats(rows: list[dict]) -> dict:
+def _load_drift_index() -> dict[tuple, tuple[float, float]] | None:
+    """Return {(kickoff, home, away, market, line, side): (prob_t60, prob_close)} or None."""
+    if not DRIFT_CSV.exists():
+        return None
+
+    # Collect T-60 and T-1 Pinnacle odds per bet key
+    t60: dict[tuple, float] = {}
+    t1:  dict[tuple, float] = {}
+
+    for row in _read_csv(DRIFT_CSV):
+        pin_odds_str = row.get("pinnacle_odds", "")
+        if not pin_odds_str:
+            continue
+        try:
+            pin_prob = 1.0 / float(pin_odds_str)
+        except (ValueError, ZeroDivisionError):
+            continue
+
+        key = (
+            row.get("kickoff", ""),
+            row.get("home", ""),
+            row.get("away", ""),
+            row.get("market", ""),
+            str(row.get("line", "")),
+            row.get("side", ""),
+        )
+        t = row.get("t_minus_min", "")
+        try:
+            t_int = int(t)
+        except (ValueError, TypeError):
+            continue
+
+        if t_int == 60:
+            t60[key] = pin_prob
+        elif t_int == 1:
+            t1[key] = pin_prob
+
+    # Build index only for keys that have both T-60 and T-1 readings
+    index = {k: (t60[k], t1[k]) for k in t60 if k in t1}
+    return index if index else None
+
+
+def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
     n_bets = len(rows)
     clv_rows = [r for r in rows if r.get("clv_pct") not in ("", None)]
     n_with_clv = len(clv_rows)
@@ -77,6 +120,28 @@ def _stats(rows: list[dict]) -> dict:
             pass
     avg_edge = sum(edge_values) / len(edge_values) if edge_values else None
 
+    # Drift-toward-you: compare Pinnacle implied prob at T-60 vs T-1
+    drift_pct = None
+    if drift_index:
+        moved_toward = 0
+        total_with_drift = 0
+        for r in rows:
+            key = (
+                r.get("kickoff", ""),
+                r.get("home", ""),
+                r.get("away", ""),
+                r.get("market", ""),
+                str(r.get("line", "")),
+                r.get("side", ""),
+            )
+            if key in drift_index:
+                prob_t60, prob_close = drift_index[key]
+                total_with_drift += 1
+                if prob_close > prob_t60:
+                    moved_toward += 1
+        if total_with_drift:
+            drift_pct = moved_toward / total_with_drift
+
     # book_dist scoped to CLV rows so the denominator matches avg_clv
     book_counter: Counter = Counter()
     for r in clv_rows:
@@ -94,6 +159,7 @@ def _stats(rows: list[dict]) -> dict:
         "pos_clv": pos_clv,
         "avg_edge": avg_edge,
         "book_dist": top_books,
+        "drift_pct": drift_pct,
     }
 
 
@@ -228,10 +294,12 @@ def build_report() -> str:
     if not entries:
         return "No data found. Run the scanner first.\n"
 
+    drift_index = _load_drift_index()
+
     # Compute stats and sort: active variants by avg_clv desc, then no-CLV, then 0-bet
     results = []
     for name, rows in entries:
-        s = _stats(rows)
+        s = _stats(rows, drift_index=drift_index)
         results.append((name, s))
     results.sort(key=lambda x: (
         x[1]["n_bets"] == 0,
@@ -257,9 +325,11 @@ def build_report() -> str:
         " you expect to fire shows 0, check its filter wiring (e.g. `K_draw_bias`"
         " requires `logs/team_xg.json` and an alias-resolved team name).",
         "",
-        "| Strategy | Bets | CLV bets | Avg CLV ± 95% CI | Med CLV | CLV >0 % | Avg Edge | Top books |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Strategy | Bets | CLV bets | Avg CLV ± 95% CI | Med CLV | CLV >0 % | Drift→you % | Avg Edge | Top books |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
+
+    drift_warnings: list[str] = []
 
     for name, s in results:
         marker = " ★" if name == best_name else ""
@@ -267,16 +337,26 @@ def build_report() -> str:
         low_n = s["n_with_clv"] < 10
         prefix = "[low n] " if low_n else ""
 
+        # C.4: sanity-flag extreme drift values
+        dp = s["drift_pct"]
+        if dp is not None and s["n_bets"] >= 10 and dp in (0.0, 1.0):
+            drift_warnings.append(
+                f"⚠️ `{name}` drift={dp:.0%} with n={s['n_bets']} — likely sign error in drift direction."
+            )
+
         if s["n_bets"] == 0:
             # C.1: 0-bet row
-            lines.append(f"| {prefix}{name} | 0 | — | — | — | — | — | — |")
+            lines.append(f"| {prefix}{name} | 0 | — | — | — | — | — | — | — |")
         else:
             clv_ci = _fmt_clv_ci(s["avg_clv"], s["ci95_half"])
             lines.append(
                 f"| {prefix}{name}{marker} | {s['n_bets']} | {s['n_with_clv']} | "
                 f"{clv_ci} | {_fmt(s['median_clv'])} | {_fmt(s['pos_clv'])} | "
-                f"{_fmt(s['avg_edge'])} | {s['book_dist'] or '—'} |"
+                f"{_fmt(dp)} | {_fmt(s['avg_edge'])} | {s['book_dist'] or '—'} |"
             )
+
+    if drift_warnings:
+        lines += ["", "**Drift sanity warnings:**"] + [f"- {w}" for w in drift_warnings]
 
     # C.2: note about CI interpretation
     lines += [
