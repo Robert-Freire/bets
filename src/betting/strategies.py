@@ -58,6 +58,14 @@ class StrategyConfig:
     require_model_agree: bool  = False           # only flag h2h where model edge ≥ model_min_edge
     model_min_edge:      float = 0.0
     markets:             tuple = ("h2h", "totals", "btts")
+    # R.1 fields
+    min_consensus_prob:  float = 0.0             # M, N: reject sides with cons < this
+    max_consensus_prob:  float = 1.0             # N: reject sides with cons > this
+    kelly_fraction:      float = 0.5             # L: fractional Kelly multiplier
+    # R.1.5 fields
+    raw_consensus:       bool  = False           # O: use 1/odds directly, skip devig
+    kaunitz_alpha:       float = 0.0             # O: paper's α; replaces additive min_edge rule
+    max_odds_shopping:   bool  = False           # O, P: flag at best-priced UK book per side
 
 
 STRATEGIES: list[StrategyConfig] = [
@@ -118,6 +126,52 @@ STRATEGIES: list[StrategyConfig] = [
         label="H: No Pinnacle in consensus",
         description="Exclude Pinnacle from consensus; isolates Pinnacle's contribution",
         exclude_pinnacle=True,
+    ),
+    # ── R.1: cheap variants ───────────────────────────────────────────────────
+    StrategyConfig(
+        name="I_power_devig",
+        label="I: Power devig",
+        description="Power devig instead of Shin; tests Bethero recommendation",
+        devig="power",
+    ),
+    StrategyConfig(
+        name="L_quarter_kelly",
+        label="L: 0.4-Kelly",
+        description="Tighter Kelly fraction (0.4) — Aldous/Downey caution under uncertainty",
+        kelly_fraction=0.4,
+    ),
+    StrategyConfig(
+        name="M_min_prob_15",
+        label="M: Min-prob 15%",
+        description="Reject bets with consensus prob < 15%; longshot-bias guard (Hegarty & Whelan 2025)",
+        min_consensus_prob=0.15,
+    ),
+    StrategyConfig(
+        name="N_competitive_only",
+        label="N: Competitive-only",
+        description="Only flag matches where consensus prob ∈ [0.30, 0.70]; Clegg & Cartlidge 2025 surviving signal",
+        min_consensus_prob=0.30,
+        max_consensus_prob=0.70,
+    ),
+    # ── R.1.5: paper-faithful Kaunitz baseline ────────────────────────────────
+    StrategyConfig(
+        name="O_kaunitz_classic",
+        label="O: Kaunitz classic (paper)",
+        description="Paper-faithful Kaunitz: raw consensus, α=0.05, max-odds shopping, min 4 books",
+        raw_consensus=True,
+        kaunitz_alpha=0.05,
+        max_odds_shopping=True,
+        min_books=4,
+        max_dispersion=None,
+        drop_outlier_book=False,
+        markets=("h2h",),
+    ),
+    # ── R.1.6: max-odds shopping variant (optional) ───────────────────────────
+    StrategyConfig(
+        name="P_max_odds_shopping",
+        label="P: Max-odds shopping",
+        description="Production logic, but bet at the best-priced UK book on flagged outcome",
+        max_odds_shopping=True,
     ),
 ]
 
@@ -229,6 +283,82 @@ def _flag_bets(
         target_books = UK_LICENSED_BOOKS
 
     bets = []
+
+    if strategy.max_odds_shopping:
+        # For each side, find the UK-licensed book with the best (highest) odds.
+        best_by_side: dict[str, tuple[str, float, dict]] = {}  # side -> (book_key, odds, book_data)
+        for b in books_data:
+            if target_books is not None and b["book"] not in target_books:
+                continue
+            for side in sides:
+                odds = b.get(side)
+                if not odds or not (1.2 <= odds <= 15.0):
+                    continue
+                if side not in best_by_side or odds > best_by_side[side][1]:
+                    best_by_side[side] = (b["book"], odds, b)
+
+        for side in sides:
+            if side not in cons or side not in best_by_side:
+                continue
+            if cons[side] < strategy.min_consensus_prob:
+                continue
+            if cons[side] > strategy.max_consensus_prob:
+                continue
+            if strategy.max_dispersion is not None:
+                if disp.get(side, 0.0) > strategy.max_dispersion:
+                    continue
+
+            book_key, odds, b = best_by_side[side]
+            fair_side = b["fair"].get(side, 1.0 / odds)
+            edge_gross = cons[side] - fair_side
+            eff_implied = _effective_implied_prob(odds, book_key)
+            edge = cons[side] - eff_implied
+
+            if strategy.kaunitz_alpha > 0:
+                if (cons[side] - strategy.kaunitz_alpha) * odds - 1 <= 0:
+                    continue
+            else:
+                if edge_gross < strategy.min_edge:
+                    continue
+
+            impl_raw = round(1.0 / odds, 4)
+            impl_effective = round(eff_implied, 4)
+            z = 0.0  # no outlier filter when shopping for max odds
+
+            ms = "?"
+            if market == "h2h":
+                h = api_to_fd.get(home, home)
+                a = api_to_fd.get(away, away)
+                sig = model_signals.get(f"{sport_key}:{h}|{a}")
+                if sig is not None:
+                    ms_edge = sig.get(side, 0.0) - impl_raw
+                    ms = f"{ms_edge:+.3f}"
+                if strategy.require_model_agree:
+                    try:
+                        if float(ms) < strategy.model_min_edge:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
+
+            bets.append({
+                "market": market, "line": line,
+                "commence": commence, "home": home, "away": away,
+                "side": side, "book": book_key, "odds": odds,
+                "impl_raw": impl_raw, "impl_effective": impl_effective,
+                "cons": round(cons[side], 4),
+                "edge": round(edge, 4), "edge_gross": round(edge_gross, 4),
+                "effective_odds": round(_effective_odds(odds, book_key), 4),
+                "commission_rate": round(_commission_rate(book_key), 4),
+                "pinnacle_cons": round(pinnacle_fair.get(side, 0.0), 4),
+                "n_books": n, "confidence": conf,
+                "model_signal": ms,
+                "dispersion": round(disp.get(side, 0.0), 4),
+                "outlier_z": round(z, 3),
+                "kelly_fraction": strategy.kelly_fraction,
+            })
+        return bets
+
+    # ── Normal per-book path ──────────────────────────────────────────────────
     for b in books_data:
         if target_books is not None and b["book"] not in target_books:
             continue
@@ -241,6 +371,11 @@ def _flag_bets(
             if not (1.2 <= odds <= 15.0):
                 continue
 
+            if cons[side] < strategy.min_consensus_prob:
+                continue
+            if cons[side] > strategy.max_consensus_prob:
+                continue
+
             if strategy.max_dispersion is not None:
                 if disp.get(side, 0.0) > strategy.max_dispersion:
                     continue
@@ -249,12 +384,15 @@ def _flag_bets(
             edge_gross = cons[side] - fair_side
             # Commission shrinks effective payout → raises effective implied prob → reduces edge.
             # Filter on gross edge (Shin-devigged, consistent with production find_value_bets).
-            # Net edge is stored for Kelly sizing and display; commission only affects payout.
             eff_implied = _effective_implied_prob(odds, b["book"])
             edge = cons[side] - eff_implied
 
-            if edge_gross < strategy.min_edge:
-                continue
+            if strategy.kaunitz_alpha > 0:
+                if (cons[side] - strategy.kaunitz_alpha) * odds - 1 <= 0:
+                    continue
+            else:
+                if edge_gross < strategy.min_edge:
+                    continue
 
             # Outlier-book check
             z = 0.0
@@ -310,6 +448,7 @@ def _flag_bets(
                 "model_signal": ms,
                 "dispersion": round(disp.get(side, 0.0), 4),
                 "outlier_z": round(z, 3),
+                "kelly_fraction": strategy.kelly_fraction,
             })
 
     return bets
@@ -333,7 +472,10 @@ def _collect_h2h(ev: dict, strategy: StrategyConfig) -> tuple[list[dict], dict[s
                 entries["D"] = draw
             if not all(v and v > 1.0 for v in entries.values()):
                 continue
-            fair = _apply_devig(entries, strategy.devig)
+            if strategy.raw_consensus:
+                fair = {s: 1.0 / v for s, v in entries.items()}
+            else:
+                fair = _apply_devig(entries, strategy.devig)
             for s, fp in fair.items():
                 impl.setdefault(s, []).append(fp)
             books.append({"book": b["key"], "fair": fair, **entries})
@@ -359,7 +501,10 @@ def _collect_totals(ev: dict, strategy: StrategyConfig) -> dict[float, tuple[lis
                 if not (over and under and over > 1.0 and under > 1.0):
                     continue
                 entries = {"OVER": over, "UNDER": under}
-                fair = _apply_devig(entries, strategy.devig)
+                if strategy.raw_consensus:
+                    fair = {s: 1.0 / v for s, v in entries.items()}
+                else:
+                    fair = _apply_devig(entries, strategy.devig)
                 if pt not in by_pt:
                     by_pt[pt] = ([], {})
                 books, impl = by_pt[pt]
@@ -383,7 +528,10 @@ def _collect_btts(ev: dict, strategy: StrategyConfig) -> tuple[list[dict], dict[
             if not (yes_o and no_o and yes_o > 1.0 and no_o > 1.0):
                 continue
             entries = {"YES": yes_o, "NO": no_o}
-            fair = _apply_devig(entries, strategy.devig)
+            if strategy.raw_consensus:
+                fair = {s: 1.0 / v for s, v in entries.items()}
+            else:
+                fair = _apply_devig(entries, strategy.devig)
             for s, fp in fair.items():
                 impl.setdefault(s, []).append(fp)
             books.append({"book": b["key"], "fair": fair, **entries})

@@ -36,11 +36,12 @@ def get_bankroll() -> float:
     return 1000.0
 
 
-def compute_raw_stake(cons: float, odds: float, bankroll: float, book: str = "") -> float:
-    """Half-Kelly stake, hard-capped at 5% bankroll before risk adjustments.
+def compute_raw_stake(cons: float, odds: float, bankroll: float, book: str = "",
+                      kelly_multiplier: float = 0.5) -> float:
+    """Fractional-Kelly stake, hard-capped at 5% bankroll before risk adjustments.
     At typical edges (3–8%) the 5% cap dominates — Kelly rarely reaches it."""
     eff = _effective_odds(odds, book) if book else odds
-    kelly = max(0.0, min(0.5 * (cons * eff - 1) / (eff - 1), 0.05))
+    kelly = max(0.0, min(kelly_multiplier * (cons * eff - 1) / (eff - 1), 0.05))
     return kelly * bankroll
 
 

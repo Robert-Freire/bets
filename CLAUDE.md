@@ -4,7 +4,7 @@
 
 A value betting scanner using the **Kaunitz consensus strategy**: compute the Shin-devigged fair probability across 30–40 bookmakers, then flag bets where a UK-licensed bookmaker's odds are significantly better than the consensus. CLV (closing-line value) against Pinnacle is the primary diagnostic for whether edge is real.
 
-*Note: the legacy "+6.1% ROI at 2% edge" was computed on raw implied probabilities. The corrected Shin-devigged backtest is in [`docs/BACKTEST.md`](docs/BACKTEST.md).*
+*Backtest results — including Shin-corrected numbers (2% edge → 17.65% ROI, generated 2026-04-29) — are in [`docs/BACKTEST.md`](docs/BACKTEST.md).*
 
 ## Quick start
 

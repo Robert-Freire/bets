@@ -48,8 +48,9 @@ def _load_scan_odds(monkeypatch):
 
 # ── Test 10: count and uniqueness (run first for fast feedback) ────────────────
 
-def test_strategy_count_is_8():
-    assert len(STRATEGIES) == 8
+def test_strategy_count_and_uniqueness():
+    # 8 original + I, L, M, N (R.1) + O (R.1.5) + P (R.1.6) = 14
+    assert len(STRATEGIES) == 14, f"Expected 14 strategies, got {len(STRATEGIES)}"
     names = [s.name for s in STRATEGIES]
     assert len(names) == len(set(names)), "Strategy names must be unique"
 
@@ -301,3 +302,113 @@ def test_edge_filter_uses_gross_edge():
         assert b["edge_gross"] >= no_filter.min_edge, (
             f"{b['book']} {b['side']}: edge_gross {b['edge_gross']:.4f} < min_edge {no_filter.min_edge}"
         )
+
+
+# ── R.1 tests ─────────────────────────────────────────────────────────────────
+
+def test_variant_I_power_devig_bet_count_similar_to_G(sample_event):
+    events = [sample_event]
+    i_bets = evaluate_strategy(events, "soccer_epl", _strategy("I_power_devig"))
+    g_bets = evaluate_strategy(events, "soccer_epl", _strategy("G_proportional"))
+    tolerance = max(3, len(g_bets))
+    assert abs(len(i_bets) - len(g_bets)) <= tolerance, (
+        f"I_power_devig ({len(i_bets)}) vs G_proportional ({len(g_bets)}) differ by >{tolerance}"
+    )
+
+
+def test_variant_L_quarter_kelly_same_count_and_fraction(sample_event):
+    events = [sample_event]
+    a_bets = evaluate_strategy(events, "soccer_epl", _strategy("A_production"))
+    l_bets = evaluate_strategy(events, "soccer_epl", _strategy("L_quarter_kelly"))
+    assert len(l_bets) == len(a_bets), (
+        f"L_quarter_kelly ({len(l_bets)}) must have same bet count as A_production ({len(a_bets)})"
+    )
+    for bet in l_bets:
+        assert bet["kelly_fraction"] == 0.4, (
+            f"L_quarter_kelly bet kelly_fraction={bet['kelly_fraction']}, expected 0.4"
+        )
+
+
+def test_variant_M_rejects_longshot_bets():
+    # AWAY is a heavy underdog (cons < 0.15). A flags it; M rejects it.
+    books = {b: (1.50, 3.50, 7.50) for b in list(UK_LICENSED_BOOKS)[:20]}
+    books["pinnacle"] = (1.48, 3.55, 7.80)
+    books["betfair_ex_uk"] = (1.50, 3.50, 15.0)  # generous AWAY odds
+    ev = synthetic_event(h2h_prices=books)
+
+    a_bets = evaluate_strategy([ev], "soccer_epl", _strategy("A_production"))
+    m_bets = evaluate_strategy([ev], "soccer_epl", _strategy("M_min_prob_15"))
+
+    away_a = [b for b in a_bets if b["side"] == "A"]
+    assert away_a, "A_production should flag AWAY (generous betfair odds, longshot fixture)"
+    assert away_a[0]["cons"] < 0.15, (
+        f"Fixture setup: AWAY cons {away_a[0]['cons']:.3f} must be < 0.15"
+    )
+    away_m = [b for b in m_bets if b["side"] == "A"]
+    assert away_m == [], (
+        f"M_min_prob_15 must reject AWAY bets with cons < 0.15; got {len(away_m)}"
+    )
+
+
+def test_variant_N_competitive_only_rejects_heavy_favourite():
+    # HOME is a heavy favourite (cons >> 0.70). A flags it; N rejects it.
+    n_uk = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:18]
+    books = {b: (1.25, 4.0, 8.0) for b in n_uk}
+    books["pinnacle"] = (1.23, 4.2, 8.5)
+    books["betfair_ex_uk"] = (1.70, 4.0, 8.0)  # generous HOME odds, but cons >> 0.70
+    ev = synthetic_event(h2h_prices=books)
+
+    a_bets = evaluate_strategy([ev], "soccer_epl", _strategy("A_production"))
+    n_bets = evaluate_strategy([ev], "soccer_epl", _strategy("N_competitive_only"))
+
+    home_a = [b for b in a_bets if b["side"] == "H"]
+    assert home_a, "A_production should flag HOME"
+    assert home_a[0]["cons"] > 0.70, (
+        f"Fixture setup: cons[H]={home_a[0]['cons']:.3f} must be > 0.70"
+    )
+    home_n = [b for b in n_bets if b["side"] == "H"]
+    assert home_n == [], "N_competitive_only must reject HOME bets with cons > 0.70"
+
+
+# ── R.1.5 tests ───────────────────────────────────────────────────────────────
+
+def test_variant_O_kaunitz_classic_flags_when_condition_met():
+    # 4 UK books at HOME=2.0 + betfair at HOME=2.30
+    # cons[H] (raw) = (4 * 0.500 + 0.435) / 5 ≈ 0.487
+    # (0.487 - 0.05) * 2.30 ≈ 1.005 > 1.0 → should flag
+    uk4 = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:4]
+    books = {b: (2.0, 3.0, 4.5) for b in uk4}
+    books["betfair_ex_uk"] = (2.30, 3.0, 4.5)
+    ev = synthetic_event(h2h_prices=books)
+
+    o_bets = evaluate_strategy([ev], "soccer_epl", _strategy("O_kaunitz_classic"))
+    home_bets = [b for b in o_bets if b["side"] == "H"]
+    assert home_bets, "O_kaunitz_classic should flag HOME when (cons-alpha)*max_odds > 1.0"
+    assert home_bets[0]["book"] == "betfair_ex_uk", (
+        "O should flag at the max-odds book (betfair_ex_uk)"
+    )
+
+
+def test_variant_O_kaunitz_classic_skips_when_condition_not_met():
+    # 4 UK books at HOME=2.0 + betfair at HOME=2.08
+    # cons[H] (raw) ≈ (4*0.500 + 0.481)/5 ≈ 0.496
+    # (0.496 - 0.05) * 2.08 ≈ 0.928 < 1.0 → should NOT flag
+    uk4 = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:4]
+    books = {b: (2.0, 3.0, 4.5) for b in uk4}
+    books["betfair_ex_uk"] = (2.08, 3.0, 4.5)
+    ev = synthetic_event(h2h_prices=books)
+
+    o_bets = evaluate_strategy([ev], "soccer_epl", _strategy("O_kaunitz_classic"))
+    home_bets = [b for b in o_bets if b["side"] == "H"]
+    assert home_bets == [], (
+        f"O_kaunitz_classic must not flag HOME when (cons-alpha)*max_odds <= 1.0; got {len(home_bets)}"
+    )
+
+
+def test_variant_O_kaunitz_classic_config():
+    o = _strategy("O_kaunitz_classic")
+    assert o.raw_consensus is True
+    assert o.kaunitz_alpha == 0.05
+    assert o.max_odds_shopping is True
+    assert o.min_books == 4
+    assert o.markets == ("h2h",)

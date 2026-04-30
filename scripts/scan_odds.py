@@ -684,8 +684,9 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "model_signal": vb.get("model_signal", "?"),
             "dispersion": round(vb.get("dispersion", 0.0), 4),
             "outlier_z": round(vb.get("outlier_z", 0.0), 3),
-            # Per-bet half-Kelly stake using effective odds (commission-adjusted)
-            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], bankroll, vb["book"]), 2),
+            # Per-bet Kelly stake — uses strategy's kelly_fraction (default 0.5 = half-Kelly)
+            "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], bankroll, vb["book"],
+                                              vb.get("kelly_fraction", 0.5)), 2),
             "pinnacle_close_prob": "",
             "clv_pct": "",
         })
