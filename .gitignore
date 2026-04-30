@@ -13,4 +13,5 @@ logs/bankroll.json
 logs/notified.json
 logs/scan_state.json
 logs/*.csv.bak.*
+docs/papers/
 todo.md
