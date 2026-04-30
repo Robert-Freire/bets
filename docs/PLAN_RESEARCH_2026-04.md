@@ -132,7 +132,7 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
 | R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies | Mon AM | pending |
 | R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | done |
-| R.5.5b | Zenodo 84k-match dataset adoption (Option C: 16 new leagues) | Thu–Fri (this week) | **BLOCKED** — Zenodo schema has aggregated odds only (maxhome/avghome), no per-bookmaker triplets; see docs/ZENODO_INGEST_NOTES.md |
+| R.5.5b | Add 16 new leagues from football-data.co.uk to backtest data | Thu–Fri (this week) | pending — pivoted from Zenodo after schema check; see docs/ZENODO_INGEST_NOTES.md |
 | R.5.5c | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
 | R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5c |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
@@ -150,12 +150,12 @@ R.0 ─┐
      ├─ R.2 ──┤                          ├─ R.5.5c ─ R.6 ─ R.7
      ├─ R.3 ──┘                          │
      │                                   │
-     └─ R.5.5a ─ R.5.5b (Zenodo data) ──┘
+     └─ R.5.5a ─ R.5.5b (extra leagues) ┘
                                          ├─ R.8 (xG)
                                          └─ R.9 ─ R.10 (deferred)
 ```
 
-R.5.5a (scaffold) and R.5.5b (Zenodo data adoption) are independent of the weekend data chain and can be picked up immediately. R.5.5c joins the chain once R.5 (Monday analysis), R.5.5a (scaffold), and R.5.5b (extra leagues) are all merged. R.5.5b alphabetical order matches dependency order: a → b → c.
+R.5.5a (scaffold) and R.5.5b (extra leagues from football-data.co.uk) are independent of the weekend data chain and can be picked up immediately. R.5.5c joins the chain once R.5 (Monday analysis), R.5.5a (scaffold), and R.5.5b (extra leagues) are all merged. R.5.5b alphabetical order matches dependency order: a → b → c.
 
 ---
 
@@ -772,77 +772,85 @@ pytest -q
 - Determinism: no `random_state` knobs, no nondeterministic dict iteration in the output. The test `pd.testing.assert_frame_equal` over two identical calls catches accidental nondeterminism.
 - No new entries in `requirements*.txt`. The point of this phase is to NOT take on a third-party walk-forward dep — verify by greppping.
 
-**Carryover.** R.5.5b extends the loader to ingest the Zenodo 84k-match dataset; R.5.5c then imports `walk_forward_backtest` and loops it over `(consensus_method, min_edge)` combos to produce the per-fold report + 95% CI aggregation in `docs/BACKTEST.md`.
+**Carryover.** R.5.5b adds 16 new league CSVs from football-data.co.uk (Zenodo was investigated first but rejected — see R.5.5b body for rationale); R.5.5c then imports `walk_forward_backtest` and loops it over `(consensus_method, min_edge)` combos to produce the per-fold report + 95% CI aggregation in `docs/BACKTEST.md`.
 
 ---
 
-## Phase R.5.5b — Zenodo 84k-match dataset adoption (Option C: 16 new leagues) (~3–4h)
+## Phase R.5.5b — Add 16 new leagues from football-data.co.uk (~1h)
 
-**Goal.** Augment `data/raw/` with the leagues from the Zenodo 84k-match dataset (Hegarty & Whelan 2025, <https://zenodo.org/records/12673394>) that we **don't currently scan**, increasing the loader's coverage from ~27k matches / 6 leagues to ~50–60k matches / ~22 leagues. Existing 6 leagues (`D1, D2, E0, E1, F1, I1`) remain untouched — no overlap, no dedup, no risk to current backtest output.
+**Goal.** Augment `data/raw/` with 16 new league codes from football-data.co.uk that we **don't currently have** (`B1, E2, E3, EC, F2, G1, I2, N1, P1, SC0, SC1, SC2, SC3, SP1, SP2, T1`), increasing the loader's coverage from ~27k matches / 6 leagues to ~55k+ matches / ~22 leagues. Existing 6 leagues (`D1, D2, E0, E1, F1, I1`) remain untouched — no overlap, no dedup, no schema mapping, no loader changes.
 
 **Why now.** R.5.5c's per-fold 95% CI tightens with more data, which directly affects R.6 graduation defensibility. Cross-league diversity also tests generalisability — the production scanner already runs on 6 leagues, so the backtest should reflect that breadth.
 
-**Why Option C (only new leagues) over A/B.** Three approaches were considered:
-- **A. Replace pre-2022 with Zenodo, keep current data for 2022+.** Cleanest in principle but creates merge complexity over 7 overlapping seasons across our existing 6 leagues.
-- **B. Concat everything, dedup on `(Date, HomeTeam, AwayTeam)`.** Simple but risks duplicate rows skewing fold ROIs if dedup is imperfect (team-name normalisation across two sources is its own rabbit hole).
-- **C. Add only the leagues we don't currently have.** No overlap, no dedup, lowest risk, biggest signal-per-hour. **Selected.**
+**Why football-data.co.uk** (and not Zenodo, which the original phase plan targeted). The Zenodo 84k-match dataset (Hegarty & Whelan 2025) was investigated first because it's the canonical broader European dataset cited in the literature, but it ships only **aggregated odds** (`maxhome`, `avghome`, ...) — not per-bookmaker triplets — which our consensus strategy cannot use (it needs cross-book dispersion). Full schema comparison + rationale: `docs/ZENODO_INGEST_NOTES.md`. football-data.co.uk has all 16 candidate leagues with the **identical schema** as our existing 6 (`B365H/D/A`, `BWH/D/A`, `IWH/D/A`, `PSH/D/A`, `WHH/D/A`, `VCH/D/A`, plus `Date`, `Div`, `HomeTeam`, `AwayTeam`, `FTR`). A spike against `SP1_2324`, `G1_2324`, `SC3_2324` confirmed:
+- 6/12 books from `BOOKMAKER_GROUPS` present per row.
+- Avg ~5.4–5.5 books per match across all three sample leagues.
+- 100% of rows clear `min_books=3` even in the smallest sample (Scottish 3rd tier).
 
-**Inputs.** R.5.5a done (`src/betting/walk_forward.py` exists; we extend its loader). Internet access. Disk space ~50–100MB.
+**Inputs.** R.5.5a done (loader exists; we don't need to change it). Internet access. Disk space ~50MB.
 
 **Outputs.**
-- `data/raw/zenodo/` directory containing the new-league CSVs from Zenodo (gitignored — too large to commit).
-- `.gitignore` entry: `data/raw/zenodo/`.
-- Updated `src/betting/walk_forward.py::load_backtest_data()` reading the Zenodo CSVs **after** the existing CSVs and filtering to leagues not already present.
-- `docs/ZENODO_INGEST_NOTES.md` — short doc summarising: which league codes were added, schema mapping decisions (any column-name translations or drops), per-league match counts.
+- New CSV files in `data/raw/`: 16 league codes × ~10 seasons each ≈ 130–160 files. Same naming convention as existing data: `{LEAGUE}_{YYMM}.csv` (e.g. `SP1_2324.csv`, `SC3_1819.csv`). **Committed to git** — same precedent as the existing 72 league files in `data/raw/`.
+- `scripts/refresh_fdco_data.py` — small bulk-download helper (loops the URL pattern). Useful for keeping data fresh going forward; not required to be elegant.
+- `docs/FDCO_INGEST_NOTES.md` — short doc summarising: leagues added, season ranges per league, per-league match counts, the spike result, any seasons dropped (e.g. if a league lacks ≥3 books in older seasons).
 
 **Out of scope.**
-- No changes to `backtest_consensus()` — Zenodo data must be normalised at the loader boundary to the shape `backtest_consensus()` already expects.
+- **No changes to `src/betting/walk_forward.py`.** The existing `load_backtest_data()` already globs `data/raw/*.csv` — new CSVs get picked up automatically.
+- **No changes to `backtest_consensus()`.** Schema is identical to our existing data.
 - No replacement of existing `D1/D2/E0/E1/F1/I1/*.csv` files.
-- No new tests beyond a sanity test in `tests/test_walk_forward.py` confirming the size/league increase.
+- Only one new test in `tests/test_walk_forward.py` confirming the size/league increase.
 
 **Tasks.**
-1. **Download Zenodo dataset.** Fetch from <https://zenodo.org/records/12673394> into `data/raw/zenodo/`. Verify checksum if Zenodo publishes one. Add `data/raw/zenodo/` to `.gitignore` (commit the .gitignore change but not the data).
-2. **Inspect schema.** Pick one league's CSV. Compare column names, date format, and `FTR` encoding to our existing football-data.co.uk shape. Note differences in `docs/ZENODO_INGEST_NOTES.md`.
-3. **Identify new league codes.** Our existing leagues: `{D1, D2, E0, E1, F1, I1}`. Zenodo's 22 leagues likely include `SP1` (La Liga), `SP2`, `N1` (Eredivisie), `P1` (Primeira), `B1` (Belgian Pro), `G1` (Greek Super), `T1` (Turkish Süper), `SC0/SC1/SC2/SC3` (Scottish tiers), and others. Anything not in our existing set is new. Filter Zenodo to just the new leagues.
-4. **Schema normalisation.** If column names differ (e.g. `Home`/`Away` vs `HomeTeam`/`AwayTeam`), write a small renaming step in the loader. If `FTR` encoding differs, normalise. If a Zenodo CSV is missing critical columns (`Date`, `FTR`, at least one bookmaker triple), skip that file and log it in the ingest notes — do NOT silently fabricate columns.
-5. **Loader update.** Extend `load_backtest_data()` to read `data/raw/zenodo/*.csv` after the existing CSVs. Filter rows to leagues NOT already present in the existing data. Apply the schema-normalisation step. Concatenate, sort by Date.
-6. **Sanity test.** Add one test to `tests/test_walk_forward.py`: `test_loader_includes_zenodo_new_leagues` — asserts `len(load_backtest_data()) >= 50000` and `m["Div"].nunique() >= 15`. Skip the test (pytest skip with reason) if `data/raw/zenodo/` is empty, so CI doesn't fail in environments without the dataset.
-7. **Ingest notes doc.** Write `docs/ZENODO_INGEST_NOTES.md`: leagues added (list of Div codes + match counts), schema decisions (column renames, FTR normalisation if any), any files dropped and why.
+1. **Bulk download.** Write `scripts/refresh_fdco_data.py` that loops the 16 league codes × season range `1415..2526` (or whichever range each league has) over the URL pattern `https://www.football-data.co.uk/mmz4281/{YYMM}/{LEAGUE}.csv`. Save into `data/raw/{LEAGUE}_{YYMM}.csv`. Skip 404s gracefully (some lower-tier leagues won't have all seasons).
+2. **Sanity-check each downloaded file.** For each new file: confirm at least 3 of `BOOKMAKER_GROUPS`'s `*H` columns are present and that ≥80% of rows have `n_books >= 3`. Files failing this check should be deleted and logged in `docs/FDCO_INGEST_NOTES.md`. (Older seasons of small leagues may have insufficient book coverage.)
+3. **Run the loader.** Confirm `load_backtest_data()` now returns ≥50k rows and ≥15 unique `Div` values. Verify existing 6 leagues' row counts are unchanged from the pre-R.5.5b baseline.
+4. **Sanity test.** Add one test to `tests/test_walk_forward.py`: `test_loader_includes_extra_leagues` — asserts `len(load_backtest_data()) >= 50000` and `m["Div"].nunique() >= 15`.
+5. **Ingest notes doc.** Write `docs/FDCO_INGEST_NOTES.md`: leagues added (16 codes + per-league match counts), season ranges, any season-league combos dropped due to <3-books coverage, link to the spike rationale.
 
 **Pre-flight checks.**
 ```bash
-# Confirm existing state (baseline for comparison)
+# Baseline for the "existing leagues unchanged" check
 python3 -c "
 from src.betting.walk_forward import load_backtest_data
 m = load_backtest_data()
 print(f'Baseline: {len(m)} matches across {m[\"Div\"].nunique()} divisions')
-print(f'Existing divisions: {sorted(m[\"Div\"].unique())}')
+print('Per-existing-league counts:')
+for div in sorted(m['Div'].unique()):
+    print(f'  {div}: {(m[\"Div\"] == div).sum()}')
 "
 
-# Confirm download dir doesn't already exist (clean slate)
-test ! -d data/raw/zenodo && echo "OK: clean slate"
+# Confirm existing leagues file naming convention
+ls data/raw/E0_*.csv | head -3
 ```
 
 **Order of operations.**
-1. Add `data/raw/zenodo/` to `.gitignore` first — prevents accidental commit of large files mid-implementation.
-2. Download Zenodo dataset. Inspect one CSV manually before writing code.
-3. Decide schema normalisation: if columns line up cleanly, the loader extension is ~5 lines. If they diverge, write a renaming dict.
-4. Extend `load_backtest_data()`. Smoke-test at the REPL: confirm match count + division count meet acceptance bar.
-5. Add the sanity test (with skip-if-no-data guard).
-6. Run `pytest -q` — full suite must still pass.
-7. Write ingest notes doc.
-8. Commit.
+1. Capture the baseline output (above) — paste into `docs/FDCO_INGEST_NOTES.md` as the "before" state.
+2. Write `scripts/refresh_fdco_data.py`. Test it on one league first (e.g. SP1) — confirm files land in `data/raw/` and load cleanly.
+3. Run the full bulk-download loop.
+4. Run the per-file sanity check; delete files failing the ≥3 books bar; log deletions in the ingest notes.
+5. Run `load_backtest_data()` and confirm the totals match the acceptance bars.
+6. Add the sanity test. Run `pytest -q`.
+7. Capture the "after" state in the ingest notes (per-league counts).
+8. Commit the new CSVs + helper script + notes + test in one commit.
 
 **Acceptance.**
-- [ ] `data/raw/zenodo/` exists locally; gitignored.
+- [ ] 16 new league codes present in `data/raw/` (verify with `ls data/raw/ | sed 's/_.*//' | sort -u`).
 - [ ] `load_backtest_data()` returns ≥ 50k rows (was ~27k) and ≥ 15 unique `Div` values (was 6).
-- [ ] **Existing 6 leagues' match counts unchanged** — `D1/D2/E0/E1/F1/I1` row counts must match the pre-R.5.5b baseline (verify by running the pre-flight check before and after).
-- [ ] All R.5.5a tests pass; full `pytest -q` passes.
-- [ ] `docs/ZENODO_INGEST_NOTES.md` exists with leagues, schema decisions, per-league counts.
+- [ ] **Existing 6 leagues' match counts unchanged** — `D1/D2/E0/E1/F1/I1` row counts identical to pre-R.5.5b baseline.
+- [ ] All R.5.5a tests pass; full `pytest -q` passes (now 127 tests).
+- [ ] `docs/FDCO_INGEST_NOTES.md` exists with: leagues + counts + season ranges, any season-league combos dropped and why, and a one-line link back to `docs/ZENODO_INGEST_NOTES.md` for the rejected-Zenodo rationale.
 - [ ] No new entries in `requirements*.txt`.
 
 **Verification commands.**
 ```bash
+# 16 new leagues present
+NEW_LEAGUES="B1 E2 E3 EC F2 G1 I2 N1 P1 SC0 SC1 SC2 SC3 SP1 SP2 T1"
+for L in $NEW_LEAGUES; do
+  count=$(ls data/raw/${L}_*.csv 2>/dev/null | wc -l)
+  echo "${L}: ${count} season files"
+done
+# Each line should be ≥1.
+
 # Match count + division count meet bar
 python3 -c "
 from src.betting.walk_forward import load_backtest_data
@@ -853,17 +861,15 @@ assert m['Div'].nunique() >= 15, f'Expected >=15 divisions, got {m[\"Div\"].nuni
 print('OK')
 "
 
-# Existing leagues' counts unchanged from baseline
+# Existing leagues unchanged from baseline (compare against pre-flight output)
 python3 -c "
 from src.betting.walk_forward import load_backtest_data
 m = load_backtest_data()
 for div in ['D1', 'D2', 'E0', 'E1', 'F1', 'I1']:
-    n = (m['Div'] == div).sum()
-    print(f'{div}: {n}')
+    print(f'{div}: {(m[\"Div\"] == div).sum()}')
 "
-# Compare each line against the pre-flight baseline output.
 
-# Walk-forward end-to-end on combined data
+# Walk-forward end-to-end on the now-broader dataset
 python3 -c "
 from src.betting.walk_forward import load_backtest_data, walk_forward_backtest
 m = load_backtest_data()
@@ -878,20 +884,19 @@ pytest -q tests/test_walk_forward.py
 pytest -q
 
 # Ingest notes exist
-test -f docs/ZENODO_INGEST_NOTES.md && grep -q "leagues added" docs/ZENODO_INGEST_NOTES.md && echo OK
+test -f docs/FDCO_INGEST_NOTES.md && grep -q "leagues added" docs/FDCO_INGEST_NOTES.md && echo OK
 
-# .gitignore covers zenodo dir
-grep -q "data/raw/zenodo" .gitignore && echo OK
+# Helper script exists and is runnable
+test -f scripts/refresh_fdco_data.py && python3 -c "import scripts.refresh_fdco_data" 2>/dev/null && echo "OK: helper imports"
 ```
 
 **Reviewer focus.**
-- **Filter must exclude already-present leagues.** Accidentally re-loading EPL from Zenodo would create duplicate rows; verify the filter step happens BEFORE the concat. The "existing leagues' counts unchanged" check above catches this.
-- **Schema mapping correctness.** If Zenodo uses different column names (e.g. `Home` instead of `HomeTeam`), the loader must rename — silently dropping a column would lose half the bookmaker data.
-- **Date parsing.** Zenodo's date format may differ from football-data.co.uk's DD/MM/YYYY. The existing `format="mixed", dayfirst=True` parser is permissive but not infallible. Check fold boundaries in walk-forward output for any 1900-01-01 sentinel dates that would indicate parse failures.
-- **FTR presence.** Matches without a result (e.g. abandoned games, in-progress at dataset cut) should be dropped at load time, not silently included with NaN.
-- **`.gitignore` first.** Reviewer should verify the gitignore commit happened before any large data was staged. `git log --diff-filter=A -- 'data/raw/zenodo/*'` should return empty.
+- **Existing leagues' counts unchanged.** The `D1/D2/E0/E1/F1/I1` row counts must match the baseline exactly. Any drift means we accidentally re-downloaded an existing league or polluted an existing file.
+- **Per-file ≥3 books gate.** Older seasons of smaller leagues (e.g. SC3 in 2014/15) may not have full bookmaker coverage. The implementer should drop those files, not silently include them. Verify by sampling 2–3 of the smallest leagues' oldest files.
+- **Schema sanity.** Open one new file and one existing file side by side. Column lists should look the same — no `Data.Date`-style prefixes (that would mean someone accidentally pulled Zenodo data).
+- **Helper script is idempotent.** Re-running `scripts/refresh_fdco_data.py` should be safe (it skips existing files OR re-downloads them; either is fine, but it must not error out).
 
-**Decision deferred to phase execution.** If Zenodo's schema diverges so much from football-data.co.uk that the mapping work exceeds 4h, document the divergence in `docs/ZENODO_INGEST_NOTES.md` and mark the phase **BLOCKED** in the status tracker. R.5.5c can still proceed on the existing 27k matches — the gain from Zenodo is *nice-to-have*, not load-bearing for graduations.
+**Decision deferred to phase execution.** If a specific league's recent seasons lack ≥3 books per row (i.e. football-data.co.uk's lower-tier coverage degraded relative to the 2023-24 spike), drop just those season-league combos. Document each drop in `docs/FDCO_INGEST_NOTES.md`. If more than 4 of the 16 new leagues fail this check entirely, raise a concern in the PR — that would invalidate the spike's "100% pass" finding and warrant a deeper coverage audit before R.5.5c uses the data.
 
 **Carryover.** R.5.5c's walk-forward output now covers ~22 leagues × 5 folds. R.6's graduation criteria interpret per-fold consistency as **cross-league consistency** — a stricter bar than EPL-only would have been.
 
@@ -903,7 +908,7 @@ grep -q "data/raw/zenodo" .gitignore && echo OK
 
 **Why now.** Whole-period ROI hides per-season variance. Walk-forward reveals consistency. Required for any defensible default-flip in R.6.
 
-**Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`). R.5.5b done (Zenodo data ingested, loader returns ≥50k matches across ≥15 leagues) — OR R.5.5b explicitly BLOCKED, in which case R.5.5c proceeds on the existing 27k matches and the PR body must note the smaller dataset.
+**Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`). R.5.5b done (16 new leagues from football-data.co.uk added to `data/raw/`; loader returns ≥50k matches across ≥15 leagues).
 
 **Outputs.**
 - `scripts/walk_forward_backtest.py` — entry script: loads data via `load_backtest_data()`, loops `walk_forward_backtest()` over the 15 `(consensus_method, min_edge)` combos, aggregates per-fold ROI + 95% CI per combo, writes results.
@@ -1114,7 +1119,7 @@ pytest -q
 - **Restriction-detection logging** (RESEARCH_NOTES §3.3): per-bookie max-stake limits hit on placement, manual log via dashboard. Lightweight but needs UI work.
 - **Mug-bet camouflage cron** (RESEARCH_NOTES §3.4): scheduled small bets to mask account profile. Only relevant once we hit a real restriction.
 - **Migrate `compare_strategies.py` to walk-forward** (follow-up to R.5.5c): once `walk_forward_backtest()` lands, port shadow-portfolio comparison to call it directly for fold-aware CLV variance reporting.
-- ~~**Zenodo 84k-match dataset**~~ — promoted from carryover to **R.5.5b**, scoped as Option C (16 new leagues only, no overlap with existing 6). See R.5.5b for details.
+- ~~**Zenodo 84k-match dataset**~~ — investigated under R.5.5b, rejected: schema ships only aggregated odds (`maxhome`/`avghome`), no per-bookmaker triplets — incompatible with our consensus strategy. Full rationale in `docs/ZENODO_INGEST_NOTES.md`. R.5.5b pivoted to football-data.co.uk for the same 16 new leagues.
 - **`pybettor` evaluation** (RESEARCH_NOTES §9.4): 30-min skim of `ian-shepherd/pybettor` to determine if any utilities replace what we currently maintain. Decision: dep or reference.
 - **ELO prior variant `Q_elo_prior`** (RESEARCH_NOTES §9.3): WagerBrain's `elo_prob(elo_diff)` is a cheap model-agreement signal. Could substitute for CatBoost on leagues we don't have CatBoost coverage for (Championship, Bundesliga 2, NBA, tennis). Phase 7-adjacent.
 - **Asian Handicap as second anchor** (RESEARCH_NOTES §7.1): if R.9 says AH is fetchable, implement Hegarty & Whelan's closed-form prob conversion (Eqs 6–28) in `src/betting/asian_handicap.py`. Use AH-derived prob alongside Pinnacle h2h as a *second* anchor (averaging the two when both available). The point: AH is the efficient market — it's the strongest external probability signal we could integrate.
@@ -1137,7 +1142,7 @@ pytest -q
 
 - [ ] R.0–R.5 merged.
 - [ ] **R.5.5a scaffold merged** — primitive + loader in `src/betting/walk_forward.py`, 5 tests pass, no new third-party deps.
-- [x] **R.5.5b BLOCKED** — Zenodo schema has aggregated odds only (no per-bookmaker triplets); `docs/ZENODO_INGEST_NOTES.md` written; skip-guarded test added; `.gitignore` updated; R.5.5c proceeds on 27k matches.
+- [ ] **R.5.5b extra-leagues adoption merged** — 16 new league codes from football-data.co.uk landed in `data/raw/`; loader returns ≥50k matches / ≥15 leagues; existing 6 leagues' counts unchanged; `docs/FDCO_INGEST_NOTES.md` written. (Pivoted from Zenodo after schema check; rejected-Zenodo rationale in `docs/ZENODO_INGEST_NOTES.md`.)
 - [ ] **R.5.5c walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
 - [ ] At least one variant graduated (R.6) with explicit walk-forward evidence, OR explicit "no graduation this week" note citing CI breadth.
 - [ ] R.7 schema migration done (independent of graduation).
