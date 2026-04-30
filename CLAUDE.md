@@ -203,7 +203,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 | R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
 | R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`) | ✅ Done |
-| R.5.5b | Zenodo 84k-match dataset (BLOCKED — aggregated odds only; see `docs/ZENODO_INGEST_NOTES.md`) | ✅ Done (BLOCKED) |
+| R.5.5b | 16 new leagues from football-data.co.uk (91k matches / 22 leagues; see `docs/FDCO_INGEST_NOTES.md`) | ✅ Done |
 | R.4–R.10 | Weekend data collection · Mon analysis · graduation · schema · K (xG) · AH probe | Pending |
 
 Full roadmap: `docs/PLAN.md`. 2026-04 sprint: `docs/PLAN_RESEARCH_2026-04.md`.

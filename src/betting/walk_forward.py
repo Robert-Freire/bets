@@ -11,21 +11,34 @@ from pathlib import Path
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
 
-from src.betting.consensus import backtest_consensus
+from src.betting.consensus import BOOKMAKER_GROUPS, backtest_consensus
 
 _RAW_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "raw"
+
+# All individual bookmaker odds columns (H/D/A triplets) that must be numeric.
+_ODDS_COLS = [col for triplet in BOOKMAKER_GROUPS.values() for col in triplet]
 
 
 def load_backtest_data() -> pd.DataFrame:
     """
     Load all football-data.co.uk CSVs from data/raw/, concatenate, sort by Date.
 
+    Handles two encoding variants: UTF-8-with-BOM (recent seasons) and Latin-1
+    (older seasons with non-ASCII team names). Odds columns are coerced to float
+    so that stray string values in source data (e.g. a bookmaker name accidentally
+    in an odds cell) become NaN and are silently skipped by compute_consensus().
+
     Returns a single time-ordered DataFrame in the shape backtest_consensus() expects.
     """
     frames = []
     for csv_path in sorted(_RAW_DIR.glob("*.csv")):
         try:
-            df = pd.read_csv(csv_path, low_memory=False)
+            df = pd.read_csv(csv_path, low_memory=False, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                df = pd.read_csv(csv_path, low_memory=False, encoding="latin1")
+            except Exception:
+                continue
         except Exception:
             continue
         if "Date" not in df.columns:
@@ -38,6 +51,12 @@ def load_backtest_data() -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     combined["Date"] = pd.to_datetime(combined["Date"], format="mixed", dayfirst=True, errors="coerce")
     combined = combined.dropna(subset=["Date"])
+
+    # Coerce odds columns to float — source CSVs occasionally contain stray strings.
+    for col in _ODDS_COLS:
+        if col in combined.columns:
+            combined[col] = pd.to_numeric(combined[col], errors="coerce")
+
     combined = combined.sort_values("Date").reset_index(drop=True)
     return combined
 

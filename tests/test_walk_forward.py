@@ -81,3 +81,10 @@ def test_no_bets_when_edge_impossible():
     assert (result["roi"] == 0.0).all(), "Expected roi=0 per fold when no bets placed"
 
 
+def test_loader_includes_extra_leagues():
+    """After R.5.5b ingest, loader returns ≥50k rows across ≥15 leagues."""
+    m = load_backtest_data()
+    assert len(m) >= 50_000, f"Expected >=50k matches, got {len(m)}"
+    assert m["Div"].nunique() >= 15, f"Expected >=15 divisions, got {m['Div'].nunique()}"
+
+
