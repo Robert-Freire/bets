@@ -131,7 +131,7 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.3 | SBK availability probe → UK_LICENSED_BOOKS | Friday | done |
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
 | R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies | Mon AM | pending |
-| R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | pending |
+| R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | done |
 | R.5.5b | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
 | R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5b |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
