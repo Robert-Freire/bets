@@ -122,10 +122,10 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 
 | Phase | Title | Window | Status |
 |---|---|---|---|
-| R.0 | Stale doc fix (CLAUDE.md:7) | Now | pending |
-| R.1 | Add 4 cheap variants (I, L, M, N) | Friday | pending |
-| R.1.5 | Paper-faithful baseline variant (O_kaunitz_classic) | Friday | pending |
-| R.1.6 | Max-odds shopping variant (P_max_odds_shopping) — optional | Friday if time | pending |
+| R.0 | Stale doc fix (CLAUDE.md:7) | Now | done |
+| R.1 | Add 4 cheap variants (I, L, M, N) | Friday | done |
+| R.1.5 | Paper-faithful baseline variant (O_kaunitz_classic) | Friday | done |
+| R.1.6 | Max-odds shopping variant (P_max_odds_shopping) — optional | Friday if time | done |
 | R.2 | Sharp-weighted consensus variant (J) | Friday | pending |
 | R.3 | SBK availability probe → UK_LICENSED_BOOKS | Friday | pending |
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
