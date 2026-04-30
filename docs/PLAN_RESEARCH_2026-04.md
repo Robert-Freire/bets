@@ -64,7 +64,7 @@ For each PR, the reviewer bot:
 - **Pre-commit hook failure**: investigate root cause, fix, create a NEW commit. Never `--no-verify`.
 - **Phase blocker mid-implementation**: stop, add `BLOCKED: <reason>` to the phase status tracker, comment in the PR.
 - **Existing test breaks unexpectedly**: investigate before modifying it. Do NOT delete or `.skip` tests to make CI pass.
-- **Decision-deferred phase (R.5.5a)**: when phase body specifies a fallback path, follow that path's budget rule explicitly and document the decision in the PR body.
+- **Decision-deferred phases**: when a phase body specifies a fallback path, follow that path's budget rule explicitly and document the decision in the PR body.
 
 ### Branch hygiene
 - Rebase onto `main` before opening PR. No merge commits in feature branches.
@@ -84,7 +84,7 @@ For each PR, the reviewer bot:
 | Closing line capture | `scripts/closing_line.py` |
 | Strategy comparison | `scripts/compare_strategies.py` |
 | Backtest entry (today) | `src/betting/consensus.py::backtest_consensus` |
-| Walk-forward adapter (after R.5.5a) | `src/betting/sportsbet_adapter.py` |
+| Walk-forward primitive (after R.5.5a) | `src/betting/walk_forward.py` |
 | Backtest entry (after R.5.5b) | `scripts/walk_forward_backtest.py` |
 | Tests | `tests/test_*.py` |
 | Bets log | `logs/bets.csv` |
@@ -131,7 +131,7 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.3 | SBK availability probe → UK_LICENSED_BOOKS | Friday | done |
 | R.4 | Weekend data collection | Sat–Sun | runs automatically (existing cron) |
 | R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies | Mon AM | pending |
-| R.5.5a | Walk-forward scaffold: `sports-betting` adapter + loader + adapter test | Thu–Fri (this week) | pending |
+| R.5.5a | Walk-forward scaffold: `TimeSeriesSplit`-based primitive + loader + tests | Thu–Fri (this week) | pending |
 | R.5.5b | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
 | R.6 | Graduate winning variants → scanner defaults | Wed | conditional on R.5.5b |
 | R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
@@ -661,121 +661,117 @@ grep -c "Findings — 2026-04 weekend" docs/RESEARCH_NOTES_2026-04.md  # >= 1
 
 ---
 
-## Phase R.5.5a — Walk-forward scaffold: adapter + loader (~1h)
+## Phase R.5.5a — Walk-forward scaffold: primitive + loader (~2h)
 
-**Goal.** Land the infrastructure for walk-forward backtesting **without running the backtest yet**. Build a `ConsensusBettor(BaseBettor)` subclass and a CSV→`(X, Y, O)` loader, both verified by a small adapter test on a fabricated row. The actual backtest run + `docs/BACKTEST.md` per-fold report is deferred to **R.5.5b**.
+**Goal.** Land a self-contained walk-forward backtest primitive built directly on `sklearn.model_selection.TimeSeriesSplit` (already an indirect dependency via CatBoost — no new packages). Verify it with focused tests, but **do not run the full 15-combo backtest yet** — that's R.5.5b.
 
-**Why split this off.** R.5.5a is independent of the weekend data chain (R.4 → R.5) and can be picked up immediately, freeing R.5.5b on Mon/Tue to be a near-trivial "press run, write report" step. It also isolates the fork-in-the-road decision (use the `sports-betting` package vs. write from scratch) into a self-contained PR — if we have to fall back, R.5.5b inherits the chosen path cleanly.
+**Why no third-party walk-forward package.** `georgedouzas/sports-betting` was considered and rejected. The walk-forward primitive is ~30 lines of fold iteration on top of `TimeSeriesSplit` — not enough surface to justify a runtime dependency on a single-maintainer package on the hot path of graduation evidence. Bugs there (or unmaintained drift on Python/sklearn upgrades) would silently corrupt the per-fold ROI numbers we're using to defend default-flips. At our scale (~4,500 EPL matches × 15 `(devig, min_edge)` combos = 75 backtest runs), serial execution is seconds-to-minutes; we don't need joblib parallelism. Owning the loop also makes determinism + edge-case tests trivial to write.
 
-**Why use the `sports-betting` package vs writing our own.** `sports-betting`'s `backtest()` accepts any `BaseBettor` subclass and runs walk-forward against it with parallelism, per-market breakdowns, and well-tested split logic. Subclassing takes ~1h. From-scratch was scoped at 2.5h and would re-implement infrastructure we don't need to own.
+**Why split this off from R.5.5b.** R.5.5a is independent of the weekend data chain (R.4 → R.5) and can be picked up immediately. With the primitive landed, R.5.5b on Mon/Tue collapses to "loop over `(devig, min_edge)` combos, write the report."
 
-**Inputs.** R.0–R.3 done (already merged). Internet access (pip install). No dependency on R.4/R.5 — the loader operates on the existing `data/raw/*.csv` dataset that's already in the repo.
+**Inputs.** R.0–R.3 done (already on `main`). No internet/install steps needed — `sklearn.model_selection.TimeSeriesSplit` is already pulled in by CatBoost (`python3 -c "from sklearn.model_selection import TimeSeriesSplit"` should already succeed).
 
 **Outputs.**
-- `requirements-dev.txt` (or `pyproject.toml`) includes `sports-betting>=0.5` (pinned).
-- `src/betting/sportsbet_adapter.py` — new module containing:
-  - `ConsensusBettor(BaseBettor)` subclass wrapping our existing Shin/power-devigged + dispersion-filtered consensus logic. Should call into `src/betting/devig.py` and `src/betting/strategies.py` helpers rather than duplicating the math.
-  - `load_backtest_data() -> tuple[X, Y, O]` — loader that converts our `data/raw/*.csv` row-per-match shape (H/D/A bookmaker columns) into the `(X, Y, O)` triplet `sports-betting` expects.
-- `tests/test_sportsbet_adapter.py` — adapter test that passes a single fabricated row through `fit` → `bet` and asserts the expected flag.
+- `src/betting/walk_forward.py` — new module containing:
+  - `load_backtest_data() -> pd.DataFrame` — reads existing `data/raw/*.csv` and returns a single time-ordered DataFrame in the same row-per-match shape `backtest_consensus()` already accepts (no triplet conversion needed).
+  - `walk_forward_backtest(matches: pd.DataFrame, *, consensus_method: str, min_edge: float, n_splits: int = 5, **kwargs) -> pd.DataFrame` — splits `matches` by time using `TimeSeriesSplit(n_splits)`, runs `backtest_consensus()` on each *test* fold (the train half is unused — consensus betting has no training step), returns one row per fold with columns: `fold_idx`, `n_bets`, `n_won`, `total_staked`, `total_pnl`, `roi`, `start_date`, `end_date`. `**kwargs` forwarded to `backtest_consensus` (bankroll, kelly_multiplier, min_books).
+- `tests/test_walk_forward.py` — primitive tests (5):
+  1. Loader returns ≥1000 rows from existing data, time-ordered (`Date` monotonically increasing).
+  2. `walk_forward_backtest(..., n_splits=5)` returns exactly 5 rows; `fold_idx` is `[0,1,2,3,4]`.
+  3. Folds are temporally ordered: each fold's `end_date` ≤ next fold's `start_date`.
+  4. Determinism: two identical calls return DataFrames with identical numeric columns (use `pd.testing.assert_frame_equal`).
+  5. Sanity: on a tiny fabricated DataFrame where no fixture clears `min_edge` (e.g. `min_edge=0.99`), every fold reports `n_bets=0` and `roi=0`.
 
 **Out of scope (deferred to R.5.5b).**
-- `scripts/walk_forward_backtest.py` (the entry script).
-- Running the backtest end-to-end.
+- `scripts/walk_forward_backtest.py` (the entry script that loops over the 15 combos).
+- The 95% CI aggregation across folds.
 - Any changes to `docs/BACKTEST.md`.
-- Determinism test (which requires a real backtest run).
 
 **Tasks.**
-1. **Sanity-check existing scikit-learn.** `python3 -c "import sklearn; print(sklearn.__version__)"`. CatBoost likely pulls a compatible version. Note the version in the PR body so R.5.5b knows the constraint.
-2. **Install `sports-betting`.** Add a pinned `sports-betting==<version>` line to `requirements-dev.txt` (this is a backtest-only dep, not runtime). Verify `python3 -c "import sportsbet"` works.
-3. **Inspect `BaseBettor` contract.** Read `src/sportsbet/evaluation/_base.py` (and `_model_selection.py` for how `backtest()` calls `fit`/`bet`). Note the exact signatures and return-shape expectations of `fit(X, Y, O)` and `bet(X, O)`.
-4. **Subclass `BaseBettor`** in `src/betting/sportsbet_adapter.py`:
-   ```python
-   from sportsbet.evaluation import BaseBettor
-
-   class ConsensusBettor(BaseBettor):
-       def __init__(self, devig: str = "shin", min_edge: float = 0.02, ...):
-           ...
-       def fit(self, X, Y, O):
-           # No-op for consensus — there's no model to train.
-           # Store features needed for bet().
-           return self
-       def bet(self, X, O) -> np.ndarray[bool]:
-           # For each row of O, apply Shin/power devig per book,
-           # compute consensus, return boolean array of which
-           # (row, market) pairs we'd flag.
-   ```
-   Reuse `src/betting/devig.py` and (where possible) helpers from `src/betting/strategies.py` rather than duplicating the consensus / dispersion logic.
-5. **Adapter for our data shape.** Implement `load_backtest_data()` returning the `(X, Y, O)` triplet. `sports-betting`'s `extract_train_data()` is the reference for the expected shape — match it. Document any column-name conventions in a docstring.
-6. **Tests** in `tests/test_sportsbet_adapter.py`:
-   - `ConsensusBettor` instantiation works with `devig="shin"` and `devig="power"`.
-   - `fit()` is a no-op and returns `self`.
-   - On a single fabricated 1-row `(X, O)` where consensus minus book implied ≥ `min_edge`, `bet()` returns `True`; where the edge is negative, returns `False`.
-   - `load_backtest_data()` returns three DataFrames with non-zero rows and consistent indices.
+1. **Sanity-check sklearn.** `python3 -c "from sklearn.model_selection import TimeSeriesSplit; print('OK')"`. Should already work via CatBoost.
+2. **Loader.** Implement `load_backtest_data()`. Reads existing `data/raw/*.csv` (currently the football-data.co.uk EPL CSV plus any siblings), concatenates if multiple, sorts by `Date`, returns the DataFrame in the exact shape `backtest_consensus()` already consumes.
+3. **Walk-forward function.** Iterate over `TimeSeriesSplit(n_splits).split(matches)`. For each `(train_idx, test_idx)`: ignore `train_idx` (no training step in consensus betting — leave a one-line comment in the code so a future reader doesn't think this is a bug); call `backtest_consensus(matches.iloc[test_idx], min_edge=min_edge, consensus_method=consensus_method, **kwargs)`; capture the returned dict; assemble one DataFrame row per fold. ROI per fold = `total_pnl / total_staked` (recompute from raw counters, don't average per-bet ROIs — variable stake sizes would skew that).
+4. **Tests.** Five tests above in `tests/test_walk_forward.py`.
 
 **Pre-flight checks.**
 ```bash
-# Confirm existing tests still green
+# sklearn already available
+python3 -c "from sklearn.model_selection import TimeSeriesSplit; print('OK')"
+
+# backtest_consensus signature stable
+grep -nA 8 "def backtest_consensus" src/betting/consensus.py | head -12
+
+# Module file doesn't exist yet
+test ! -f src/betting/walk_forward.py && echo "OK: clean slate"
+
+# Existing tests green
 pytest -q
-
-# Check package availability + version
-pip index versions sports-betting 2>/dev/null | head -3
-
-# Confirm adapter file doesn't already exist
-test ! -f src/betting/sportsbet_adapter.py && echo "OK: clean slate"
 ```
 
 **Order of operations.**
-1. Pin + install `sports-betting`. Verify import. Run existing test suite — must still pass.
-2. Read `BaseBettor` source. Note signatures.
-3. Implement `ConsensusBettor` skeleton (no-op `fit`, hard-coded `bet` returning all-False). Confirm it instantiates and `backtest()` from the package can call it without crashing.
-4. Wire the actual consensus logic into `bet()`. Reuse existing devig + strategies helpers.
-5. Implement `load_backtest_data()`.
-6. Write the four adapter tests. Run pytest.
-7. Commit.
+1. Confirm sklearn import. Note version in PR body.
+2. Implement `load_backtest_data()`. Verify it returns a non-empty time-ordered DataFrame at the REPL.
+3. Implement `walk_forward_backtest()` skeleton; verify `n_splits=5` gives 5 rows on a small synthetic input. Use `TimeSeriesSplit` (NOT `KFold` — temporal ordering is the whole point).
+4. Wire the real `backtest_consensus` call inside the loop. Forward `**kwargs`.
+5. Write the five tests. Run pytest.
+6. Commit.
 
 **Acceptance.**
-- [ ] `pip install sports-betting` clean; no version conflicts. (OR: fallback to from-scratch `TimeSeriesSplit` taken — documented in PR body, see "Decision deferred" below.)
-- [ ] `src/betting/sportsbet_adapter.py` exists with `ConsensusBettor` class and `load_backtest_data()` function.
-- [ ] `tests/test_sportsbet_adapter.py` passes (4 tests).
+- [ ] `src/betting/walk_forward.py` exists with `load_backtest_data` + `walk_forward_backtest`.
+- [ ] `tests/test_walk_forward.py` passes (5 tests).
 - [ ] `pytest -q` overall still passes — no regressions.
-- [ ] PR body explicitly states which path was taken (package vs. from-scratch) and notes the sklearn version observed.
+- [ ] **No new entries in `requirements*.txt`** — sklearn is already an indirect dep via CatBoost.
+- [ ] PR body notes the sklearn version observed (so R.5.5b inherits the same constraint).
 
 **Verification commands.**
 ```bash
-# Dependency installed (or fallback documented)
-python3 -c "import sportsbet; print(sportsbet.__version__)" 2>/dev/null && echo "OK: sports-betting installed" \
-  || grep -qi "fallback to from-scratch" $(git log -1 --format=%B 2>/dev/null) \
-  || echo "WARN: neither package nor fallback evident"
-
-# Adapter module imports cleanly
+# Module imports cleanly
 python3 -c "
-from src.betting.sportsbet_adapter import ConsensusBettor, load_backtest_data
-b = ConsensusBettor(devig='shin', min_edge=0.02)
-assert b.fit(None, None, None) is b, 'fit must return self'
-print('OK: ConsensusBettor instantiates and fit() is no-op')
+from src.betting.walk_forward import load_backtest_data, walk_forward_backtest
+print('OK: walk_forward imports')
 "
 
-# Loader produces non-empty triplet
+# Loader returns time-ordered DataFrame
 python3 -c "
-from src.betting.sportsbet_adapter import load_backtest_data
-X, Y, O = load_backtest_data()
-assert len(X) > 0 and len(Y) > 0 and len(O) > 0
-assert len(X) == len(Y) == len(O), 'X/Y/O must share row count'
-print(f'OK: loader returned {len(X)} rows')
+import pandas as pd
+from src.betting.walk_forward import load_backtest_data
+m = load_backtest_data()
+assert len(m) >= 1000, f'Expected >=1000 matches, got {len(m)}'
+dates = pd.to_datetime(m['Date'])
+assert dates.is_monotonic_increasing, 'matches must be time-ordered'
+print(f'OK: loader returned {len(m)} matches, time-ordered')
 "
 
-# Adapter tests pass
-pytest -q tests/test_sportsbet_adapter.py
+# Walk-forward returns 5 folds for n_splits=5 with expected columns
+python3 -c "
+from src.betting.walk_forward import load_backtest_data, walk_forward_backtest
+m = load_backtest_data()
+result = walk_forward_backtest(m, consensus_method='shin', min_edge=0.02, n_splits=5)
+assert len(result) == 5
+required = {'fold_idx', 'n_bets', 'roi', 'start_date', 'end_date'}
+missing = required - set(result.columns)
+assert not missing, f'Missing columns: {missing}'
+print(result.to_string())
+"
+
+# No new runtime dep
+! grep -i 'sports-betting\|sportsbet' requirements*.txt 2>/dev/null && echo 'OK: no sports-betting dep added'
+
+# Tests pass
+pytest -q tests/test_walk_forward.py
 
 # No regressions
 pytest -q
 ```
 
-**Reviewer focus.** Whether the adapter's `fit`/`bet` contract truly matches `BaseBettor`'s expectations — read `sports-betting`'s own `_base.py` and confirm signatures + return shapes line up. Also: that `bet()` reuses our existing devig / consensus helpers rather than re-implementing them (drift risk if the consensus logic is duplicated).
+**Reviewer focus.**
+- Folds use `TimeSeriesSplit` (not `KFold` or random splitting) — temporal ordering is the whole point.
+- The walk-forward function explicitly ignores `train_idx` with a one-line code comment — consensus has no training step; without the comment a future reader will think this is a bug.
+- ROI per fold computed as `total_pnl / total_staked` (recomputed from raw counters), NOT mean-of-per-bet-ROI — the latter would be wrong because stakes are variable (Kelly).
+- Determinism: no `random_state` knobs, no nondeterministic dict iteration in the output. The test `pd.testing.assert_frame_equal` over two identical calls catches accidental nondeterminism.
+- No new entries in `requirements*.txt`. The point of this phase is to NOT take on a third-party walk-forward dep — verify by greppping.
 
-**Decision deferred to phase execution.** If the package's data-shape requirements turn out to be a poor fit (e.g. it requires multi-output classifier semantics that don't apply to our case), abandon and write a from-scratch `TimeSeriesSplit` wrapper instead. Budget: 1h with package, 2.5h without — pick whichever path is shorter once 30 min has been spent trying. Whichever path is taken **must be stated explicitly in the PR body** so R.5.5b can build on it without ambiguity.
-
-**Carryover.** R.5.5b consumes the adapter + loader to produce the per-fold report.
+**Carryover.** R.5.5b imports `walk_forward_backtest` and loops it over `(consensus_method, min_edge)` combos to produce the per-fold report + 95% CI aggregation in `docs/BACKTEST.md`.
 
 ---
 
@@ -785,25 +781,24 @@ pytest -q
 
 **Why now.** Whole-period ROI hides per-season variance. Walk-forward reveals consistency. Required for any defensible default-flip in R.6.
 
-**Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (adapter + loader merged, with the chosen path — package or from-scratch — stated in the R.5.5a PR body).
+**Inputs.** R.5 done (whole-period `power` column already in `docs/BACKTEST.md`). R.5.5a done (`src/betting/walk_forward.py` merged on `main`).
 
 **Outputs.**
-- `scripts/walk_forward_backtest.py` — entry script: loads data via `load_backtest_data()`, instantiates `ConsensusBettor` for each `(devig, min_edge)` combo, runs `backtest()` (or the from-scratch `TimeSeriesSplit` wrapper), writes results.
+- `scripts/walk_forward_backtest.py` — entry script: loads data via `load_backtest_data()`, loops `walk_forward_backtest()` over the 15 `(consensus_method, min_edge)` combos, aggregates per-fold ROI + 95% CI per combo, writes results.
 - `docs/BACKTEST.md` — new "Walk-forward (5 folds)" section appended; legacy whole-period tables retained.
-- Determinism test added to `tests/test_sportsbet_adapter.py` (or a new `tests/test_walk_forward.py`).
+- 95% CI aggregation helper (in the script or as a small function in `src/betting/walk_forward.py`).
 
 **Tasks.**
-1. **Write `scripts/walk_forward_backtest.py`.** Loop over `devig ∈ {raw, shin, power}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}` = 15 combos. For each: instantiate `ConsensusBettor`, run `backtest(bettor, X, Y, O, cv=TimeSeriesSplit(5))`, capture per-fold ROI + bet count.
-2. **Append walk-forward section to `docs/BACKTEST.md`.** Per-fold table (15 combos × 5 folds, or 3 tables of 5×5). Aggregate row per combo: mean ± 95% CI (t-distribution, n=5).
-3. **Interpretation note.** Mark any `(devig, min_edge)` combo whose 95% CI crosses zero — those cannot defend a default-flip in R.6.
-4. **Determinism test.** Run the backtest twice with the same inputs → identical DataFrame (per-fold ROI, bet counts). Add to test file.
+1. **Write `scripts/walk_forward_backtest.py`.** Loop over `consensus_method ∈ {raw, shin, power}` × `min_edge ∈ {0.01, 0.02, 0.03, 0.04, 0.05}` = 15 combos. For each: call `walk_forward_backtest(matches, consensus_method=..., min_edge=..., n_splits=5)`; capture the 5-row per-fold DataFrame.
+2. **Aggregate.** For each combo, compute mean ROI ± 95% CI (t-distribution, n=5: `t.ppf(0.975, 4) ≈ 2.776`).
+3. **Append walk-forward section to `docs/BACKTEST.md`.** Per-fold table (3 tables of 5×5, or one 15×5 table). Aggregate row per combo: mean ± 95% CI.
+4. **Interpretation note.** Mark any `(consensus_method, min_edge)` combo whose 95% CI crosses zero — those cannot defend a default-flip in R.6.
 
 **Acceptance.**
 - [ ] `scripts/walk_forward_backtest.py` runs end-to-end on the existing dataset.
-- [ ] `docs/BACKTEST.md` walk-forward section exists with all 3 devig methods × 5 edge thresholds.
-- [ ] Per-fold variance reported. Aggregate CI annotated.
+- [ ] `docs/BACKTEST.md` walk-forward section exists with all 3 consensus methods × 5 edge thresholds.
+- [ ] Per-fold variance reported. Aggregate mean ± 95% CI annotated.
 - [ ] CI-crosses-zero combos explicitly flagged in the interpretation note.
-- [ ] Determinism test passes.
 
 **Verification commands.**
 ```bash
@@ -814,17 +809,16 @@ python3 scripts/walk_forward_backtest.py 2>&1 | tail -20
 grep -c "Walk-forward" docs/BACKTEST.md  # >= 1
 grep -cE "(95% CI|confidence interval|fold)" docs/BACKTEST.md  # >= 1
 
-# All 3 devig methods present in walk-forward
+# All 3 consensus methods present in walk-forward
 grep -A40 "Walk-forward" docs/BACKTEST.md | grep -cE "(raw|shin|power)"  # >= 3
 
-# Tests pass (including determinism)
-pytest -q tests/test_sportsbet_adapter.py
-pytest -q  # no regressions
+# No regressions
+pytest -q
 ```
 
-**Reviewer focus.** That the per-fold numbers actually look like walk-forward (later folds have more training data, earlier folds have less). That the CI computation uses the right t-quantile for n=5 (`t.ppf(0.975, 4) ≈ 2.776`), not 1.96. That CI-crosses-zero combos are correctly identified and prominently flagged.
+**Reviewer focus.** That CI uses the right t-quantile for n=5 (`scipy.stats.t.ppf(0.975, 4) ≈ 2.776`), NOT 1.96 (which would be the normal-approximation quantile and is too narrow for n=5). That CI-crosses-zero combos are correctly identified and prominently flagged. That the script doesn't re-implement walk-forward logic — it should be a thin loop over `walk_forward_backtest()` from R.5.5a.
 
-**Carryover.** Once this lands, `compare_strategies.py` and any future model-overhaul work (Phase 7) inherits the walk-forward primitive (whether the package's or from-scratch).
+**Carryover.** Once this lands, `compare_strategies.py` and any future model-overhaul work (Phase 7) inherits the walk-forward primitive directly (no third-party dep).
 
 ---
 
@@ -997,7 +991,7 @@ pytest -q
 - **SBK not in Odds API uk region** (R.3, checked 2026-04-30): `regions=uk&markets=h2h` returns 20 UK books; SBK key is absent. Note: `unibet_uk` IS present in the API but not currently in `UK_LICENSED_BOOKS` — low-priority addition for a future PR once we confirm it's properly licensed and odds quality is acceptable.
 - **Restriction-detection logging** (RESEARCH_NOTES §3.3): per-bookie max-stake limits hit on placement, manual log via dashboard. Lightweight but needs UI work.
 - **Mug-bet camouflage cron** (RESEARCH_NOTES §3.4): scheduled small bets to mask account profile. Only relevant once we hit a real restriction.
-- **Migrate `compare_strategies.py` to walk-forward** (follow-up to R.5.5b): once the `sports-betting`-based primitive lands, port shadow-portfolio comparison to use the same splitter for fold-aware CLV variance reporting.
+- **Migrate `compare_strategies.py` to walk-forward** (follow-up to R.5.5b): once `walk_forward_backtest()` lands, port shadow-portfolio comparison to call it directly for fold-aware CLV variance reporting.
 - **Zenodo 84k-match dataset** (Hegarty & Whelan): replace football-data.co.uk EPL CSV (~4.5k matches, 1 league, 6 books) with broader European dataset (84k matches, 22 leagues, 40-60 books). 7× more data. Phase 7 follow-up.
 - **`pybettor` evaluation** (RESEARCH_NOTES §9.4): 30-min skim of `ian-shepherd/pybettor` to determine if any utilities replace what we currently maintain. Decision: dep or reference.
 - **ELO prior variant `Q_elo_prior`** (RESEARCH_NOTES §9.3): WagerBrain's `elo_prob(elo_diff)` is a cheap model-agreement signal. Could substitute for CatBoost on leagues we don't have CatBoost coverage for (Championship, Bundesliga 2, NBA, tennis). Phase 7-adjacent.
@@ -1012,7 +1006,7 @@ pytest -q
 - **R.1.5 — silently wrong baseline.** If `raw_consensus=True` accidentally still calls Shin somewhere, the "paper-faithful" comparison would show our system being worse than itself. Smoke-test by computing one fixture by hand and comparing. The α=0.05 multiplicative threshold is **fundamentally different** from our additive 3% — bet count should be visibly higher (probably 5–10x more flags than `A_production`).
 - **R.2 weighted-mean numerical stability.** When all books in a fixture happen to be soft-tier (weight 0.7), the weighted mean equals the unweighted mean — verify this is the intended behaviour, not a bug.
 - **R.5 backtest regression.** The corrected-shin numbers in `docs/BACKTEST.md` (2% edge → 17.65% ROI) were generated 2026-04-29. Re-running with `power` should produce numbers in the same order of magnitude. If `power` returns wildly different numbers (e.g. 50% ROI), suspect a bug before celebrating.
-- **R.5.5a dependency risk.** `sports-betting` package is one researcher's project — could break on Python or sklearn version bumps. Pin the version explicitly. If it diverges, fall back to the from-scratch `TimeSeriesSplit` implementation. The fallback decision is made during R.5.5a (scaffold); R.5.5b inherits whichever path was chosen.
+- **R.5.5a sklearn drift.** `TimeSeriesSplit` is stable, but if a future sklearn release changes its API, our walk-forward primitive needs updating. Low risk (this is core sklearn, not a niche package), but worth knowing. Earlier draft considered `sports-betting` as a runtime dep — rejected: too thin a third-party surface to host a function that produces graduation evidence.
 - **R.6 silent graduation.** Easy to flip a default and forget to update CLAUDE.md / dashboard / tests. Use the PR template's "docs updated" checkbox.
 
 ---
@@ -1020,7 +1014,7 @@ pytest -q
 ## Definition of done — by next Friday
 
 - [ ] R.0–R.5 merged.
-- [ ] **R.5.5a scaffold merged** — adapter + loader in `src/betting/sportsbet_adapter.py`, adapter test passes.
+- [ ] **R.5.5a scaffold merged** — primitive + loader in `src/betting/walk_forward.py`, 5 tests pass, no new third-party deps.
 - [ ] **R.5.5b walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
 - [ ] At least one variant graduated (R.6) with explicit walk-forward evidence, OR explicit "no graduation this week" note citing CI breadth.
 - [ ] R.7 schema migration done (independent of graduation).
@@ -1075,5 +1069,5 @@ echo "Exit: $?"  # 0 expected
 **Sign-off**: verifier creates a single PR comment summarising:
 - Number of phases merged this sprint
 - Any failed verification commands (none expected)
-- Any phases that fell back to alternative paths (R.5.5a fallback most likely)
+- Any phases that fell back to alternative paths
 - Recommended graduations for next sprint (if R.6 didn't graduate anything this sprint)
