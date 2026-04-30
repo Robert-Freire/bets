@@ -85,6 +85,7 @@
     .mkt-totals { background: #1c2840; color: #60a5fa; }
     .mkt-btts   { background: #2d1b4e; color: #c084fc; }
 
+    .stat-sub { font-size: .7rem; color: #64748b; margin-top: .15rem; }
     .no-bets { color: #475569; font-size: .9rem; padding: 1rem 0; }
     .fixture { font-weight: 500; }
     .meta { font-size: .75rem; color: #64748b; }
@@ -171,6 +172,11 @@
     </div>
   </div>
   {% endif %}
+  <div class="stat">
+    <div class="stat-label">Research</div>
+    <div class="stat-value neu">{{ research[1] }}</div>
+    <div class="stat-sub">{% if research[0] %}{{ research[2] }} · {{ research[0] }}{% else %}no feed yet{% endif %}</div>
+  </div>
 </div>
 
 <!-- Pending bets -->

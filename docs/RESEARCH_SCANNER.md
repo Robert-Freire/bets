@@ -29,7 +29,7 @@ A scheduled job that surfaces external betting research and similar projects so 
 | 11.5 | Feed writer | done | main / HEAD | `write_findings`; 13/13 tests pass; atomic write, banner-once, newest-first verified. |
 | 11.6 | Top-level CLI + bootstrap mode | done | main / HEAD | CLI + bootstrap; 37 findings on first run; dedup confirmed; kill switch verified; no hard-coded paths. |
 | 11.7 | Open-search backends | done | main / HEAD | `search.py`; 4 backends (arxiv/hn/github/ddg); 13/13 tests pass; live `--mode open` confirmed; backend tags in feed; 4-metric dedup log; GITHUB_TOKEN auth. |
-| 11.8 | Dashboard tile | pending | — | Independent of 11.7. |
+| 11.8 | Dashboard tile | done | main / HEAD | `latest_research_findings()` in app.py; Research tile in stats bar; graceful fallback (None,0,"") on missing/malformed feed. |
 | 11.9 | Cron + production hardening | pending | — | After 11.6 (preferably 11.7+11.8). |
 | 11.10 | Optional follow-ups | deferred | — | Post-MVP only. |
 
@@ -617,9 +617,9 @@ All three runs returned `READY`. No TTY required, no interactive prompts, exit 0
 4. No click-through in v1.
 
 **Acceptance.**
-- [ ] Dashboard renders even if `RESEARCH_FEED.md` is missing (tile shows "Research: 0").
-- [ ] After `--mode bootstrap`, tile shows correct count + date.
-- [ ] No template breakage (manual reload of `http://localhost:5000`).
+- [x] Dashboard renders even if `RESEARCH_FEED.md` is missing (tile shows "Research: 0").
+- [x] After `--mode bootstrap`, tile shows correct count + date.
+- [x] No template breakage (manual reload of `http://localhost:5000`).
 
 **Reviewer focus.** Graceful fallback when feed is missing/empty/malformed.
 

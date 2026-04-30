@@ -7,14 +7,22 @@ Then open: http://localhost:5000
 import csv
 import fcntl
 import os
+import re
+from datetime import date
 from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, jsonify
 
 app = Flask(__name__)
 
-BETS_CSV        = Path(__file__).parent / "logs" / "bets.csv"
-BETS_LEGACY_CSV = Path(__file__).parent / "logs" / "bets_legacy.csv"
-DRIFT_CSV       = Path(__file__).parent / "logs" / "drift.csv"
+BETS_CSV           = Path(__file__).parent / "logs" / "bets.csv"
+BETS_LEGACY_CSV    = Path(__file__).parent / "logs" / "bets_legacy.csv"
+DRIFT_CSV          = Path(__file__).parent / "logs" / "drift.csv"
+RESEARCH_FEED_MD   = Path(__file__).parent / "docs" / "RESEARCH_FEED.md"
+
+_RUN_RE = re.compile(
+    r"^## Run (\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}\s+UTC)?\s+\(mode:\s*(\w+)\)\s+—\s*(\d+)\s+findings",
+    re.MULTILINE,
+)
 
 FIELDS = [
     "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
@@ -152,6 +160,20 @@ def _drift_direction(drift_rows: list[dict]) -> str | None:
     return None
 
 
+def latest_research_findings() -> tuple:
+    """Return (run_date, count, mode) from the most recent ## Run heading, or (None, 0, "")."""
+    if not RESEARCH_FEED_MD.exists():
+        return (None, 0, "")
+    try:
+        text = RESEARCH_FEED_MD.read_text()
+        m = _RUN_RE.search(text)
+        if not m:
+            return (None, 0, "")
+        return (date.fromisoformat(m.group(1)), int(m.group(3)), m.group(2))
+    except Exception:
+        return (None, 0, "")
+
+
 def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
     placed = [b for b in bets if b.get("actual_stake") and b.get("result")]
     if not placed:
@@ -224,7 +246,8 @@ def index():
                b.get("market", "h2h"), b.get("line", ""))
         b["_drift_dir"] = _drift_direction(drift.get(key, []))
 
-    return render_template("index.html", pending=pending, done=done, stats=stats)
+    research = latest_research_findings()
+    return render_template("index.html", pending=pending, done=done, stats=stats, research=research)
 
 
 @app.route("/update/<int:bet_id>", methods=["POST"])
