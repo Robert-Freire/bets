@@ -18,6 +18,9 @@ export $(cat .env) && python3 scripts/closing_line.py
 # Open the dashboard (track bets, log results, view CLV)
 python3 app.py   # → http://localhost:5000
 
+# Public dev dashboard (Azure Container Apps; no auth yet — A.7 adds Google OIDC)
+# https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
+
 # Check for new sports worth adding (bi-weekly)
 export $(cat .env) && python3 scripts/check_sports.py
 

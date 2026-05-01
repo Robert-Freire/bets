@@ -40,9 +40,9 @@ Phased migration from local CSV storage to a SQL-Server-Express-backed Flask das
 | Writer | WSL cron (dev API key) | Pi cron (prod API key) |
 | Always-on? | **No — freely stoppable to save credits.** | **Yes — soak target, never stopped.** |
 | SQL DB compute | Serverless `GP_S_Gen5_2`, `--auto-pause-delay 60` | Free offer (`--use-free-limit`) if available, else serverless with longer pause delay |
-| App Service | F1 free; `az webapp stop` when not in use | F1 free initially; B1 if cold-starts hurt |
+| Web tier | **Container Apps Consumption** (scale-to-zero; A.6 pivot — Reply VSE has 0 App Service VM quota); image in ACR Basic ~£4/mo | **Container Apps Consumption** with min replicas ≥1 if cold-starts hurt; same ACR Basic |
 | Free SQL offer (one per subscription) | Goes to **prod**, not dev | ✅ Reserved for here |
-| Dashboard URL identity | `kaunitz-dev-dashboard-<rand>.azurewebsites.net` | `kaunitz-prod-dashboard-<rand>.azurewebsites.net` |
+| Dashboard URL identity | `kaunitz-dev-dashboard-rfk1.<env-id>.uksouth.azurecontainerapps.io` (live) | `kaunitz-prod-dashboard-rfk1.<env-id>.uksouth.azurecontainerapps.io` (A.10 will mirror) |
 | Blast radius if broken | Dev test data only; prod and Pi cron unaffected | Real CLV stream; mirror dev's stability before promoting |
 
 **Why two RGs and not one shared DB with a `source` column?**
@@ -95,7 +95,9 @@ Raspberry Pi (home network — UNCHANGED in A.0–A.9)
                                     ├── kaunitz-prod-sql-uksouth-<rand>  (free offer if avail)
                                     │     └── DB: kaunitz (always-on or long auto-pause)
                                     ├── kaunitz-prod-kv-<rand>
-                                    └── kaunitz-prod-plan / kaunitz-prod-dashboard-<rand>
+                                    ├── kaunitzprodacr<rand>  (ACR Basic, image registry)
+                                    ├── kaunitz-prod-env  (Container Apps managed env)
+                                    └── kaunitz-prod-dashboard-<rand>  (Container App, mirrors dev pivot)
 
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -548,30 +550,37 @@ az containerapp logs show -g $RG -n $APP --tail 50 --type system      # platform
 
 ---
 
-## Phase A.7 — Easy Auth (Google OIDC) on dashboard
+## Phase A.7 — Container Apps auth (Google OIDC) on dashboard
 
 **Goal.** Public URL requires Google sign-in; only `robert.freire@gmail.com` is authorized. (The Azure resources sit in the Reply VSE subscription, but the *application* identity layer is intentionally decoupled — see Phase A.0 identity boundary note.)
 
+**Pivot note.** Originally planned as App Service Easy Auth; A.6 pivoted the dashboard to Container Apps (0 App Service VM quota). Container Apps offers the same Google OIDC + email allowlist via `az containerapp auth update` — different surface, equivalent capability.
+
+**Live URL to protect:** `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io`
+
 **Tasks.**
-1. Portal: App Service → Authentication → Add identity provider → Google.
-2. Set up Google OAuth client at console.cloud.google.com (OAuth 2.0 Client ID, Web app, redirect URI `https://kaunitz-dev-dashboard-<random>.azurewebsites.net/.auth/login/google/callback`). Owner of this OAuth client is the user's personal Google account, not the Reply identity.
-3. Configure App Service: "Require authentication" + "Allowed identities" → restrict to `robert.freire@gmail.com`.
-4. **Decision branch (document in PR body):** if Easy Auth setup hits a snag (Google verification, SP issues, Reply tenant blocking the redirect), fall back to HTTP Basic Auth — 1 LOC in `app.py` checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Bitwarden + App Settings.
+1. Create Google OAuth 2.0 Web client at console.cloud.google.com. Authorized redirect URI: `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/.auth/login/google/callback`. Owner = personal Google account, not the Reply identity.
+2. Store the Google client secret in Key Vault (`kaunitz-dev-kv-rfk1`, secret name `dashboard-google-client-secret`) and reference it from the container app via the existing managed-identity → KV binding.
+3. `az containerapp auth microsoft|google update -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1 --client-id <id> --client-secret-name <secret-ref> --enable-token-store true` then `az containerapp auth update --action RedirectToLoginPage --require-authentication true`.
+4. Restrict to `robert.freire@gmail.com` via `--allowed-principals` (or `excluded-paths /health` so monitoring still works unauthenticated).
+5. **Decision branch (document in PR body):** if Container Apps auth hits a snag (Google verification, redirect URI mismatch, Reply tenant blocking), fall back to HTTP Basic Auth in `app.py` — 1 LOC checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Key Vault + Container App env.
 
 **Acceptance.**
-- [ ] `curl -i https://kaunitz-dev-dashboard-<random>.azurewebsites.net/` returns 302 to Google login (or 401 with Basic Auth fallback).
+- [ ] `curl -i https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/` returns 302 to Google login (or 401 with Basic Auth fallback).
 - [ ] Browser test: sign in as `robert.freire@gmail.com` → dashboard renders. Sign in as different account → 403.
-- [ ] Pi → App Service link still works (Pi calls public URL; should be allowed via internal allowlist, OR the dashboard doesn't need this).
+- [ ] `/health` endpoint stays open (excluded paths) so smoke probes still work.
 
 **Reviewer focus.**
 - Allowlist must be email-exact; "anyone with a Google account" is unacceptable.
-- /health endpoint should remain unauth (for monitoring).
+- `/health` endpoint should remain unauth (for monitoring).
 - Confirm no auth bypass via direct DB/blob access from internet.
 
 **Verification commands.**
 ```bash
-curl -i https://kaunitz-dev-dashboard-<random>.azurewebsites.net/ | head -1  # expect 302 or 401
-curl -s https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health     # should still return 200
+FQDN=kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
+curl -i "https://$FQDN/" | head -1          # expect 302 or 401
+curl -s "https://$FQDN/health"              # should still return 200
+az containerapp auth show -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1
 ```
 
 ---
