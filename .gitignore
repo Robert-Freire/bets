@@ -18,3 +18,4 @@ logs/snapshots/
 logs/*.csv.bak.*
 docs/papers/
 todo.md
+logs/paper/*.csv
