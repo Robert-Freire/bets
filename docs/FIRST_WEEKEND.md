@@ -287,3 +287,93 @@ Mostly an existing checklist item, but the M.0 totals-drop and M.4 AH-probe both
 ### D.6 — Bot scope-creep follow-up
 
 The PR #17 implementation bot added an unrelated WARNING ntfy notification outside the M.0/M.1/M.2 task list (it was the user's separate request — no harm, but a process miss). If we keep using a sub-agent for plan execution, tighten the bot-execution protocol in `docs/PLAN_RESEARCH_2026-04.md` (and reuse for future plans) to add an explicit "no drive-by changes; out-of-scope work goes to a follow-up PR" line.
+
+---
+
+## Strategic direction for next week (decided 2026-05-01)
+
+Beyond the immediate D.1–D.6 decisions, the conversation that produced this section also clarified the *shape* of the next week. Capturing it here so the post-mortem doesn't reconstruct context.
+
+### Core insight: dispersion is opportunity, *if* the disagreement is structured
+
+Previously the dispersion filter (`MAX_DISPERSION = 0.04`) was treated as a binary "trust this market or skip it." That framing rejects La Liga (p95 = 0.083). But high dispersion can mean three different things:
+
+| Shape | Books look like | Implication |
+|---|---|---|
+| Unimodal-tight | Bell curve, narrow | Flat consensus is fine |
+| **Bimodal** | **Two distinct peaks** | **Sharp-weighted consensus wins big — the soft cluster is visibly wrong** |
+| No-structure | Wide flat distribution | Avoid; no method recovers signal |
+
+La Liga's 0.083 dispersion could be any of these and we don't currently know which. **If it's bimodal with a persistent sharp/soft split, La Liga becomes the league where sharp-weighting has its biggest *relative* advantage** — exactly because the flat-consensus method (which currently filters it out) is the wrong tool for it.
+
+The 16-paper-variant infrastructure already encodes the sharp-weighted hypothesis: `D_pinnacle_only`, `J_sharp_weighted`, `E_exchanges_only`, `H_no_pinnacle`. They've been running in shadow but lack CLV data to validate. The dispersion-shape diagnostic gives us an *a priori* prediction of which leagues these variants should outperform on, before we have settled bets.
+
+### Weekly cadence (Mon → Sun)
+
+Driven by the strategic insight above. M.7 (the diagnostic) lands first; M.6 (the mechanism for per-league weight overrides) reads M.7's output; M.4 (dev sandbox) ties them together with the AH probe.
+
+| Day | PR / Action | What |
+|---|---|---|
+| **Mon 2026-05-04** | Post-mortem + PR #17 → Pi (D.1) | Confirm weekend was clean; pull PR #17 onto Pi. |
+| **Mon afternoon** | M.3 PR | Add La Liga 2 + Eredivisie + Primeira + Ligue 2 to prod `config.json` (D.2). Keep prod boring. |
+| **Tue** | M.7 PR | `scripts/analyse_dispersion.py` + `docs/DISPERSION_SHAPES_2026-05.md`. Run on all 11 leagues. ~22 cr cost. **Output dictates the shape verdict per league** — drives everything downstream. |
+| **Wed** | M.6 PR | `book_weights` schema in `config.json`. Refactor `J_sharp_weighted` to read from config. Add `J2_sharp_weighted_per_league` (same code, different config). Backwards-compatible: absent block → flat consensus. |
+| **Thu** | M.4 PR | `config.dev.json` with `extra_markets=["spreads"]` on top-4 leagues, La Liga added to dev set with M.7-derived weights, `Q_asian_handicap` variant, WSL cron 5 → 3 scans/wk. Per-league `extra_markets` override extends M.2 schema. |
+| **Fri** | Soak | Don't touch. Let dev cron run Fri evening. |
+| **Sat–Sun** | First experimental weekend | All four variants (`A`, `J`, `J2`, `D`) run on La Liga + AH on top-4 in parallel. |
+
+This sequence lets prod stay frozen on the M.0 + M.3 baseline while dev becomes a structured laboratory. The four variants' CLV on La Liga answers two questions at once: (a) is sharp-weighting the right method for high-dispersion leagues, (b) does La Liga belong in prod under any method.
+
+### What "configurable book weights" means concretely
+
+Today's `J_sharp_weighted` has hardcoded weights inside `src/betting/strategies.py`. M.6 moves them to `config.json` with this resolution order:
+
+1. `book_weights.by_league[league][book]` if present
+2. else `book_weights.by_market[market][book]` if present
+3. else `book_weights.default[book]` if present
+4. else `book_weights.default["*"]`
+5. else `1.0` (flat-consensus fallback)
+
+This makes Pi (`config.json`) and WSL (`config.dev.json`) able to run the same `J_sharp_weighted` code with different weighting policies. M.4's dev experiment uses the per-league overrides; Pi keeps the simpler global weights until evidence forces a flip in M.5.
+
+### Dispersion shape — what M.7 produces
+
+For each fixture × outcome with ≥10 books:
+- Classify each book into `low_cluster` / `centre` / `high_cluster` using median ± 1.5·MAD.
+- Determine shape (unimodal-tight / unimodal-fat / bimodal / no-structure).
+
+For each league:
+- Distribution of shapes (% of fixtures × outcomes).
+- Per-book cluster-membership tally across all fixtures.
+- **Cluster persistence score** (Spearman correlation): are the same books always in the "low" cluster?
+
+Decision rule from the persistence score:
+- ≥ 0.6 → structural sharp/soft split → **add with sharp-weighting** (prod or dev based on other criteria)
+- 0.3–0.6 → some structure, marginal → **dev only**
+- < 0.3 → noise → **drop the league**
+
+### What this changes about La Liga specifically
+
+La Liga today is excluded from prod for p95 dispersion 0.083. The right test is **not** "is dispersion below 0.04" but **does La Liga's dispersion form a stable sharp/soft cluster, and does sharp-weighted consensus produce positive CLV on it.**
+
+M.7 answers question 1 with no further bets needed. M.4 starts answering question 2 by running La Liga in dev with `J2_sharp_weighted_per_league` for 4–6 weekends. M.5 makes the graduation call.
+
+If M.7 says "no structure" for La Liga, M.4 drops it from dev and the question is settled negatively. If M.7 says "structured," La Liga becomes the canonical use case for the sharp-weighted variants.
+
+### Out of scope for next week
+
+- **Per-league per-book sharpness from historical CLV.** Needs ≥ 50 settled bets per book per league. Won't have that data for months.
+- **Hierarchical / Bayesian shape models.** M.7 starts simple (Spearman); upgrade only if the simple metric is too noisy.
+- **Production AH-CLV pipeline.** R.10 territory; blocked on the dev probe producing initial CLV signal.
+- **Paid Odds API tier.** Unchanged trigger: ≥50 settled bets with positive average CLV on at least one paper variant.
+
+### The hierarchy of "out of scope" if this week slips
+
+If only some phases land, prioritise in this order:
+1. **D.1 (Pi pull)** — must happen unless something is genuinely broken.
+2. **M.3 (prod leagues)** — small, low-risk, immediate budget realisation.
+3. **M.7 (dispersion shape)** — diagnostic; cheap; informs everything downstream.
+4. **M.6 (configurable weights)** — refactor; backwards-compatible; can land independently.
+5. **M.4 (dev sandbox)** — biggest piece; can slip a week without losing the thread.
+
+If D.1 and M.3 land but the rest slips, that's still a successful week — prod is in a better place and dev can wait.
