@@ -11,12 +11,18 @@ BASE_URL_LEAGUE = "https://www.football-data.co.uk/mmz4281/{season}/{fd_code}.cs
 
 # All football leagues supported by the scanner, mapped to football-data.co.uk codes
 LEAGUES = {
-    "soccer_epl":                  {"fd_code": "E0", "label": "EPL"},
-    "soccer_germany_bundesliga":   {"fd_code": "D1", "label": "Bundesliga"},
-    "soccer_italy_serie_a":        {"fd_code": "I1", "label": "Serie A"},
-    "soccer_efl_champ":            {"fd_code": "E1", "label": "Championship"},
-    "soccer_france_ligue_one":     {"fd_code": "F1", "label": "Ligue 1"},
-    "soccer_germany_bundesliga2":  {"fd_code": "D2", "label": "Bundesliga 2"},
+    "soccer_epl":                       {"fd_code": "E0",  "label": "EPL"},
+    "soccer_germany_bundesliga":        {"fd_code": "D1",  "label": "Bundesliga"},
+    "soccer_italy_serie_a":             {"fd_code": "I1",  "label": "Serie A"},
+    "soccer_efl_champ":                 {"fd_code": "E1",  "label": "Championship"},
+    "soccer_france_ligue_one":          {"fd_code": "F1",  "label": "Ligue 1"},
+    "soccer_germany_bundesliga2":       {"fd_code": "D2",  "label": "Bundesliga 2"},
+    # M.1 candidate leagues (FDCO codes confirmed 2026-05)
+    "soccer_spain_la_liga":             {"fd_code": "SP1", "label": "La Liga"},
+    "soccer_spain_segunda_division":    {"fd_code": "SP2", "label": "La Liga 2"},
+    "soccer_netherlands_eredivisie":    {"fd_code": "N1",  "label": "Eredivisie"},
+    "soccer_portugal_primeira_liga":    {"fd_code": "P1",  "label": "Primeira Liga"},
+    "soccer_france_ligue_two":          {"fd_code": "F2",  "label": "Ligue 2"},
 }
 
 # All available EPL seasons (format: SSSS = start+end year digits)

@@ -109,7 +109,7 @@ AZURE_BLOB_CONN="DefaultEndpointsProtocol=https;AccountName=kaunitzdevstrfk1;...
 
 **Pi-safety contract.** Without these env vars, `BetRepo` and `SnapshotArchive` stay dormant and never import `pyodbc` / `azure.storage.blob`. After `git pull` on Pi, behavior is byte-identical to pre-A.4/A.5.5. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
 
-API budget: free tier 500 requests/month per key; current schedule uses ~497/500 (5 football scans/wk × 2 regions × 6 leagues + bi-weekly sports check). Each region (`uk`, `eu`) counts as a separate API call. Migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
+API budget: free tier 500 credits/month per key. Cost per call = `regions × markets`; each league fetch is `uk,eu × h2h,totals` = 4 credits. Current schedule: 5 scans/wk × 6 leagues × 4 cr × 4.345 wk ≈ **~520/mo theoretical ceiling**, less in practice (canary skip on empty-fixture days saves ~20 cr/scan; off-season league windows reduce further). Bi-weekly sports check adds ~20 cr/mo. The BTTS follow-up call 422s on free tier without charging. Migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
 
 ## Cron schedule (UTC)
 
@@ -238,7 +238,7 @@ CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD
 
 Pipeline in `src/`: `pi_ratings.py` (Constantinou 2013) → `dixon_coles.py` Poisson → `catboost_model.py`. xG from Understat (`src/data/understat.py`, 4,180 EPL matches 2014–2024).
 
-Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hold-out eval + calibration is Phase 7.
+Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 shipped 2026-05-01: hold-out eval across all 6 leagues + isotonic calibration scaffold (`src/model/holdout.py`, `src/model/reliability.py`, `--calibrate` flag on `model_signals.py`). Calibrated cache lives at `logs/model_signals_calibrated.json`; production scanner still consumes the uncalibrated `logs/model_signals.json`. Decision: **HOLD** — calibration improves aggregate RPS+Brier but EPL+Bundesliga (the production-scanning leagues) degrade. Re-evaluate when ≥50 settled bets have `clv_pct` populated; flip with `mv logs/model_signals_calibrated.json logs/model_signals.json` only if model-filtered CLV is positive. See `docs/MODEL_EVAL_2026-05.md`.
 
 ## Implementation status
 
@@ -246,7 +246,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 |---|---|
 | Phases 0–5.8 (hygiene, devig, risk, CLV, filters, markets, paper portfolio, commission-aware) | ✅ all done |
 | Phase 6 (storage migration: SQLite + UUIDs) | superseded by Phase 9 Azure direction |
-| Phase 7 (model overhaul: calibration, hold-out eval) | pending |
+| Phase 7 (model overhaul: calibration, hold-out eval) | ✅ scaffolding done 2026-05-01; HOLD on flip pending ≥50 CLV bets (`docs/MODEL_EVAL_2026-05.md`) |
 | Phase 8 (Betfair API auto-placement) | pending |
 | Phase 9a (Pi cron cutover) | ✅ done 2026-05-01 |
 | Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |

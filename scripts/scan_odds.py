@@ -149,16 +149,71 @@ UK_LICENSED_BOOKS = {
     "grosvenor",       # Grosvenor
 }
 
-# Fixed sports to always scan
-FIXED_SPORTS = [
-    ("soccer_epl",                "EPL",          20),   # min_books
+_HARDCODED_FOOTBALL = [
+    ("soccer_epl",                "EPL",          20),
     ("soccer_germany_bundesliga", "Bundesliga",   20),
     ("soccer_italy_serie_a",      "Serie A",      20),
     ("soccer_efl_champ",          "Championship", 25),
     ("soccer_france_ligue_one",   "Ligue 1",      20),
     ("soccer_germany_bundesliga2","Bundesliga 2", 20),
-    ("basketball_nba",            "NBA",          20),
 ]
+_NBA_SPORT = ("basketball_nba", "NBA", 20)
+
+
+def _load_config() -> dict:
+    """Load scanner config from LEAGUES_CONFIG env var → config.json.
+
+    When LEAGUES_CONFIG is explicitly set the file must have a valid 'leagues'
+    array — no silent fallback, so a misconfigured host fails loudly.
+    When LEAGUES_CONFIG is absent and config.json has no 'leagues' key the
+    hardcoded football list is used (Pi back-compat before config rolls out).
+    """
+    leagues_config_env = os.environ.get("LEAGUES_CONFIG")
+    if leagues_config_env:
+        config_path = Path(leagues_config_env)
+        if not config_path.exists():
+            raise RuntimeError(f"LEAGUES_CONFIG={leagues_config_env} does not exist.")
+        cfg = json.loads(config_path.read_text())
+        if "leagues" not in cfg:
+            raise RuntimeError(
+                f"Config {config_path} has no 'leagues' key. "
+                "Required: [{\"key\": ..., \"label\": ..., \"min_books\": ...}, ...]"
+            )
+        _validate_leagues(cfg["leagues"], config_path)
+        return cfg
+
+    config_path = Path(__file__).resolve().parent.parent / "config.json"
+    cfg: dict = {}
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+        except Exception:
+            pass
+    if "leagues" not in cfg:
+        cfg["leagues"] = [
+            {"key": k, "label": l, "min_books": m} for k, l, m in _HARDCODED_FOOTBALL
+        ]
+    else:
+        _validate_leagues(cfg["leagues"], config_path)
+    return cfg
+
+
+def _validate_leagues(leagues: list, source) -> None:
+    for entry in leagues:
+        missing = [k for k in ("key", "label", "min_books") if k not in entry]
+        if missing:
+            raise RuntimeError(
+                f"League entry in {source} missing required keys {missing}: {entry}"
+            )
+
+
+_CONFIG = _load_config()
+
+# FIXED_SPORTS: football leagues from config + NBA (NBA dropped from cron but
+# still reachable via --sports nba; lives outside the config-managed set).
+FIXED_SPORTS = [
+    (e["key"], e["label"], e["min_books"]) for e in _CONFIG["leagues"]
+] + [_NBA_SPORT]
 
 # Min books per sport — below this the consensus is unreliable
 DEFAULT_MIN_BOOKS = 15
@@ -247,33 +302,11 @@ def _health_check_sports() -> set[str]:
 
 
 def fetch_odds(sport_key: str) -> tuple[list, str]:
-    # btts is not available on the free tier; request h2h+totals and attempt btts separately.
+    markets = ",".join(["h2h"] + _CONFIG.get("extra_markets", []))
     data, remaining = api_get(
         f"/sports/{sport_key}/odds/",
-        {"regions": "uk,eu", "markets": "h2h,totals", "oddsFormat": "decimal"},
+        {"regions": "uk,eu", "markets": markets, "oddsFormat": "decimal"},
     )
-    # Merge btts outcomes into the same event dicts when available
-    try:
-        btts_data, remaining = api_get(
-            f"/sports/{sport_key}/odds/",
-            {"regions": "uk,eu", "markets": "btts", "oddsFormat": "decimal"},
-        )
-        btts_by_id = {ev["id"]: ev for ev in btts_data}
-        for ev in data:
-            btts_ev = btts_by_id.get(ev["id"])
-            if not btts_ev:
-                continue
-            for bm in btts_ev.get("bookmakers", []):
-                # Inject btts markets into matching bookmaker entries
-                existing = {b["key"]: b for b in ev.get("bookmakers", [])}
-                if bm["key"] in existing:
-                    existing[bm["key"]].setdefault("markets", []).extend(
-                        [m for m in bm.get("markets", []) if m["key"] == "btts"]
-                    )
-                else:
-                    ev.setdefault("bookmakers", []).append(bm)
-    except Exception:
-        pass  # btts unavailable on this tier — h2h and totals still processed
     return data, remaining
 
 
@@ -931,6 +964,7 @@ def main():
             eff = _effective_odds(vb["odds"], vb["book"])
             vb["stake"] = max(0.0, min(0.5 * (vb["cons"] * eff - 1) / (eff - 1), 0.05)) * BANKROLL
 
+    n_pre_risk = len(output_bets)
     dd_mult = 1.0
     if _RISK:
         current_br, high_water = _load_drawdown_state(BANKROLL)
@@ -944,6 +978,15 @@ def main():
         model_bets   = [b for b in output_bets if b.get("_bucket") == "model"]
         print(f"[risk] After risk pipeline: {len(output_bets)} bet(s) "
               f"(portfolio cap {15}%, fixture cap {5}%, rounding £5)")
+        if n_pre_risk > 0 and not output_bets:
+            print("[ntfy] All bets dropped by risk pipeline — sending notification.")
+            notify(
+                "WARNING: Bets - all dropped by risk pipeline",
+                f"WARNING: {n_pre_risk} value bet(s) flagged but all dropped by risk pipeline "
+                f"(stakes < £5 min after rounding). Consider reviewing bankroll or stake floor — "
+                f"you may be missing real edge.",
+                priority="default",
+            )
     print()
 
     # Print full detail
