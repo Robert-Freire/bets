@@ -125,7 +125,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | Phase | Title | RG | Touches Pi? | Status | Depends on |
 |---|---|---|---|---|---|
 | A.0 | Provision Azure account + dev resource group | dev | no | ✅ Done 2026-05-01 | — |
-| A.1 | Stand up dev Azure SQL Database (serverless, auto-pause) | dev | no | pending | A.0 |
+| A.1 | Stand up dev Azure SQL Database (serverless, auto-pause) | dev | no | ✅ Done 2026-05-01 | A.0 |
 | A.2 | Schema DDL + idempotent migrations runner | dev | no | pending | A.1 |
 | A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | pending | A.2 |
 | A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | pending | A.2 |
@@ -221,32 +221,40 @@ az group show -n kaunitz-dev-rg --query "{name:name,location:location,tags:tags}
 
 ---
 
-## Phase A.1 — Stand up Azure SQL Database (Free tier)
+## Phase A.1 — Stand up dev Azure SQL Database (serverless, auto-pause)  ✅ Done 2026-05-01
 
-**Goal.** A working Azure SQL DB instance reachable from the Pi over TCP 1433+TLS.
+**Provisioned values (suffix `rfk1`):**
+- SQL server: `kaunitz-dev-sql-uksouth-rfk1.database.windows.net`
+- DB: `kaunitz` (`GP_S_Gen5_2`, autoPauseDelay 60, maxSize 32 GB, status Online)
+- Key Vault: `kaunitz-dev-kv-rfk1` (vault URI `https://kaunitz-dev-kv-rfk1.vault.azure.net/`); secret `sql-admin-password` set
+- SQL admin: `kaunitzadmin`; password in Key Vault + Bitwarden entry `Azure SQL — kaunitz dev DB`
+- Firewall: `AllowAzureServices` (0.0.0.0) + `AllowWSL` (80.1.254.176). No Pi rule.
+
+**Goal.** A working Azure SQL DB instance in `kaunitz-dev-rg`, reachable from **WSL only** over TCP 1433+TLS, on serverless `GP_S_Gen5_2` with 60-min auto-pause for cost control. Pi is NOT given access in this phase — that happens in A.10 against `kaunitz-prod-rg`'s SQL server.
 
 **Tasks.**
 1. `az sql server create -g kaunitz-dev-rg -n kaunitz-dev-sql-uksouth-<random> -l uksouth --admin-user kaunitzadmin --admin-password <generated, store in Bitwarden>`.
-2. `az sql db create -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -n kaunitz --tier GeneralPurpose --family Gen5 --capacity 2 --compute-model Serverless --auto-pause-delay 60 --backup-storage-redundancy Local` (or `--use-free-limit` if the free-tier flag is available in current az CLI; check `az sql db create --help`).
-3. Firewall: `az sql server firewall-rule create` to allow (a) Pi's public IP, (b) WSL's public IP, (c) Azure services (`0.0.0.0` rule with name `AllowAzureServices`).
-4. On Pi: install ODBC driver (`sudo apt install -y unixodbc-dev` + Microsoft repo for `msodbcsql18`).
-5. Create `kaunitz-dev-rg`-scoped Azure Key Vault `kaunitz-dev-kv-<random>`; store SQL admin password as secret `sql-admin-password`. (Phase A.4 will pull from Key Vault into Pi env.)
+2. `az sql db create -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -n kaunitz --tier GeneralPurpose --family Gen5 --capacity 2 --compute-model Serverless --auto-pause-delay 60 --backup-storage-redundancy Local`. Do **not** use `--use-free-limit` — that one-per-subscription free offer is reserved for `kaunitz-prod-rg` (Phase A.10).
+3. Firewall: `az sql server firewall-rule create` to allow (a) WSL's public IP, (b) Azure services (`0.0.0.0` rule with name `AllowAzureServices`). **Pi's IP is NOT added in this phase** (Pi has no business connecting to dev DB).
+4. Verify ODBC Driver 18 for SQL Server is installed on WSL (`python3 -c "import pyodbc; print(pyodbc.drivers())"` includes `ODBC Driver 18 for SQL Server`). If missing, install Microsoft repo + `msodbcsql18` per the [official docs](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server).
+5. Create `kaunitz-dev-rg`-scoped Azure Key Vault `kaunitz-dev-kv-<random>`; store SQL admin password as secret `sql-admin-password`. (Phase A.4 will pull from Key Vault into WSL env at scan-time.)
 
 **Acceptance.**
-- [ ] From Pi: `python3 -c "import pyodbc; conn = pyodbc.connect(<conn_str>); print(conn.execute('SELECT 1').fetchone())"` returns `(1,)`.
-- [ ] Key Vault secret `sql-admin-password` exists and is fetchable via `az keyvault secret show`.
-- [ ] Bitwarden has a new entry `Azure SQL — kaunitz DB` with admin user/password/connection string.
+- [x] From WSL: `pyodbc` SELECT 1 returns `(1,)` against `kaunitz-dev-sql-uksouth-rfk1`.
+- [x] Key Vault secret `sql-admin-password` exists and is fetchable via `az keyvault secret show` (verified by KV-roundtrip vs local copy).
+- [ ] Bitwarden has a new entry `Azure SQL — kaunitz dev DB` (user action — password displayed once during A.1).
+- [x] Firewall rule list = `AllowAzureServices` + `AllowWSL` only; no Pi IP rule.
 
 **Reviewer focus.**
 - Server name must include random suffix (DNS-globally-unique requirement).
-- Firewall rules — confirm Pi IP rule is present and not overly permissive (no `0.0.0.0–255.255.255.255` for client IPs).
-- Free tier confirmation: `az sql db show ... --query "currentSku"` should reflect free-tier pricing or auto-paused serverless.
+- Firewall rules — confirm WSL IP rule is present and not overly permissive (no `0.0.0.0–255.255.255.255` for client IPs). Confirm no Pi IP rule.
+- Confirm serverless/auto-pause: `az sql db show ... --query "currentSku"` shows `GP_S_Gen5` and `--query "autoPauseDelay"` shows `60`.
 
 **Verification commands.**
 ```bash
-az sql db show -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -n kaunitz --query "{name:name, status:status, sku:currentSku}" -o json
+az sql db show -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -n kaunitz --query "{name:name, status:status, sku:currentSku, autoPauseDelay:autoPauseDelay}" -o json
 az sql server firewall-rule list -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -o table
-ssh robert@192.168.0.28 'python3 -c "import pyodbc; print(pyodbc.drivers())"'  # expect msodbcsql18 in list
+python3 -c "import pyodbc; print(pyodbc.drivers())"  # expect msodbcsql18 in list (on WSL)
 ```
 
 ---
