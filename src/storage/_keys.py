@@ -16,13 +16,19 @@ _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "kaunitz.bets:v1")
 # CSV `sport` label → canonical Odds-API `sport_key`. Tennis labels are
 # dynamic and fall through unchanged (stored as-is in fixtures.sport_key).
 LABEL_TO_KEY: dict[str, str] = {
-    "EPL":          "soccer_epl",
-    "Bundesliga":   "soccer_germany_bundesliga",
-    "Serie A":      "soccer_italy_serie_a",
-    "Championship": "soccer_efl_champ",
-    "Ligue 1":      "soccer_france_ligue_one",
-    "Bundesliga 2": "soccer_germany_bundesliga2",
-    "NBA":          "basketball_nba",
+    "EPL":           "soccer_epl",
+    "Bundesliga":    "soccer_germany_bundesliga",
+    "Serie A":       "soccer_italy_serie_a",
+    "Championship":  "soccer_efl_champ",
+    "Ligue 1":       "soccer_france_ligue_one",
+    "Bundesliga 2":  "soccer_germany_bundesliga2",
+    "NBA":           "basketball_nba",
+    # M.1 candidate leagues (added 2026-05)
+    "La Liga":       "soccer_spain_la_liga",
+    "La Liga 2":     "soccer_spain_segunda_division",
+    "Eredivisie":    "soccer_netherlands_eredivisie",
+    "Primeira Liga": "soccer_portugal_primeira_liga",
+    "Ligue 2":       "soccer_france_ligue_two",
 }
 
 # Constant book name written into closing_lines rows. Closing lines are

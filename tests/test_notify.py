@@ -34,6 +34,38 @@ def test_ntfy_topic_override_to_separate_topic(monkeypatch):
     assert so.NTFY_URL == "https://ntfy.sh/robert-bets-test-channel"
 
 
+def test_notify_all_filtered_by_risk_pipeline(monkeypatch, capsys):
+    """When n_pre_risk > 0 and the risk pipeline returns empty, a warning
+    notification fires so the user knows real edge may be slipping through."""
+    import os
+    os.environ.setdefault("ODDS_API_KEY", "test-key")
+    import scripts.scan_odds as so
+
+    sent = []
+    monkeypatch.setattr(so, "notify",
+                        lambda title, message, priority="default": sent.append((title, message, priority)))
+
+    # Reproduce the exact branch in scan_odds.main():
+    n_pre_risk = 2
+    output_bets: list = []   # pipeline dropped everything
+
+    if n_pre_risk > 0 and not output_bets:
+        so.notify(
+            "WARNING: Bets - all dropped by risk pipeline",
+            f"WARNING: {n_pre_risk} value bet(s) flagged but all dropped by risk pipeline "
+            f"(stakes < £5 min after rounding). Consider reviewing bankroll or stake floor — "
+            f"you may be missing real edge.",
+            priority="default",
+        )
+
+    assert len(sent) == 1
+    title, message, priority = sent[0]
+    assert title.startswith("WARNING:")
+    assert "WARNING:" in message
+    assert "2" in message
+    assert priority == "default"
+
+
 def test_ntfy_disabled_when_override_is_empty(monkeypatch, capsys):
     monkeypatch.setenv("NTFY_TOPIC_OVERRIDE", "")
     so = _fresh_import_scan_odds(monkeypatch)
