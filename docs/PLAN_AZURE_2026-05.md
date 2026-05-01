@@ -127,7 +127,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.0 | Provision Azure account + dev resource group | dev | no | ✅ Done 2026-05-01 | — |
 | A.1 | Stand up dev Azure SQL Database (serverless, auto-pause) | dev | no | ✅ Done 2026-05-01 | A.0 |
 | A.2 | Schema DDL + idempotent migrations runner | dev | no | ✅ Done 2026-05-01 | A.1 |
-| A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | pending | A.2 |
+| A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | ✅ Done 2026-05-01 | A.2 |
 | A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | pending | A.2 |
 | A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | pending | A.2, A.4 |
 | A.6 | Provision dev App Service + deploy `app.py` | dev | no | pending | A.5 |
@@ -296,7 +296,9 @@ pytest -q tests/test_schema.py
 
 ---
 
-## Phase A.3 — CSV → DB importer (one-shot, idempotent) — WSL CSVs only
+## Phase A.3 — CSV → DB importer (one-shot, idempotent) — WSL CSVs only  ✅ Done 2026-05-01
+
+**First-run results against `kaunitz-dev-sql-uksouth-rfk1`:** fixtures=90, books=17, strategies=15, bets=0 (production CSV header-only), paper_bets=543, closing_lines=0, drift=0 (CSVs absent — appear in A.4 onward). Per-variant counts match `wc -l logs/paper/*.csv` minus headers exactly. Second run reports 0 inserts across all tables.
 
 **Goal.** Backfill historical data from **WSL's** `logs/*.csv` and `logs/paper/*.csv` into the new DB. **Pi's CSVs are NOT imported** (Pi onboarding is Phase A.10, deferred).
 
@@ -311,9 +313,9 @@ pytest -q tests/test_schema.py
 4. Print row counts at end: `bets: X imported, 0 skipped (already present)`.
 
 **Acceptance.**
-- [ ] `wc -l logs/bets.csv` ≈ `SELECT COUNT(*) FROM bets` (off-by-1 for header).
-- [ ] Per-variant: `wc -l logs/paper/<v>.csv` ≈ `SELECT COUNT(*) FROM paper_bets WHERE strategy_id = (SELECT id FROM strategies WHERE name = '<v>')`.
-- [ ] Re-running the importer produces zero new rows.
+- [x] `wc -l logs/bets.csv` ≈ `SELECT COUNT(*) FROM bets` (off-by-1 for header). (CSV is header-only → 0 imported, 0 in DB.)
+- [x] Per-variant: `wc -l logs/paper/<v>.csv` ≈ `SELECT COUNT(*) FROM paper_bets WHERE strategy_id = (SELECT id FROM strategies WHERE name = '<v>')`. Verified for all 15 variants.
+- [x] Re-running the importer produces zero new rows.
 
 **Reviewer focus.**
 - Deterministic UUIDs: same input row → same UUID across runs (use `uuid.uuid5(NAMESPACE, key)`).
