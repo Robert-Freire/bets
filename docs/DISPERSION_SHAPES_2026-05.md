@@ -119,9 +119,69 @@ These are the books the Kaunitz strategy already correctly identifies as edge so
 
 ---
 
-## Recommended `book_weights.by_league` seed (for M.6)
+## Cross-validation: Brier-against-results (gold standard)
 
-Based on this single-scan analysis. **Subject to revision after cluster persistence is verified across multiple scans.**
+`scripts/eval_books_vs_results.py` — uses football-data.co.uk per-book pre-match h2h odds + actual FTR outcomes from `data/raw/<CODE>_2526.csv` (current season). For each (book, league), Shin-devigs the odds and computes mean Brier score against the realized 3-class outcome. Lower Brier = sharper. Free (data already on disk).
+
+### Results (2025-26 season, ~280-540 matches per league)
+
+| League | Top-3 by Brier (vs results) — gold standard | Top-3 by centre rate (single scan) | Match? |
+|---|---|---|---|
+| EPL | **pinnacle**, pinnacle_close, bwin | betclic_fr, matchbook, everygame | ✗ |
+| Bundesliga | **pinnacle**, pinnacle_close, bet365 | unibet_uk, onexbet, marathonbet | ✗ |
+| Serie A | **betfair_ex**, max_close, bet365 | codere_it, unibet_fr, betclic_fr | ✗ |
+| Championship | **bwin**, max_close, bet365 | pinnacle, onexbet, marathonbet | ~ |
+| Ligue 1 | **pinnacle**, pinnacle_close, bet365 | marathonbet, everygame, smarkets | ✗ |
+| Bundesliga 2 | **pinnacle**, pinnacle_close, avg_close | unibet_uk, onexbet, marathonbet | ✗ |
+| La Liga | **pinnacle**, pinnacle_close, avg_close | pinnacle, marathonbet, matchbook | ✓ partial |
+| Eredivisie | **pinnacle**, pinnacle_close, bwin | codere_it, unibet_uk, paddypower | ✗ |
+| Primeira | max_close, avg_close, **pinnacle_close** | coolbet, marathonbet, onexbet | ✗ |
+
+### Cross-league verdicts (Brier-validated)
+
+| Book | Top-3 finishes (Brier) | Top-3 finishes (centre rate) | Verdict |
+|---|---|---|---|
+| **pinnacle** | 6 leagues | 1 league (La Liga) | **Genuinely sharp universally**; centre-rate hugely undercounts. |
+| **pinnacle_close** | 7 leagues | n/a | Gold-standard reference; closes near truth. |
+| **bet365** | 3 leagues | 0 | Broadly sharp on info content; currently weighted 1.0. |
+| **bwin** | 3 leagues | 0 | Solid mid-tier sharp on info content. |
+| **betfair_ex** | 1 league (Serie A) | 0 | Liquidity-dependent; not a universal sharp. |
+
+### What this means
+
+The **centre-rate metric mislabels real sharps when soft UK books cluster together**. Pinnacle's prices on EPL, Bundesliga, Serie A, Ligue 1 sit *outside* the median because the median is biased by the soft consensus — but Brier shows Pinnacle is the most accurate forecaster on those exact leagues. The "centre = sharp" proxy is *backwards* on densely-priced markets.
+
+**Brier-against-results should be the primary sharpness metric going forward.** Centre rate is a useful secondary signal for books FDCO doesn't cover (Marathonbet, Smarkets, Matchbook, Codere, Unibet variants, Onexbet) — but those rankings should be treated as hypotheses requiring weekly validation, not facts.
+
+### Limitations of the Brier eval
+
+- FDCO covers ~7 books out of the Odds API's 36. Niche European specialists (Marathonbet, Smarkets, Matchbook, Codere, Unibet variants, Onexbet) are not in FDCO and cannot be validated this way.
+- For those books, the only path to gold-standard validation is **post-CLV via `backfill_clv_from_fdco.py`** — i.e. compute each book's deviation from Pinnacle's closing line on bets we actually flagged. Needs ≥50 bets per book per league. Currently we have 0 settled bets with `clv_pct`.
+- 2025-26 season runs ~280-540 matches per league — meaningful sample. Differences of 0.02+ in mean Brier are robust given n≈300.
+
+---
+
+## Recommended `book_weights.by_league` seed (for M.6) — REVISED
+
+Reflects Brier-validated ranking where available; falls back to centre-rate hypothesis for non-FDCO books.
+
+**Tier 1 (Brier-validated sharp, ≥3 top-3 finishes):**
+- `pinnacle`: 3.0 baseline (was already 3.0 in J_sharp_weighted ✓)
+- `bet365`: 2.0 baseline (was 1.0 — **promote**)
+- `bwin`: 1.5 baseline (was 1.0 — **promote**)
+
+**Tier 2 (centre-rate hypothesis, not FDCO-validated):**
+- `marathonbet`: 1.5 baseline (was 1.0; centre-rate says sharp on 8/10 leagues but unvalidated)
+- `smarkets`: 1.5 baseline (was 2.0 — **demote pending validation**)
+- `matchbook`: 1.5 baseline
+- `betfair_ex_uk`: 1.5 baseline (was 2.5 — **demote**, only Serie A is Brier-validated)
+
+**Other books:** 1.0 default.
+
+**Per-league overrides** still warranted from the centre-rate analysis where Brier is silent:
+- Italian leagues: `codere_it` and `unibet_fr` show extreme centre rates (100% / 91-96%) — likely true info specialists, but FDCO doesn't cover them. Worth elevating to 2.0 in those leagues' configs as a weak-evidence bet.
+
+This is a **revision** of the seed values in the prior section. Use these.
 
 ```json
 {

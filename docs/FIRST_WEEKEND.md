@@ -335,21 +335,34 @@ Ran `scripts/analyse_dispersion.py` against blobs for all 10 currently-archived 
 
 **Methodology limitation flagged.** "Sharp = high centre rate" is a proxy that can mislabel a real sharp as soft when many UK books cluster together. M.7 should add Pinnacle-anchored deviation (and eventually closing-line deviation, post-CLV) as a more robust metric. See `docs/DISPERSION_SHAPES_2026-05.md` § "Methodology limitation".
 
-### D.8 — Weekly post-mortem dispersion analysis (standing item)
+### D.8 — Weekly post-mortem book-sharpness analysis (standing item, two scripts)
 
-Added 2026-05-01 as a recurring Monday post-mortem step. **Zero API cost** — runs entirely against archived blobs.
+Added 2026-05-01 as a recurring Monday post-mortem step. **Zero API cost** — runs entirely against archived blobs and on-disk FDCO CSVs.
 
-**Standing procedure** (full script in `docs/DISPERSION_SHAPES_2026-05.md` § "Weekly post-mortem cadence"):
+**Two-step standing procedure:**
 
-1. Pull each scanned league's most recent weekend blob from Azure Blob `raw-api-snapshots`.
-2. Run `scripts/analyse_dispersion.py --blob <path>` per league.
-3. Compare top sharps + cluster amplitude against prior week's run.
-4. Flag drift: book dropping out of top sharps, amplitude shift > 0.005, new book appearing at >80% centre.
-5. If drift is structural (persists ≥ 2 weeks), update `book_weights` in `config.json` / `config.dev.json`.
+**Step 1 — Dispersion shape analysis (`scripts/analyse_dispersion.py`).** Centre rate per book per league, from archived Odds API blobs.
+- Catches all 36 books from the Odds API (incl. niche specialists FDCO doesn't cover).
+- Caveat: centre-rate is a proxy that can mislabel sharps when soft UK books cluster.
 
-**Outcome over time.** By 4–6 weekly post-mortems we have empirical evidence on which books are *persistently* sharp per league — validating M.6 weights against fresh data, not a one-shot guess. Memory: `project_weekly_postmortem_cadence.md`.
+**Step 2 — Book Brier vs results (`scripts/eval_books_vs_results.py`).** Gold-standard sharpness from realized outcomes, on FDCO data.
+- Catches only ~7 books FDCO covers (Bet365, Bwin, Pinnacle, BetVictor, William Hill, Interwetten, Betfair Exchange).
+- This is the truth signal — use it to **cross-validate Step 1**. If a book Step 1 flagged as sharp is in FDCO and shows poor Brier, distrust Step 1's verdict for that book. If FDCO doesn't cover the book, treat Step 1 as hypothesis only.
 
-**Don't run with `--fetch`.** That'd burn 22cr/week on data we already have archived. The whole point is to avoid that.
+**What to look for week-on-week:**
+- Brier rankings shift between consecutive weeks (small samples are noisy; trust 4-week trends over single weeks).
+- Centre-rate sharps that fail Brier validation → demote in `book_weights`.
+- Centre-rate sharps NOT in FDCO → flag as "unvalidated, watch with each weekly run."
+- Soft books drifting toward centre → could be tightening their lines.
+
+**If drift persists ≥ 2 weeks**, update `book_weights` in `config.json` / `config.dev.json`. Memory: `project_weekly_postmortem_cadence.md`.
+
+**Don't run with `--fetch`.** That'd burn 22cr/week on data we already have. The whole point is to avoid that.
+
+**Initial 2025-26 Brier findings** (already captured in `docs/DISPERSION_SHAPES_2026-05.md`):
+- Pinnacle is the universal sharp by Brier (top-2 on 6 leagues), validating canonical wisdom and **contradicting** the centre-rate analysis on EPL/Bundesliga/Serie A/Ligue 1.
+- Bet365 and Bwin are broadly sharp (top-3 on 3 leagues each); currently weighted 1.0 in `J_sharp_weighted` — should be 2.0 / 1.5.
+- Centre-rate is unreliable for ranking sharpness on densely-priced markets. Demoted to secondary signal for FDCO-covered books; remains primary for books FDCO doesn't cover (with weak-evidence label).
 
 ---
 
