@@ -271,6 +271,55 @@ def get_active_tennis_sports(max_tournaments: int = 99) -> list[tuple[str, str, 
     return tennis[:max_tournaments]
 
 
+def _get_canary_league() -> str:
+    """Resolve the football league fetched first inside the per-league loop.
+    If it returns 0 events we treat that as an Odds API empty-payload window and
+    skip the rest of the football sweep instead of paying for ~5 more empty calls.
+    Order: CANARY_LEAGUE env var → config.json → default 'soccer_epl'."""
+    if "CANARY_LEAGUE" in os.environ:
+        return os.environ["CANARY_LEAGUE"]
+    config_path = Path(__file__).resolve().parent.parent / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            if "canary_league" in cfg:
+                return cfg["canary_league"]
+        except Exception:
+            pass
+    return "soccer_epl"
+
+
+def _resolve_canary(configured: str, football: list[tuple[str, str, int]]) -> str:
+    """If the configured canary league isn't in the football list this scan,
+    fall back to the first football league so protection still fires after a
+    typo, an NBA/tennis key by mistake, or an off-season league."""
+    football_keys = {s[0] for s in football}
+    if football and configured not in football_keys:
+        fallback = football[0][0]
+        print(f"[canary] WARN — configured {configured!r} not in football "
+              f"list {sorted(football_keys)}; falling back to {fallback}.")
+        return fallback
+    return configured
+
+
+def _health_check_sports() -> set[str]:
+    """Free /sports/?all=false call. Logs which football leagues the API reports
+    as active, so we can correlate /sports/ status with empty-payload incidents
+    over time and decide whether the free endpoint can replace the in-loop check."""
+    try:
+        data, _ = api_get("/sports/", {"all": "false"})
+    except Exception as e:
+        print(f"[health] /sports/ call failed: {e}")
+        return set()
+    active = {s["key"] for s in data if s.get("active")}
+    football_keys = SPORT_GROUPS["football"]
+    active_football = sorted(football_keys & active)
+    inactive_football = sorted(football_keys - active)
+    print(f"[health] /sports/ active football: {len(active_football)}/{len(football_keys)}"
+          + (f"  inactive: {inactive_football}" if inactive_football else ""))
+    return active
+
+
 def fetch_odds(sport_key: str) -> tuple[list, str]:
     # btts is not available on the free tier; request h2h+totals and attempt btts separately.
     data, remaining = api_get(
@@ -858,12 +907,30 @@ def main():
     else:
         print("[scan] CSV-only mode (BETS_DB_WRITE not set)")
 
+    # Pre-flight health check (free, 0 credits): logs which football leagues
+    # /sports/ reports active. Evidence-only — does not gate the scan.
+    _health_check_sports()
+
+    # Reorder: put the canary league first among football so that if its
+    # full-fetch returns 0 events (Odds API empty-payload window) we can abort
+    # the rest of football before paying for ~5 more empty calls. NBA/tennis
+    # are unaffected.
+    football = [s for s in all_sports if s[0].startswith("soccer_")]
+    non_football = [s for s in all_sports if not s[0].startswith("soccer_")]
+    canary_league = _resolve_canary(_get_canary_league(), football)
+    football.sort(key=lambda s: 0 if s[0] == canary_league else 1)
+    all_sports = football + non_football
+
     quota_remaining = "?"
     all_bets: list[dict] = []
     sport_summary: list[str] = []
     scan_date = now[:10]  # "YYYY-MM-DD"
+    skip_remaining_football = False
 
     for sport_key, label, _ in all_sports:
+        if skip_remaining_football and sport_key.startswith("soccer_"):
+            print(f"  {label:<28} skipped (canary {canary_league} returned 0 events)")
+            continue
         try:
             events, quota_remaining = fetch_odds(sport_key)
             bets = find_value_bets(events, sport_key)
@@ -874,6 +941,23 @@ def main():
                   f"{flag}")
             if bets:
                 sport_summary.append(f"{label}: {len(bets)} bet(s)")
+
+            # Canary trip: if the configured football league returned 0 events,
+            # treat it as an Odds API empty-payload window, alert, and skip the
+            # rest of football. NBA/tennis still proceed below.
+            if sport_key == canary_league and len(events) == 0:
+                remaining_football = sum(
+                    1 for s in all_sports
+                    if s[0].startswith("soccer_") and s[0] != canary_league
+                )
+                if remaining_football:
+                    print(f"[canary] FAIL — {canary_league} returned 0 events. "
+                          f"Skipping {remaining_football} remaining football league(s).")
+                    notify("Bets - Odds API canary FAIL",
+                           f"{canary_league} returned 0 events. "
+                           f"{remaining_football} football leagues skipped this run.",
+                           priority="high")
+                    skip_remaining_football = True
 
             # Paper strategies — reuse same events, no extra API calls
             if _STRATEGIES:

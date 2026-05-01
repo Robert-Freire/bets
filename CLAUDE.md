@@ -27,14 +27,15 @@ python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
 
 ## How the scanner works
 
-1. Fetches live odds from The Odds API (`uk,eu` regions, ~36 bookmakers per fixture)
-2. **Shin-devigs** each book's implied probabilities before averaging (Phase 1)
-3. Consensus = mean of Shin-fair probs across all books; Pinnacle's devigged prob logged as anchor
-4. Applies **Phase 4 filters**: rejects if cross-book stdev of fair probs > `MAX_DISPERSION=0.04`; rejects if the flagged book's z-score vs the rest exceeds `OUTLIER_Z_THRESHOLD=2.5`
-5. Flags bets where a **UK-licensed** bookmaker's devigged prob is ≥3% below consensus (Kaunitz), or ≥2% with CatBoost model agreement
-6. Sizes bets with half-Kelly, then applies **risk pipeline** (Phase 2): £5 rounding, per-fixture 5% cap, 15% portfolio cap, drawdown brake
-7. Sends push notifications via ntfy.sh (topic: `robert-epl-bets-m4x9k`), deduped via `logs/notified.json` (12h per bet key)
-8. Appends to `logs/bets.csv` (deduped by `(kickoff, home, away, side, book)` per scan date); includes `dispersion` and `outlier_z` columns
+1. **Pre-flight + canary** (no separate paid call — uses the data we'd fetch anyway): free `/sports/?all=false` health log; then the configured football league (`canary_league` in `config.json`, env override `CANARY_LEAGUE`, default `soccer_epl`) is fetched **first** in the per-league loop. If it returns 0 events, the remaining football leagues are skipped (saves ~20 credits) and a high-priority ntfy alert fires; NBA/tennis still run.
+2. Fetches live odds from The Odds API (`uk,eu` regions, ~36 bookmakers per fixture)
+3. **Shin-devigs** each book's implied probabilities before averaging (Phase 1)
+4. Consensus = mean of Shin-fair probs across all books; Pinnacle's devigged prob logged as anchor
+5. Applies **Phase 4 filters**: rejects if cross-book stdev of fair probs > `MAX_DISPERSION=0.04`; rejects if the flagged book's z-score vs the rest exceeds `OUTLIER_Z_THRESHOLD=2.5`
+6. Flags bets where a **UK-licensed** bookmaker's devigged prob is ≥3% below consensus (Kaunitz), or ≥2% with CatBoost model agreement
+7. Sizes bets with half-Kelly, then applies **risk pipeline** (Phase 2): £5 rounding, per-fixture 5% cap, 15% portfolio cap, drawdown brake
+8. Sends push notifications via ntfy.sh (topic: `robert-epl-bets-m4x9k`), deduped via `logs/notified.json` (12h per bet key)
+9. Appends to `logs/bets.csv` (deduped by `(kickoff, home, away, side, book)` per scan date); includes `dispersion` and `outlier_z` columns
 
 ## Sports scanned
 
