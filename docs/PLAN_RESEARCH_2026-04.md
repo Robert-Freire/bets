@@ -135,10 +135,11 @@ grep -E '/(home|mnt)/' scripts/*.py src/**/*.py | grep -v test_  # should be emp
 | R.5.5b | Add 16 new leagues from football-data.co.uk to backtest data | Thu–Fri (this week) | done — 91k matches / 22 leagues; see docs/FDCO_INGEST_NOTES.md |
 | R.5.5c | Walk-forward run + per-fold report → `docs/BACKTEST.md` | Mon PM – Tue | pending |
 | R.6 | Graduate winning variants AND winning leagues → scanner defaults | Wed | conditional on R.5.5c |
-| R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | pending |
-| R.8 | Draw-bias variant (K) — needs xG runtime hookup | Thu–Fri | pending |
+| R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | Wed | done (commit a980efc) |
+| R.8 | Draw-bias variant (K) — needs xG runtime hookup | Thu–Fri | done (`scripts/refresh_xg.py`; weekly Mon 06:00 cron; variant K shipped) |
 | R.9 | Asian Handicap feasibility probe (The Odds API) | Thu–Fri | ✅ done (2026-04-30, `docs/AH_FEASIBILITY.md`) |
 | R.10 | AH probability conversion module (planning only) | Following week | **blocked on CLV confirmation** (gate in §R.10 below) |
+| R.11 | Eval-window provenance: `code_sha` + `strategy_config_hash` columns; `compare_strategies` filters to current config window | Now (pre-weekend) | done (2026-05-01) |
 
 **Dependency graph:**
 
@@ -1065,6 +1066,8 @@ pytest -q
 
 ## Phase R.7 — bets.csv schema: provenance columns (~1h)
 
+**Status: ✅ done** — landed in commit `a980efc` (2026-04). Both columns populated on new scans; backfill script idempotent on existing rows.
+
 **Goal.** Add `devig_method` and `weight_scheme` columns to `logs/bets.csv` so future CLV analyses can attribute results by method.
 
 **Inputs.** R.6 done (or skipped — independent).
@@ -1123,6 +1126,8 @@ pytest -q
 
 ## Phase R.8 — Draw-bias variant K (~2–3h)
 
+**Status: ✅ done** — `scripts/refresh_xg.py` writes `logs/team_xg.json` (last 5 matches/team from Understat); weekly Mon 06:00 cron installed; `K_draw_bias` variant shipped in `src/betting/strategies.py` with `draw_odds_band=(3.20, 3.60)` + low-xG gate.
+
 **Goal.** Add `K_draw_bias` variant restricting draw flags to fixtures meeting Predictology's filter (low-xG matchups, draw odds ∈ [3.20, 3.60]).
 
 **Inputs.** R.1 done. xG data accessible at scan time.
@@ -1171,6 +1176,74 @@ pytest -q
 **Acceptance.**
 - [ ] `docs/AH_FEASIBILITY.md` exists, all sections answered (yes/no, cost, sketch, effort).
 - [ ] No code changes in this phase.
+
+---
+
+## Phase R.11 — Eval-window provenance (~1h)
+
+**Goal.** Add per-row provenance to paper CSVs so strategy evaluation can be filtered to "current config window" and code-change noise is excluded from CLV stats. Closes the structural gap surfaced during the 2026-05-01 evaluation review.
+
+**Inputs.** Two sources of row-to-row variance currently pollute paper CSVs:
+1. Code/strategy changes (noise) — what we want to filter out.
+2. Market state changes (signal) — what we actually want to measure.
+
+R.7 added `devig_method` + `weight_scheme` per row — partial provenance only (two config dimensions). Variant *thresholds* (edge cutoff, dispersion cap, min books, etc.) are NOT versioned per row, so tweaking `MAX_DISPERSION` in `B_strict` makes every prior row falsely look like it came from the new threshold. `compare_strategies.py` pools every row regardless of generation time.
+
+**Tasks.**
+1. `src/betting/strategies.py`:
+   - Add `StrategyConfig.config_hash() -> str`: deterministic 12-char SHA-256 of all behavior fields (every field except `name`/`label`/`description`). Uses `json.dumps(asdict(self), sort_keys=True, default=str)` for stable serialization.
+2. `scripts/scan_odds.py`:
+   - Add `_git_sha() -> str` helper (cached for process lifetime; graceful empty fallback if git unavailable).
+   - Add `code_sha` and `strategy_config_hash` to `_PAPER_FIELDNAMES` (between `weight_scheme` and `stake`).
+   - Populate both columns in `_append_paper_csv` row-build.
+   - Add `_ensure_paper_schema(log_file)`: detects header mismatch on existing CSVs; rewrites with new header + null-padded existing rows. Idempotent. Logs `[paper:schema] migrating ...` on first call.
+3. `scripts/compare_strategies.py`:
+   - Add `_filter_to_current_window(rows)`: groups by `strategy_config_hash`, keeps only rows matching the most-recent hash (by `scanned_at`). Empty hash (pre-R.11 rows) collapse into one "pre-R.11" window.
+   - Add `--all-history` CLI flag (default off): when set, skip the filter.
+   - Always print "X bets in current config window, Y total in CSV" per variant in the report header — transparency without forcing a flag for the common-case eval.
+4. Tests:
+   - `tests/test_strategies.py`: same config → same hash; tweaking any single field → different hash; `name`/`label`/`description` excluded from hash.
+   - `tests/test_compare_strategies.py`: filter picks most recent hash; mixed pre-R.11 + post-R.11 rows handled; `--all-history` includes everything.
+
+**Acceptance.**
+- [ ] Two consecutive scans without code/config change produce rows with identical `(code_sha, strategy_config_hash)`.
+- [ ] Tweaking any `StrategyConfig` field (e.g., `B_strict.min_edge`) changes only that variant's hash; others unchanged.
+- [ ] `compare_strategies.py` default output reports `current window: X bets, all history: Y bets` per variant.
+- [ ] `compare_strategies.py --all-history` shows pooled stats (matches pre-R.11 behavior).
+- [ ] Existing paper CSVs auto-migrate to new schema on next scan; old rows retain empty `code_sha`/`strategy_config_hash`.
+- [ ] Full pytest suite passes (no regressions).
+
+**Reviewer focus.**
+- **Hash determinism.** `json.dumps(..., sort_keys=True)` guarantees key order; verify `default=str` handles tuple `markets` field consistently across Python versions. Hash is short SHA (12 char) — collision-safe within ~16 variants.
+- **Schema migration idempotency.** `_ensure_paper_schema` running twice on the same file must produce byte-identical output. Lock-file pattern (`fcntl.LOCK_EX`) needed because cron may overlap.
+- **Empty-hash handling.** Pre-R.11 rows have `""` hash. Filter must NOT crash on them; should treat them as a separate epoch from any non-empty hash.
+- **Production scanner unaffected.** `bets.csv` (production) write path is not touched by this phase — only paper CSVs. R.7's provenance columns on `bets.csv` already cover production needs.
+
+**Verification.**
+```bash
+# 1. Hash determinism
+pytest -q tests/test_strategies.py::test_config_hash_deterministic
+pytest -q tests/test_strategies.py::test_config_hash_excludes_identity_fields
+
+# 2. End-to-end smoke (uses dev key, doesn't burn prod quota)
+export $(cat .env.dev) && python3 scripts/scan_odds.py --sports football 2>&1 | tail -5
+head -1 logs/paper/A_production.csv | tr ',' '\n' | grep -E 'code_sha|strategy_config_hash'  # both present
+
+# 3. Two scans → identical hash on rows with same (kickoff, home, away, side, book)
+export $(cat .env.dev) && python3 scripts/scan_odds.py --sports football
+export $(cat .env.dev) && python3 scripts/scan_odds.py --sports football
+awk -F, 'NR>1 {print $(NF-3), $(NF-4)}' logs/paper/A_production.csv | sort -u | wc -l
+# expect: small number (one unique pair per code/config window)
+
+# 4. Comparison filter
+python3 scripts/compare_strategies.py 2>&1 | head -20  # current-window default
+python3 scripts/compare_strategies.py --all-history 2>&1 | head -20  # all-history flag
+
+# 5. Full test suite
+pytest -q
+```
+
+**Note for this weekend's eval.** Pre-R.11 paper rows (everything in WSL `logs/paper/*.csv`) will have empty `strategy_config_hash` after the schema migration. They form their own "pre-R.11" window. The `current window: X / all history: Y` line in the comparison report makes this transparent so test-data inclusion is explicit, not silent.
 
 ---
 
@@ -1225,9 +1298,9 @@ If gate fails: AH won't rescue an unconfirmed edge; reallocate effort to restric
 - [x] **R.5.5b extra-leagues adoption merged** — 191 files, 91k matches / 22 leagues; existing 6 leagues unchanged; `docs/FDCO_INGEST_NOTES.md` written; loader encoding + odds-coercion fixes in `walk_forward.py`.
 - [ ] **R.5.5c walk-forward run + report merged** — `docs/BACKTEST.md` reports per-fold ROI + 95% CI for `raw` / `shin` / `power`.
 - [ ] At least one variant graduated (R.6) with explicit walk-forward evidence, OR explicit "no graduation this week" note citing CI breadth.
-- [ ] R.7 schema migration done (independent of graduation).
+- [x] R.7 schema migration done (independent of graduation; commit `a980efc`).
 - [x] R.9 AH feasibility note written (`docs/AH_FEASIBILITY.md`, 2026-04-30).
-- [ ] R.8 draw-bias variant in shadow if xG hookup landed; deferred to following week if not.
+- [x] R.8 draw-bias variant in shadow — `scripts/refresh_xg.py` + `K_draw_bias` shipped.
 - [ ] CLAUDE.md and README.md reflect any default changes.
 
 ---

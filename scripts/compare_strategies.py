@@ -8,6 +8,7 @@ Usage:
     python3 scripts/compare_strategies.py
 """
 
+import argparse
 import csv
 import math
 import statistics
@@ -43,6 +44,20 @@ def _read_csv(path: Path) -> list[dict]:
         return []
     with open(path, newline="") as f:
         return list(csv.DictReader(f))
+
+
+def _filter_to_current_window(rows: list[dict]) -> list[dict]:
+    """Keep only rows whose strategy_config_hash matches the most-recent hash in the file.
+    Rows without the column (pre-R.11) collapse into one 'pre-R.11' window with hash=''.
+    Returns input unchanged if no rows have any hash field at all (full pre-R.11 file)."""
+    if not rows:
+        return rows
+    hashes = {r.get("strategy_config_hash", "") for r in rows}
+    if hashes == {""}:
+        return rows  # entirely pre-R.11; nothing to filter
+    rows_sorted = sorted(rows, key=lambda r: r.get("scanned_at", ""))
+    current_hash = rows_sorted[-1].get("strategy_config_hash", "")
+    return [r for r in rows if r.get("strategy_config_hash", "") == current_hash]
 
 
 def _load_drift_index() -> dict[tuple, tuple[float, float]] | None:
@@ -311,14 +326,20 @@ def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     return pooled
 
 
-def build_report() -> str:
+def build_report(all_history: bool = False) -> str:
     entries: list[tuple[str, list[dict]]] = []
+    filter_summary: list[tuple[str, int, int]] = []  # (variant, current_n, total_n) when they differ
 
     # Paper strategy CSVs (A_production is the canonical proxy for production)
     if PAPER_DIR.exists():
         for path in sorted(PAPER_DIR.glob("*.csv")):
             rows = _read_csv(path)
             if rows:
+                if not all_history:
+                    filtered = _filter_to_current_window(rows)
+                    if len(filtered) != len(rows):
+                        filter_summary.append((path.stem, len(filtered), len(rows)))
+                    rows = filtered
                 entries.append((path.stem, rows))
 
     # C.1: include configured variants with no CSV yet (0-bet rows)
@@ -351,6 +372,21 @@ def build_report() -> str:
         "Sorted by average CLV descending. Only rows with a Pinnacle close prob contribute to CLV stats.",
         "Run `python3 scripts/compare_strategies.py` to refresh.",
         "",
+        # R.11: eval-window filter transparency
+        ("> **Eval-window filter:** showing CURRENT config window per variant only "
+         "(rows whose `strategy_config_hash` matches the most recent scan). "
+         "Pass `--all-history` to include older config windows / pre-R.11 rows."
+         if not all_history else
+         "> **Eval-window filter:** showing ALL HISTORY (`--all-history`). "
+         "May mix rows generated under different strategy configs — interpret with care."),
+        "",
+    ]
+    if filter_summary and not all_history:
+        lines.append("> Variants with hidden older-window rows: " +
+                     ", ".join(f"`{v}` ({c}/{t})" for v, c, t in filter_summary) +
+                     " — format: `current/total`.")
+        lines.append("")
+    lines += [
         # C.9: sample-size warning
         "> **Sample size note.** Variants with `<10` CLV bets in this report are"
         " indicative only. Per `RESEARCH_NOTES_2026-04.md` §6, graduation requires"
@@ -514,7 +550,12 @@ def build_report() -> str:
 
 
 def main():
-    report = build_report()
+    parser = argparse.ArgumentParser(description="Strategy comparison report (CLV-based).")
+    parser.add_argument("--all-history", action="store_true",
+                        help="Include rows from ALL config windows (default: filter to current "
+                             "strategy_config_hash per variant — code-change pollution excluded).")
+    args = parser.parse_args()
+    report = build_report(all_history=args.all_history)
     print(report)
     OUT_DOC.parent.mkdir(exist_ok=True)
     OUT_DOC.write_text(report)
