@@ -18,7 +18,7 @@ export $(cat .env) && python3 scripts/closing_line.py
 # Open the dashboard (track bets, log results, view CLV)
 python3 app.py   # → http://localhost:5000
 
-# Public dev dashboard (Azure Container Apps; no auth yet — A.7 adds Google OIDC)
+# Public dev dashboard (Azure Container Apps; Google OIDC, allowlist robert.freire@gmail.com)
 # https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
 
 # Check for new sports worth adding (bi-weekly)
@@ -248,7 +248,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 6 | Storage migration: SQL Server Express + UUIDs (was: SQLite — superseded by Azure direction below) | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
-| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.6 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer + dashboard DB-first reads + public Container Apps dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` — pivoted from App Service due to 0 VM quota in Reply VSE). A.7–A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
+| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.7 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer + dashboard DB-first reads + public Container Apps dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` with Google OIDC + email allowlist `robert.freire@gmail.com` — pivoted from App Service due to 0 VM quota in Reply VSE). A.5.5/A.8/A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 | R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
 | R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`, `TimeSeriesSplit(5)` primitive) | ✅ Done |
