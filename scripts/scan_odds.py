@@ -7,9 +7,11 @@ Reads ODDS_API_KEY from environment. Run with:
 import argparse
 import csv
 import fcntl
+import functools
 import json
 import os
 import statistics
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -193,8 +195,10 @@ def _signal_is_positive(signal: str) -> bool:
         return signal == "agree"  # backward compat with old CSV rows
 
 
-NTFY_TOPIC = "robert-epl-bets-m4x9k"
-NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+# NTFY_TOPIC_OVERRIDE env var: set on WSL/dev cron to a different topic (separate
+# channel) or "" (empty = disable ntfy entirely). Default = production topic.
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC_OVERRIDE", "robert-epl-bets-m4x9k")
+NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}" if NTFY_TOPIC else ""
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 MIN_EDGE = 0.03        # Kaunitz-only threshold (no model required)
@@ -536,6 +540,9 @@ def format_bet_line(vb: dict) -> str:
 
 
 def notify(title: str, message: str, priority: str = "default"):
+    if not NTFY_TOPIC:
+        print(f"[ntfy] Disabled (NTFY_TOPIC_OVERRIDE empty): '{title}'")
+        return
     try:
         req = urllib.request.Request(
             NTFY_URL,
@@ -620,9 +627,47 @@ _PAPER_FIELDNAMES = [
     "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
     "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
     "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-    "devig_method", "weight_scheme",
+    "devig_method", "weight_scheme", "code_sha", "strategy_config_hash",
     "stake", "pinnacle_close_prob", "clv_pct",
 ]
+
+
+@functools.lru_cache(maxsize=1)
+def _git_sha() -> str:
+    """Short SHA of git HEAD at scan time. Cached for process lifetime.
+    Empty string if git unavailable — provenance degrades gracefully."""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(Path(__file__).resolve().parent.parent), "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).decode().strip()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return ""
+
+
+def _ensure_paper_schema(log_file: Path) -> None:
+    """Migrate an existing paper CSV to the current _PAPER_FIELDNAMES schema.
+    Idempotent — no-op if the header already matches. Pre-R.11 rows get empty
+    strings for code_sha / strategy_config_hash, forming a 'pre-R.11' window
+    that compare_strategies handles separately from current-config rows."""
+    if not log_file.exists():
+        return
+    expected = ",".join(_PAPER_FIELDNAMES)
+    with open(log_file, newline="") as f:
+        first = f.readline().strip()
+        if first == expected:
+            return
+        f.seek(0)
+        old_rows = list(csv.DictReader(f))
+    print(f"[paper:schema] migrating {log_file.name} → {len(_PAPER_FIELDNAMES)}-col schema (added: code_sha, strategy_config_hash)")
+    tmp = log_file.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        writer = csv.DictWriter(f, fieldnames=_PAPER_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for row in old_rows:
+            writer.writerow({k: row.get(k, "") for k in _PAPER_FIELDNAMES})
+    tmp.replace(log_file)
 
 _H2H_SIDE = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
 
@@ -653,6 +698,7 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
         return
     _PAPER_DIR.mkdir(exist_ok=True)
     log_file = _PAPER_DIR / f"{strategy_name}.csv"
+    _ensure_paper_schema(log_file)
 
     existing_keys: set = set()
     if log_file.exists():
@@ -704,6 +750,8 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "outlier_z": round(vb.get("outlier_z", 0.0), 3),
             "devig_method": _paper_provenance(strategy)[0] if strategy else "shin",
             "weight_scheme": _paper_provenance(strategy)[1] if strategy else "uniform",
+            "code_sha": _git_sha(),
+            "strategy_config_hash": strategy.config_hash() if strategy else "",
             # Per-bet Kelly stake — uses strategy's kelly_fraction (default 0.5 = half-Kelly)
             "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], bankroll, vb["book"],
                                               vb.get("kelly_fraction", 0.5)), 2),

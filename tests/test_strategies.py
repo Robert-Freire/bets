@@ -587,3 +587,43 @@ def test_variant_K_rejects_below_band_odds():
     assert draw_bets == [], (
         f"K_draw_bias must reject draw odds 3.10 (below 3.20 floor); got {draw_bets}"
     )
+
+
+# ── R.11: config_hash provenance ─────────────────────────────────────────────
+
+
+def test_config_hash_deterministic():
+    """Same config → same hash, both within a run and across StrategyConfig instances."""
+    from src.betting.strategies import StrategyConfig
+    a = StrategyConfig(name="X", label="X", description="x", min_edge=0.03, min_books=20)
+    b = StrategyConfig(name="X", label="X", description="x", min_edge=0.03, min_books=20)
+    assert a.config_hash() == b.config_hash()
+    assert len(a.config_hash()) == 12
+
+
+def test_config_hash_changes_when_threshold_changes():
+    """Tweaking any behavior field must produce a different hash."""
+    from src.betting.strategies import StrategyConfig
+    base = StrategyConfig(name="X", label="X", description="x", min_edge=0.03)
+    diff = StrategyConfig(name="X", label="X", description="x", min_edge=0.04)
+    assert base.config_hash() != diff.config_hash()
+
+
+def test_config_hash_excludes_identity_fields():
+    """name / label / description must NOT affect the hash — they're identity, not behavior.
+    Renaming a variant without changing thresholds preserves the hash."""
+    from src.betting.strategies import StrategyConfig
+    a = StrategyConfig(name="A", label="A: lab", description="alpha", min_edge=0.03)
+    b = StrategyConfig(name="B", label="B: lab", description="beta",  min_edge=0.03)
+    assert a.config_hash() == b.config_hash()
+
+
+def test_every_shipped_variant_has_a_distinct_config_hash():
+    """In STRATEGIES, no two variants should share a hash — collision means one is
+    functionally a duplicate of the other (or the hash function is broken)."""
+    from src.betting.strategies import STRATEGIES
+    by_hash: dict = {}
+    for s in STRATEGIES:
+        by_hash.setdefault(s.config_hash(), []).append(s.name)
+    collisions = {h: names for h, names in by_hash.items() if len(names) > 1}
+    assert not collisions, f"variants with identical config_hash: {collisions}"

@@ -5,9 +5,10 @@ Each StrategyConfig defines one variant of the value-bet scanner.
 evaluate_strategy() runs a variant on already-fetched events (no extra API calls).
 """
 
+import hashlib
 import json
 import statistics
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 _XG_FILE = Path(__file__).parent.parent.parent / "logs" / "team_xg.json"
@@ -47,6 +48,35 @@ UK_LICENSED_BOOKS = {
 
 EXCHANGE_BOOKS = {"betfair_ex_uk", "smarkets", "matchbook"}
 
+# The Odds API team names → Understat team names (used by K_draw_bias xG lookup).
+# Without this map, ~30% of EPL/Bundesliga/Serie A/Ligue 1 fixtures fail name matching
+# and K silently rejects every draw bet. Audited 2026-04-30 against logs/team_xg.json.
+UNDERSTAT_NAME_ALIAS: dict[str, str] = {
+    # EPL
+    "Tottenham Hotspur":        "Tottenham",
+    "West Ham United":          "West Ham",
+    "Leeds United":             "Leeds",
+    # Bundesliga
+    "1. FC Heidenheim":         "FC Heidenheim",
+    "1. FC Köln":               "FC Cologne",
+    "Borussia Monchengladbach": "Borussia M.Gladbach",
+    "FC St. Pauli":             "St. Pauli",
+    "FSV Mainz 05":             "Mainz 05",
+    "RB Leipzig":               "RasenBallsport Leipzig",
+    "SC Freiburg":              "Freiburg",
+    "TSG Hoffenheim":           "Hoffenheim",
+    "VfL Wolfsburg":            "Wolfsburg",
+    # Serie A
+    "AS Roma":                  "Roma",
+    "Atalanta BC":              "Atalanta",
+    "Hellas Verona":            "Verona",
+    "Inter Milan":              "Inter",
+    "Parma":                    "Parma Calcio 1913",
+    # Ligue 1
+    "AS Monaco":                "Monaco",
+    "RC Lens":                  "Lens",
+}
+
 OUTLIER_Z_MAX = 2.5
 
 
@@ -81,6 +111,17 @@ class StrategyConfig:
     draw_odds_band:      tuple | None = None     # K: (min, max) decimal odds; D bets only
     require_low_xg:      bool  = False           # K: both teams must be below xg_q25
     draws_only:          bool  = False           # K: skip H/A sides entirely
+
+    def config_hash(self) -> str:
+        """12-char SHA-256 of behavior fields. Identity (name/label/description) excluded
+        so two variants with identical thresholds collide intentionally; renaming a variant
+        without changing thresholds preserves its hash. Tweaking any threshold changes only
+        that variant's hash. Used by compare_strategies to filter to current eval window."""
+        config = asdict(self)
+        for k in ("name", "label", "description"):
+            config.pop(k, None)
+        normalized = json.dumps(config, sort_keys=True, default=str)
+        return hashlib.sha256(normalized.encode()).hexdigest()[:12]
 
 
 STRATEGIES: list[StrategyConfig] = [
@@ -356,8 +397,10 @@ def _flag_bets(
                 if strategy.require_low_xg:
                     _td = (team_xg or {}).get("teams", {})
                     _q25 = (team_xg or {}).get("xg_q25", 0.0)
-                    h_xg = _td.get(home, {}).get("avg_xg")
-                    a_xg = _td.get(away, {}).get("avg_xg")
+                    _h_key = UNDERSTAT_NAME_ALIAS.get(home, home)
+                    _a_key = UNDERSTAT_NAME_ALIAS.get(away, away)
+                    h_xg = _td.get(_h_key, {}).get("avg_xg")
+                    a_xg = _td.get(_a_key, {}).get("avg_xg")
                     # Missing team → block (conservative); also gates out NBA/tennis/non-model leagues.
                     if h_xg is None or a_xg is None or not (h_xg <= _q25 and a_xg <= _q25):
                         continue
@@ -434,8 +477,10 @@ def _flag_bets(
                 if strategy.require_low_xg:
                     _td = (team_xg or {}).get("teams", {})
                     _q25 = (team_xg or {}).get("xg_q25", 0.0)
-                    h_xg = _td.get(home, {}).get("avg_xg")
-                    a_xg = _td.get(away, {}).get("avg_xg")
+                    _h_key = UNDERSTAT_NAME_ALIAS.get(home, home)
+                    _a_key = UNDERSTAT_NAME_ALIAS.get(away, away)
+                    h_xg = _td.get(_h_key, {}).get("avg_xg")
+                    a_xg = _td.get(_a_key, {}).get("avg_xg")
                     # Missing team → block (conservative); also gates out NBA/tennis/non-model leagues.
                     if h_xg is None or a_xg is None or not (h_xg <= _q25 and a_xg <= _q25):
                         continue

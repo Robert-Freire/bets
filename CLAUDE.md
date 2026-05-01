@@ -57,20 +57,38 @@ La Liga excluded — too noisy, not enough UK bookmaker coverage yet.
 - **MED** — 20–29 books → default priority
 - **LOW** — <20 books → low priority
 
-## Environment
+## Setup (fresh clone)
 
 ```bash
-# .env (gitignored)
-ODDS_API_KEY=...
-BANKROLL=1000   # optional override; falls back to config.json → default 1000
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pip install --no-deps understat   # see requirements.txt for why this is separate
 ```
 
-Free tier: 500 requests/month. Scanner uses ~474/month. Closing-line script adds ~6–10 calls on match days (zero on idle days).
-Each region (`uk`, `eu`) counts as a separate API call.
+## Environment
 
-**Note:** The Odds API blocks requests from cloud/server IPs. The scanner must run locally (WSL or Pi).
+Production cron runs on a Raspberry Pi 5 (`robert@192.168.0.28`, OS = Raspberry Pi OS Trixie / Python 3.13, project at `~/projects/bets`). WSL is the dev environment for manual scans and code changes. Each side has its own free Odds API account/key so manual testing never burns prod quota:
 
-## Cron schedule (WSL, UTC)
+```bash
+# Pi: ~/projects/bets/.env (gitignored) — PROD key, used by cron only
+ODDS_API_KEY=<prod>
+BANKROLL=1000   # optional override; falls back to config.json → default 1000
+
+# WSL: /home/rfreire/projects/bets/.env.dev (gitignored) — DEV key, manual runs
+ODDS_API_KEY=<dev>
+```
+
+Manual dev runs: `export $(cat .env.dev) && python3 scripts/scan_odds.py`. **Never** run manual scans on the Pi against the prod key (one exception: the post-cutover validation run on 2026-05-01).
+
+Free tier: 500 requests/month per key. Production schedule uses ~474/month. Closing-line script adds ~6–10 calls on match days (zero on idle days). Each region (`uk`, `eu`) counts as a separate API call.
+
+**Note:** The Odds API blocks requests from cloud/server IPs. The scanner runs on the Pi (production) or WSL (dev). Multi-account split is a stopgap; migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
+
+## Cron schedule (Pi: `robert@192.168.0.28`, UTC)
+
+Cutover from WSL → Pi on 2026-05-01. Pi crontab uses `SHELL=/bin/bash` and the `cd ~/projects/bets && export $(cat .env) && .venv/bin/python3 ...` pattern (no inline API keys).
+
+**WSL also runs the same cron** (re-enabled later 2026-05-01) using `.env.dev` (separate dev API key) and `NTFY_TOPIC_OVERRIDE=""` (no notifications). It's a parallel test stream — gaps from laptop sleep are acceptable. WSL skips `research_scan.py` and `refresh_xg.py` (Pi-canonical, would conflict on git-tracked outputs). `NTFY_TOPIC` in `scan_odds.py` honours the env var.
 
 ```
 # Scanner
@@ -119,7 +137,7 @@ logs/notified.json          Notification dedupe state (12h per bet key)
 tests/                      pytest suite (126 tests across 14 files; run with `pytest`)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
-src/betting/strategies.py   15 paper strategy variants (A–J, L–P; K deferred) + evaluate_strategy() entry point
+src/betting/strategies.py   16 paper strategy variants (A–P; A_production live, B–P shadow) + evaluate_strategy() entry point
 src/betting/consensus.py    Consensus computation helpers
 src/betting/kelly.py        Kelly criterion
 src/betting/walk_forward.py  Walk-forward backtest primitive (TimeSeriesSplit; Phase R.5.5a)
@@ -197,14 +215,14 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 3 | CLV + drift diagnostics | ✅ Done |
 | 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done (dispersion/outlier via `strategies.py`; notification dedupe via `logs/notified.json` in `scan_odds.py`) |
 | 5 | New markets: totals, BTTS | ✅ Done |
-| 5.5 | Paper portfolios (8 strategy variants, shadow A/B) | ✅ Done |
+| 5.5 | Paper portfolios (initial 8 strategy variants A–H, shadow A/B; expanded to 16 in R.0–R.3 + R.8) | ✅ Done |
 | 5.6 | Phase 5.5 bugfix sweep (P0/P1) | ✅ Done |
 | 5.7 | Commission-aware edges (per-book commission, net Kelly) | ✅ Done |
 | 5.8 | Post-5.7 review fixes (schema reset, per-row CLV, impl_raw rename, tennis throttle) | ✅ Done |
-| 6 | SQLite + UUIDs | Pending |
+| 6 | Storage migration: SQL Server Express + UUIDs (was: SQLite — superseded by Azure direction below) | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
-| 9 | Pi / Azure infrastructure | Pending |
+| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (App Service + SQL DB, WSL CSVs only initially; Pi onboarding deferred to A.10) Pending — see `docs/PLAN_AZURE_2026-05.md` |
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 | R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
 | R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`, `TimeSeriesSplit(5)` primitive) | ✅ Done |
