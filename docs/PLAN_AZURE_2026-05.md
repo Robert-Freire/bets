@@ -126,7 +126,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 |---|---|---|---|---|---|
 | A.0 | Provision Azure account + dev resource group | dev | no | ✅ Done 2026-05-01 | — |
 | A.1 | Stand up dev Azure SQL Database (serverless, auto-pause) | dev | no | ✅ Done 2026-05-01 | A.0 |
-| A.2 | Schema DDL + idempotent migrations runner | dev | no | pending | A.1 |
+| A.2 | Schema DDL + idempotent migrations runner | dev | no | ✅ Done 2026-05-01 | A.1 |
 | A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | pending | A.2 |
 | A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | pending | A.2 |
 | A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | pending | A.2, A.4 |
@@ -259,26 +259,28 @@ python3 -c "import pyodbc; print(pyodbc.drivers())"  # expect msodbcsql18 in lis
 
 ---
 
-## Phase A.2 — Schema DDL + idempotent migrations runner
+## Phase A.2 — Schema DDL + idempotent migrations runner  ✅ Done 2026-05-01
+
+**Tables created:** `fixtures`, `books`, `strategies`, `bets`, `paper_bets`, `closing_lines`, `drift`. All FKs through `fixtures(id)` / `books(id)` / `strategies(id)`.
 
 **Goal.** A version-controlled SQL schema that can be applied (and re-applied) safely.
 
 **Tasks.**
-1. Create `src/storage/schema.sql` with `IF NOT EXISTS` patterns (or `IF OBJECT_ID(...) IS NULL`) covering:
+1. Create `src/storage/schema.sql` (canonical MSSQL T-SQL) with `IF OBJECT_ID(...) IS NULL` guards and `src/storage/schema_sqlite.sql` (sibling for in-memory SQLite tests) covering:
    - `fixtures` (id uuid PK, sport_key, league, home, away, kickoff_utc, created_at)
    - `books` (id int PK, name, region, commission_rate)
-   - `bets` (id uuid PK, fixture_id FK, side, market, book_id FK, odds, stake, edge_pct, consensus_prob, dispersion, outlier_z, model_signal, devig_method, weight_scheme, status, settled_at, won, pnl, created_at)
-   - `closing_lines` (bet_id FK PK, pinnacle_close_prob, captured_at, clv_pct)
-   - `drift` (bet_id FK, t_minus_minutes, pinnacle_prob, captured_at; PK = (bet_id, t_minus_minutes))
-   - `strategies` (id int PK, name, description, active)
-   - `paper_bets` (id uuid PK, strategy_id FK, fixture_id FK, ... same fields as bets)
-2. Create `src/storage/migrate.py` — reads `schema.sql`, executes via pyodbc; logs "no changes" if idempotent rerun.
-3. Add `tests/test_schema.py` — uses local SQLite (in-memory) as a smoke test; full MSSQL run requires `AZURE_SQL_TEST_DSN` env var.
+   - `bets` (id uuid PK, fixture_id FK, book_id FK, scanned_at, market, line, side, odds, impl_raw, impl_effective, edge, edge_gross, effective_odds, commission_rate, consensus, pinnacle_cons, n_books, confidence, model_signal, dispersion, outlier_z, devig_method, weight_scheme, stake, result, settled_at, pnl, pinnacle_close_prob, clv_pct, created_at)
+   - `closing_lines` (fixture_id FK + side/market/line/book_id composite PK; pinnacle_close_prob, pinnacle_raw_odds, your_book_flagged_odds, your_book_close_odds, clv_pct, captured_at). Note: keyed by (fixture, market, side, line, book) not bet_id, so a single closing data row covers production + every paper variant for the same identity.
+   - `drift` (fixture_id FK + side/market/line/book_id/t_minus_min composite PK; captured_at, your_book_odds, pinnacle_odds, n_books)
+   - `strategies` (id int PK, name UNIQUE, description, active)
+   - `paper_bets` (id uuid PK, strategy_id FK, fixture_id FK, book_id FK, ... same fields as bets)
+2. Create `src/storage/migrate.py` — dialect-aware (`--dsn` for MSSQL/pyodbc, `--sqlite` for SQLite), splits the schema file into statements, reports table-count delta after each run.
+3. Add `tests/test_schema.py` — applies `schema_sqlite.sql` to in-memory SQLite, verifies tables/columns/FKs/indices; subprocess test for the runner itself; sanity check that `schema.sql` has `IF OBJECT_ID` guards.
 
 **Acceptance.**
-- [ ] `python3 src/storage/migrate.py` against an empty Azure SQL DB creates all tables; second run is a no-op.
-- [ ] `pytest tests/test_schema.py` passes (in-memory SQLite path).
-- [ ] All FK constraints present and indices on `(kickoff_utc, sport_key)`, `(strategy_id, status)`.
+- [x] `python3 -m src.storage.migrate --dsn "$AZURE_SQL_DSN"` against the empty dev DB created 7 tables (`+7`); second run reports `no changes`.
+- [x] `pytest tests/test_schema.py` — 10/10 passing on the SQLite path.
+- [x] FK constraints present (bets→{fixtures,books}, paper_bets→{fixtures,books,strategies}, closing_lines/drift→{fixtures,books}); indices on `(kickoff_utc, sport_key)` and `(strategy_id, result)` confirmed via `sys.indexes` query.
 
 **Reviewer focus.**
 - Idempotency: re-running `migrate.py` must not error or duplicate rows.
