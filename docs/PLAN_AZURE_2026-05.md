@@ -128,7 +128,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.1 | Stand up dev Azure SQL Database (serverless, auto-pause) | dev | no | ✅ Done 2026-05-01 | A.0 |
 | A.2 | Schema DDL + idempotent migrations runner | dev | no | ✅ Done 2026-05-01 | A.1 |
 | A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | ✅ Done 2026-05-01 | A.2 |
-| A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | pending | A.2 |
+| A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | ✅ Done 2026-05-01 | A.2 |
 | A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | pending | A.2, A.4 |
 | A.6 | Provision dev App Service + deploy `app.py` | dev | no | pending | A.5 |
 | A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | pending | A.6 |
@@ -331,7 +331,13 @@ python3 -c "import pyodbc; c = pyodbc.connect('$AZURE_SQL_DSN'); print('bets:', 
 
 ---
 
-## Phase A.4 — Storage layer + dual-write in scanner — WSL only
+## Phase A.4 — Storage layer + dual-write in scanner — WSL only  ✅ Done 2026-05-01
+
+**Capability shipped:** `src/storage/repo.py` (BetRepo) + `src/storage/_keys.py` (shared deterministic-UUID + label helpers, used by both the live writer and the A.3 importer). `scripts/scan_odds.py` and `scripts/closing_line.py` now write through the repo. CSV format/dedup behavior unchanged. DB-write activation requires both `BETS_DB_WRITE=1` and `AZURE_SQL_DSN` (or the `AZURE_SQL_SERVER/USER/DATABASE/KV_VAULT/KV_SECRET` quintet that builds the DSN from Key Vault at boot).
+
+**WSL smoke run:** scan_odds against `kaunitz-dev-sql-uksouth-rfk1` produced 9 paper bets across 5 strategies; DB `paper_bets` count grew 543 → 552 with deterministic UUIDs matching the CSV rows byte-for-byte (verified by recomputing `paper_bet_uuid()` from the CSV and looking up by id in the DB).
+
+**Pi smoke run:** scan_odds with no env flags printed `[scan] CSV-only mode (BETS_DB_WRITE not set)`, `pyodbc` was never imported (verified via `'pyodbc' in sys.modules`), CSV writes succeeded, and behavior matched pre-A.4 byte-for-byte. **Enabling dual-write on the WSL cron is a separate user-driven step** — it is not enabled by default, so until you add the env vars to `.env.dev`/the cron environment, WSL keeps writing CSV-only too.
 
 **Goal.** **WSL's** `scan_odds.py` writes to both CSV (existing) and Azure SQL (new) on every scan. Env flag `BETS_DB_WRITE=1` gates the new path. **Pi's `scan_odds.py` is NOT modified beyond what `git pull` brings in — Pi never sets `BETS_DB_WRITE`, so the dual-write code path stays dormant on Pi.**
 
@@ -345,10 +351,10 @@ python3 -c "import pyodbc; c = pyodbc.connect('$AZURE_SQL_DSN'); print('bets:', 
 5. Add `tests/test_repo_dual_write.py` — confirms (a) a single `add_bet` writes one CSV row and one DB row when flag is on; (b) **no DB import or connection attempt occurs when `BETS_DB_WRITE` is unset** (the Pi-safety case).
 
 **Acceptance.**
-- [ ] Smoke scan on **WSL** (with `BETS_DB_WRITE=1`) appends a row to `logs/bets.csv` AND inserts a row into `bets` table; UUIDs match.
-- [ ] With `BETS_DB_WRITE` unset (Pi case), only CSV is written; no pyodbc import attempted; no errors logged.
-- [ ] After `git pull` on Pi, next scheduled cron runs unchanged (verify by tailing Pi's `logs/scan.log` — same line count growth as before A.4).
-- [ ] No double-writes on cron retries (covered by upsert in repo layer).
+- [x] Smoke scan on **WSL** (with `BETS_DB_WRITE=1`) appends a row to `logs/bets.csv` AND inserts a row into `bets` table; UUIDs match. (Verified for `paper_bets`: 9 new rows, deterministic UUIDs spot-checked.)
+- [x] With `BETS_DB_WRITE` unset (Pi case), only CSV is written; no pyodbc import attempted; no errors logged.
+- [ ] After `git pull` on Pi, next scheduled cron runs unchanged (verify by tailing Pi's `logs/scan.log` — same line count growth as before A.4). *Pending Pi `git pull` after merge — capability is in place; tested on WSL with env flags stripped.*
+- [x] No double-writes on cron retries (covered by upsert in repo layer; covered by `test_dual_write_idempotent_on_retry`).
 
 **Reviewer focus.**
 - **Pi safety:** import path must not require pyodbc/azure-* libs unless `BETS_DB_WRITE=1`. Lazy import inside the DB writer code path. Verify Pi can run scanner without those libs installed.

@@ -80,6 +80,22 @@ ODDS_API_KEY=<dev>
 
 Manual dev runs: `export $(cat .env.dev) && python3 scripts/scan_odds.py`. **Never** run manual scans on the Pi against the prod key (one exception: the post-cutover validation run on 2026-05-01).
 
+**A.4 dual-write toggle (WSL only; Pi must NOT set these):** to make WSL scans dual-write to Azure SQL on top of CSVs, add to `.env.dev`:
+
+```bash
+BETS_DB_WRITE=1
+# Either: a literal pyodbc DSN (Azure SQL admin password embedded)
+AZURE_SQL_DSN="Driver={ODBC Driver 18 for SQL Server};Server=tcp:kaunitz-dev-sql-uksouth-rfk1.database.windows.net,1433;Database=kaunitz;Uid=kaunitzadmin;Pwd=...;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
+# Or: the components + Key Vault references (BetRepo fetches the password at boot via `az keyvault secret show`)
+# AZURE_SQL_SERVER=kaunitz-dev-sql-uksouth-rfk1.database.windows.net
+# AZURE_SQL_USER=kaunitzadmin
+# AZURE_SQL_DATABASE=kaunitz
+# AZURE_SQL_KV_VAULT=kaunitz-dev-kv-rfk1
+# AZURE_SQL_KV_SECRET=sql-admin-password
+```
+
+Without those, `BetRepo` runs in CSV-only mode and never imports `pyodbc` (Pi-safety contract). Switching the WSL cron to dual-write is a manual user step — not enabled by default after A.4.
+
 Free tier: 500 requests/month per key. Production schedule uses ~474/month. Closing-line script adds ~6–10 calls on match days (zero on idle days). Each region (`uk`, `eu`) counts as a separate API call.
 
 **Note:** The Odds API blocks requests from cloud/server IPs. The scanner runs on the Pi (production) or WSL (dev). Multi-account split is a stopgap; migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
@@ -134,10 +150,12 @@ logs/closing_line.log       Closing-line script output
 logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (208 tests across 16 files; run with `pytest`)
+tests/                      pytest suite (219 tests across 17 files; run with `pytest`)
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
 src/storage/schema_sqlite.sql  SQLite mirror of the schema for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner (--dsn for MSSQL, --sqlite for tests)
+src/storage/_keys.py        Deterministic UUID5 + sport-label helpers shared by repo + importer (don't change the namespace)
+src/storage/repo.py         BetRepo dual-writer (CSV always; Azure SQL when BETS_DB_WRITE=1 + DSN env set; Pi-safe lazy pyodbc import)
 scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent on rerun; --dsn or --sqlite)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
@@ -226,7 +244,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 6 | Storage migration: SQL Server Express + UUIDs (was: SQLite — superseded by Azure direction below) | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
-| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0/A.1/A.2/A.3 ✅ Done 2026-05-01** (RG + serverless SQL DB `kaunitz` on `kaunitz-dev-sql-uksouth-rfk1` + Key Vault `kaunitz-dev-kv-rfk1` + 7-table schema + idempotent CSV→DB importer). A.4–A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
+| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.4 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer behind `BETS_DB_WRITE=1`). A.5–A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 | R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
 | R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`, `TimeSeriesSplit(5)` primitive) | ✅ Done |

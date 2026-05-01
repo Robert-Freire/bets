@@ -42,6 +42,9 @@ except ImportError:
     _COMMISSIONS = False
     def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
 
+# A.4: BetRepo writes both CSV + (optionally) Azure SQL. Pi-safe.
+from src.storage.repo import BetRepo
+
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
     raise RuntimeError("ODDS_API_KEY environment variable not set.")
@@ -450,19 +453,29 @@ def main():
                     stale = "" if your_book_odds else " (used flagged odds — book not quoted at T-1)"
                     print(f"  [closing]    {home} vs {away} [{side}] | CLV {clv_str}{stale}")
 
-    # --- Write closing_lines.csv ---
+    # --- Write closing_lines.csv (and Azure SQL when dual-write enabled) ---
+    repo = BetRepo()
+    if repo.db_enabled:
+        print("[closing] Dual-write mode: CSV + Azure SQL")
+
     if closing_rows:
-        write_hdr = not CLOSING_CSV.exists()
-        with open(CLOSING_CSV, "a", newline="") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            w = csv.DictWriter(f, fieldnames=[
-                "captured_at", "home", "away", "kickoff", "side", "market", "line",
-                "pinnacle_devig_prob", "pinnacle_raw_odds",
-                "your_book_flagged_odds", "your_book_close_odds", "clv_pct",
-            ])
-            if write_hdr:
-                w.writeheader()
-            w.writerows(closing_rows)
+        # Mirror originating fixture metadata onto each row so the repo can
+        # ensure_fixture for the DB side. The CSV writer ignores extras.
+        prod_meta = {
+            (b["home"], b["away"], b["kickoff"], b["side"],
+             b.get("_market", "h2h"), b.get("_line", "")): b.get("sport", "")
+            for b in active_bets
+        }
+        paper_meta = {
+            (b["home"], b["away"], b["kickoff"], b["side"],
+             b.get("_market", "h2h"), b.get("_line", "")): b.get("sport", "")
+            for b in paper_bets
+        }
+        for r in closing_rows:
+            k = (r["home"], r["away"], r["kickoff"], r["side"],
+                 r.get("market", "h2h"), r.get("line", ""))
+            r.setdefault("sport", prod_meta.get(k) or paper_meta.get(k, ""))
+        repo.add_closing_lines(closing_rows)
         print(f"[log] {len(closing_rows)} closing line(s) → closing_lines.csv")
         # Update production bets.csv
         update_csv_clv(BETS_CSV, clv_updates)
@@ -473,17 +486,24 @@ def main():
 
     # --- Write drift.csv ---
     if drift_rows:
-        write_hdr = not DRIFT_CSV.exists()
-        with open(DRIFT_CSV, "a", newline="") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            w = csv.DictWriter(f, fieldnames=[
-                "captured_at", "home", "away", "kickoff", "side", "market", "line",
-                "book", "t_minus_min", "your_book_odds", "pinnacle_odds", "n_books",
-            ])
-            if write_hdr:
-                w.writeheader()
-            w.writerows(drift_rows)
+        prod_meta = {
+            (b["home"], b["away"], b["kickoff"], b["side"],
+             b.get("_market", "h2h"), b.get("_line", "")): b.get("sport", "")
+            for b in active_bets
+        }
+        paper_meta = {
+            (b["home"], b["away"], b["kickoff"], b["side"],
+             b.get("_market", "h2h"), b.get("_line", "")): b.get("sport", "")
+            for b in paper_bets
+        }
+        for r in drift_rows:
+            k = (r["home"], r["away"], r["kickoff"], r["side"],
+                 r.get("market", "h2h"), r.get("line", ""))
+            r.setdefault("sport", prod_meta.get(k) or paper_meta.get(k, ""))
+        repo.add_drift_snapshot(drift_rows)
         print(f"[log] {len(drift_rows)} drift row(s) → drift.csv")
+
+    repo.close()
 
     if not closing_rows and not drift_rows:
         print("No windows matched — nothing written.")
