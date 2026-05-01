@@ -141,7 +141,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | ✅ Done 2026-05-01 | A.2, A.4 |
 | A.5.5 | Blob archive for raw API responses (Odds API, future Pinnacle/Betfair) — **WSL only**, env-flag gated | dev | no (gated; Pi never sets the flag) | pending | A.4 |
 | A.6 | Provision dev App Service + deploy `app.py` (**pivoted to Container Apps** — Reply VSE has 0 App Service VM quota) | dev | no | ✅ Done 2026-05-01 | A.5 |
-| A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | pending | A.6 |
+| A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | ✅ Done 2026-05-01 | A.6 |
 | A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | pending | A.7 + 1 week stable A.4/A.5 |
 | A.9 | Decommission WSL CSV path entirely | dev | no | pending | A.8 + 1 week stable |
 | **A.10** | **Stand up `kaunitz-prod-rg` + onboard Pi** (future sprint — separate plan doc) | **prod (new)** | **yes** | **deferred** | A.9 + ≥1 week soak |
@@ -550,37 +550,45 @@ az containerapp logs show -g $RG -n $APP --tail 50 --type system      # platform
 
 ---
 
-## Phase A.7 — Container Apps auth (Google OIDC) on dashboard
+## Phase A.7 — Container Apps auth (Google OIDC) on dashboard  ✅ Done 2026-05-01
 
-**Goal.** Public URL requires Google sign-in; only `robert.freire@gmail.com` is authorized. (The Azure resources sit in the Reply VSE subscription, but the *application* identity layer is intentionally decoupled — see Phase A.0 identity boundary note.)
+**What landed.**
 
-**Pivot note.** Originally planned as App Service Easy Auth; A.6 pivoted the dashboard to Container Apps (0 App Service VM quota). Container Apps offers the same Google OIDC + email allowlist via `az containerapp auth update` — different surface, equivalent capability.
+- Google OAuth 2.0 Web client `kaunitz-dashboard` created in personal Google Cloud project (owner = `robert.freire@gmail.com`, not Reply). Consent screen left in **Testing** mode with `robert.freire@gmail.com` as the only test user — Google itself rejects sign-ins from other accounts before they ever reach the proxy.
+- Authorized redirect URI: `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/.auth/login/google/callback`.
+- Client secret stored in `kaunitz-dev-kv-rfk1` as `dashboard-google-client-secret`. Container app secret `google-client-secret` references it via system-assigned managed identity (mirrors the `sql-dsn` binding from A.6) — no plaintext anywhere on disk.
+- Container app auth wired: `az containerapp auth google update --client-id ... --client-secret-name google-client-secret`, then `az containerapp auth update --enabled true --action RedirectToLoginPage --redirect-provider google --excluded-paths /health --require-https true`.
+- **Defense-in-depth allowlist** (`app.py` `before_request` hook) added because Container Apps `auth update` doesn't expose a per-user `--allowed-principals` flag like App Service does. The hook reads `X-MS-CLIENT-PRINCIPAL-NAME` (or decodes `X-MS-CLIENT-PRINCIPAL`) and 403s any signed-in user not in `DASHBOARD_ALLOWED_EMAILS`. `DASHBOARD_ALLOWED_EMAILS=robert.freire@gmail.com` set on the container app.
+- Image rebuilt as `kaunitzdevacrrfk1.azurecr.io/dashboard:v4`, container revision rolled to `kaunitz-dev-dashboard-rfk1--0000005`. (v3 used a module-level `ALLOWED_EMAILS` constant that leaked env state across pytest files; v4 reads env per-request — same runtime behaviour.)
+- `tests/test_app_allowlist.py` — 6 cases pass: env unset → no enforcement, missing principal → 401, name-header email → admit, principal-blob email → admit, wrong email → 403, `/health` always open.
 
-**Live URL to protect:** `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io`
+**Smoke results:**
 
-**Tasks.**
-1. Create Google OAuth 2.0 Web client at console.cloud.google.com. Authorized redirect URI: `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/.auth/login/google/callback`. Owner = personal Google account, not the Reply identity.
-2. Store the Google client secret in Key Vault (`kaunitz-dev-kv-rfk1`, secret name `dashboard-google-client-secret`) and reference it from the container app via the existing managed-identity → KV binding.
-3. `az containerapp auth microsoft|google update -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1 --client-id <id> --client-secret-name <secret-ref> --enable-token-store true` then `az containerapp auth update --action RedirectToLoginPage --require-authentication true`.
-4. Restrict to `robert.freire@gmail.com` via `--allowed-principals` (or `excluded-paths /health` so monitoring still works unauthenticated).
-5. **Decision branch (document in PR body):** if Container Apps auth hits a snag (Google verification, redirect URI mismatch, Reply tenant blocking), fall back to HTTP Basic Auth in `app.py` — 1 LOC checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Key Vault + Container App env.
+| Probe | Result |
+|---|---|
+| `curl -i https://.../` (no UA) | `401` + `WWW-Authenticate: Bearer` (API-style — no accidental redirect for non-browser callers) |
+| `curl -i -H "User-Agent: Mozilla/5.0..."` against `/` | **302** → `https://accounts.google.com/o/oauth2/v2/auth?...client_id=...&redirect_uri=.../.auth/login/google/callback&scope=openid+profile+email&state=...` |
+| `curl -s https://.../health` | `200 {"db":"ok","csv":"ok"}` (excluded path) |
+| `curl -s https://.../.auth/login/google` | `302` to Google's OAuth endpoint with our client_id |
 
 **Acceptance.**
-- [ ] `curl -i https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/` returns 302 to Google login (or 401 with Basic Auth fallback).
-- [ ] Browser test: sign in as `robert.freire@gmail.com` → dashboard renders. Sign in as different account → 403.
-- [ ] `/health` endpoint stays open (excluded paths) so smoke probes still work.
+- [x] Browser User-Agent → 302 to Google login. API-style request → 401 (intentional — Container Apps suppresses login redirect for non-browser callers).
+- [ ] Manual browser test: sign in as `robert.freire@gmail.com` → dashboard renders; different Google account is rejected at Google's consent screen (Testing mode allowlist) and additionally would 403 at the app guard if it ever got through. *Pending user check — capability is in place; the OAuth handshake is wired correctly per the smoke output above.*
+- [x] `/health` stays open and reports `{"db":"ok","csv":"ok"}`.
 
-**Reviewer focus.**
-- Allowlist must be email-exact; "anyone with a Google account" is unacceptable.
-- `/health` endpoint should remain unauth (for monitoring).
-- Confirm no auth bypass via direct DB/blob access from internet.
+**Reviewer focus (resolved).**
+- Allowlist email-exact: enforced both at Google (Testing mode) and at app layer (`DASHBOARD_ALLOWED_EMAILS`). Belt and braces.
+- `/health` excluded from auth proxy so monitoring still works.
+- Container app secret references the KV item via managed identity — no plaintext secret in the container revision spec.
 
 **Verification commands.**
 ```bash
 FQDN=kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
-curl -i "https://$FQDN/" | head -1          # expect 302 or 401
-curl -s "https://$FQDN/health"              # should still return 200
-az containerapp auth show -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1
+curl -i "https://$FQDN/" | head -1                                 # expect 401 (API) ...
+curl -i -H "User-Agent: Mozilla/5.0" "https://$FQDN/" | head -3    # ... or 302 with browser UA
+curl -s "https://$FQDN/health"                                     # 200 JSON
+az containerapp auth show -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1 \
+  --query "properties.{action:globalValidation.unauthenticatedClientAction, redirectTo:globalValidation.redirectToProvider, excluded:globalValidation.excludedPaths, google:identityProviders.google.registration}" -o json
 ```
 
 ---

@@ -8,8 +8,10 @@ set, with CSV as automatic fallback. The view renders identically; a
 banner appears only when DB is configured but unreachable.
 """
 
+import base64
 import csv
 import fcntl
+import json
 import os
 import re
 import sys
@@ -26,6 +28,57 @@ from src.storage.repo import BetRepo
 from src.storage._keys import scan_date_of
 
 app = Flask(__name__)
+
+# A.7: defense-in-depth allowlist on top of Container Apps Easy Auth.
+# Empty result => not enforced (local dev). Read on each request so test
+# isolation isn't broken by module-level caching.
+def _allowed_emails() -> set[str]:
+    return {
+        e.strip().lower()
+        for e in os.environ.get("DASHBOARD_ALLOWED_EMAILS", "").split(",")
+        if e.strip()
+    }
+
+
+def _principal_email() -> str | None:
+    """Email of the signed-in user from Easy Auth headers, or None.
+
+    Container Apps injects X-MS-CLIENT-PRINCIPAL-NAME (Google → email)
+    and X-MS-CLIENT-PRINCIPAL (b64 JSON with a `claims` array). We try
+    the convenience header first, then fall back to the principal blob.
+    """
+    name = request.headers.get("X-MS-CLIENT-PRINCIPAL-NAME")
+    if name and "@" in name:
+        return name.lower()
+    raw = request.headers.get("X-MS-CLIENT-PRINCIPAL")
+    if not raw:
+        return None
+    try:
+        principal = json.loads(base64.b64decode(raw).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    for c in principal.get("claims", []):
+        if c.get("typ") in ("emails", "email", "preferred_username", "name"):
+            v = c.get("val", "")
+            if "@" in v:
+                return v.lower()
+    return None
+
+
+@app.before_request
+def _allowlist_check():
+    allowed = _allowed_emails()
+    if not allowed:
+        return None
+    if request.path == "/health":
+        return None
+    email = _principal_email()
+    if email is None:
+        return jsonify({"error": "auth required"}), 401
+    if email not in allowed:
+        return jsonify({"error": "forbidden"}), 403
+    return None
+
 
 BETS_CSV           = Path(__file__).parent / "logs" / "bets.csv"
 BETS_LEGACY_CSV    = Path(__file__).parent / "logs" / "bets_legacy.csv"
