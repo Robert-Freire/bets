@@ -202,7 +202,7 @@ az sql db resume -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<rand> -n kaunitz
 az group delete -n kaunitz-dev-rg --yes  # tear down entire dev stack
 ```
 
-Prod (`kaunitz-prod-rg`, A.10) is **never** stopped during normal ops — closing-line scans run every 5 minutes during match windows and a paused DB introduces drift gaps.
+Prod (`kaunitz-prod-rg`, A.10) is **never** stopped during normal ops — Pi cron writes can fire at any cron-configured time and a paused DB during a scan would lose that scan's writes. (Originally this section also cited every-5-min `closing_line.py` polling; that script was paused 2026-05-01 in favour of the Mon 08:00 FDCO backfill, but the always-on-prod stance still holds because the scanner cron itself runs at fixed times that must succeed first try.)
 
 ---
 

@@ -2,6 +2,8 @@
 
 Implementation plan derived from `docs/RESEARCH_NOTES_2026-04.md`. Phases are sized for one PR each, ordered by adopt-cost × signal × dependency.
 
+> **Status (2026-05-01):** R.0–R.3, R.5.5a/b, R.7–R.9, R.11 ✅ done. **R.5 / R.5.5c / R.6 still pending.** R.10 blocked on CLV evidence. R.4 auto-runs (existing cron). Architectural shift since this plan was written: `scripts/closing_line.py` paused 2026-05-01 in favour of weekly football-data.co.uk Pinnacle close-odds backfill (`scripts/backfill_clv_from_fdco.py`, Mon 08:00 UTC). The `closing_line.py` references in this doc still describe the architecture they were written against; treat them as historical context, not as something to extend further. Any future CLV pipeline changes should live in the FDCO backfill path. CLAUDE.md is the authoritative current-state doc.
+
 **Driving question.** Does the scanner itself need updating? **Yes — but staged.** The Phase 5.5 paper-portfolio infrastructure means new strategy variants don't touch the scanner; they're added in `src/betting/strategies.py` and run alongside production. The scanner only changes when a variant **graduates** from shadow (≥50 bets settled, positive CLV) to a default-flip — and when we ingest a genuinely new market (Asian Handicap).
 
 ---

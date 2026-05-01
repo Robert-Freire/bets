@@ -4,25 +4,22 @@
 
 A value betting scanner using the **Kaunitz consensus strategy**: compute the Shin-devigged fair probability across 30–40 bookmakers, then flag bets where a UK-licensed bookmaker's odds are significantly better than the consensus. CLV (closing-line value) against Pinnacle is the primary diagnostic for whether edge is real.
 
-*Backtest results — including Shin-corrected numbers (2% edge → 17.65% ROI, generated 2026-04-29) — are in [`docs/BACKTEST.md`](docs/BACKTEST.md).*
+*Backtest: 2% edge → 17.65% ROI (Shin-corrected, 2026-04-29) — see `docs/BACKTEST.md`.*
 
 ## Quick start
 
 ```bash
-# Run the scanner manually
-export $(cat .env) && python3 scripts/scan_odds.py
+# Run the scanner manually (WSL dev)
+export $(cat .env.dev) && python3 scripts/scan_odds.py
 
-# Capture closing lines + drift (normally runs via cron every 5 min)
-export $(cat .env) && python3 scripts/closing_line.py
+# CLV backfill from football-data.co.uk Pinnacle close odds (Mon 08:00 cron)
+export $(cat .env.dev) && python3 scripts/backfill_clv_from_fdco.py
 
-# Open the dashboard (track bets, log results, view CLV)
+# Local dashboard (track bets, log results, view CLV)
 python3 app.py   # → http://localhost:5000
 
 # Public dev dashboard (Azure Container Apps; Google OIDC, allowlist robert.freire@gmail.com)
 # https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
-
-# Check for new sports worth adding (bi-weekly)
-export $(cat .env) && python3 scripts/check_sports.py
 
 # Compare strategy variants (after a weekend of data)
 python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
@@ -30,17 +27,17 @@ python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
 
 ## How the scanner works
 
-1. **Pre-flight + canary** (no separate paid call — uses the data we'd fetch anyway): free `/sports/?all=false` health log; then the configured football league (`canary_league` in `config.json`, env override `CANARY_LEAGUE`, default `soccer_epl`) is fetched **first** in the per-league loop. If it returns 0 events, the remaining football leagues are skipped (saves ~20 credits) and a high-priority ntfy alert fires; NBA/tennis still run.
-2. Fetches live odds from The Odds API (`uk,eu` regions, ~36 bookmakers per fixture)
-3. **Shin-devigs** each book's implied probabilities before averaging (Phase 1)
-4. Consensus = mean of Shin-fair probs across all books; Pinnacle's devigged prob logged as anchor
-5. Applies **Phase 4 filters**: rejects if cross-book stdev of fair probs > `MAX_DISPERSION=0.04`; rejects if the flagged book's z-score vs the rest exceeds `OUTLIER_Z_THRESHOLD=2.5`
-6. Flags bets where a **UK-licensed** bookmaker's devigged prob is ≥3% below consensus (Kaunitz), or ≥2% with CatBoost model agreement
-7. Sizes bets with half-Kelly, then applies **risk pipeline** (Phase 2): £5 rounding, per-fixture 5% cap, 15% portfolio cap, drawdown brake
-8. Sends push notifications via ntfy.sh (topic: `robert-epl-bets-m4x9k`), deduped via `logs/notified.json` (12h per bet key)
-9. Appends to `logs/bets.csv` (deduped by `(kickoff, home, away, side, book)` per scan date); includes `dispersion` and `outlier_z` columns
+1. **Pre-flight + canary** (free `/sports/?all=false` health log): the configured football league (`canary_league` in `config.json`, env `CANARY_LEAGUE`, default `soccer_epl`) is fetched **first** in the per-league loop. If it returns 0 events, remaining football leagues are skipped (saves ~20 credits) and a high-priority ntfy alert fires.
+2. Fetches live odds from The Odds API (`uk,eu` regions, ~36 bookmakers per fixture).
+3. **Shin-devigs** each book's implied probabilities before averaging.
+4. Consensus = mean of Shin-fair probs across all books; Pinnacle's devigged prob logged as anchor.
+5. **Filters**: rejects if cross-book stdev of fair probs > `MAX_DISPERSION=0.04`; rejects if the flagged book's z-score vs the rest exceeds `OUTLIER_Z_THRESHOLD=2.5`.
+6. Flags bets where a **UK-licensed** bookmaker's devigged prob is ≥3% below consensus (Kaunitz), or ≥2% with CatBoost model agreement.
+7. Sizes bets with half-Kelly + risk pipeline: £5 rounding, per-fixture 5% cap, 15% portfolio cap, drawdown brake.
+8. Sends ntfy push (topic `robert-epl-bets-m4x9k`), deduped via `logs/notified.json` (12h per bet key).
+9. Appends to `logs/bets.csv` (deduped) and to each `logs/paper/<variant>.csv` for the 16 paper-portfolio strategies. WSL also dual-writes to Azure SQL via `BetRepo` (A.4) and archives raw API responses to Azure Blob via `SnapshotArchive` (A.5.5).
 
-## Sports scanned
+## Sports actively scanned
 
 | Sport | Key | Min books |
 |---|---|---|
@@ -50,16 +47,14 @@ python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
 | EFL Championship | `soccer_efl_champ` | 25 |
 | Ligue 1 | `soccer_france_ligue_one` | 20 |
 | Bundesliga 2 | `soccer_germany_bundesliga2` | 20 |
-| NBA | `basketball_nba` | 20 |
-| Tennis | auto-detected from active tournaments (capped at 2) | 15 |
 
-La Liga excluded — too noisy, not enough UK bookmaker coverage yet.
+Cron-trimmed 2026-05-01 to fit within the 500/mo Odds API budget. NBA + tennis dropped from cron; the code paths still work for ad-hoc scans (`--sports nba`, `--sports tennis`). La Liga excluded — too noisy, not enough UK book coverage.
 
 ## Confidence levels
 
-- **HIGH** — ≥30 books in consensus → high priority ntfy notification
-- **MED** — 20–29 books → default priority
-- **LOW** — <20 books → low priority
+- **HIGH** ≥30 books in consensus → high-priority ntfy notification
+- **MED** 20–29 books → default priority
+- **LOW** <20 books → low priority
 
 ## Setup (fresh clone)
 
@@ -71,26 +66,27 @@ pip install --no-deps understat   # see requirements.txt for why this is separat
 
 ## Environment
 
-Production cron runs on a Raspberry Pi 5 (`robert@192.168.0.28`, OS = Raspberry Pi OS Trixie / Python 3.13, project at `~/projects/bets`). WSL is the dev environment for manual scans and code changes. Each side has its own free Odds API account/key so manual testing never burns prod quota:
+Production cron runs on a Raspberry Pi 5 (`robert@192.168.0.28`, Raspberry Pi OS Trixie / Python 3.13, project at `~/projects/bets`). WSL is the dev environment — manual scans, code changes, and a parallel test cron stream. Each side has its own free Odds API key so manual testing never burns prod quota.
 
 ```bash
 # Pi: ~/projects/bets/.env (gitignored) — PROD key, used by cron only
 ODDS_API_KEY=<prod>
 BANKROLL=1000   # optional override; falls back to config.json → default 1000
 
-# WSL: /home/rfreire/projects/bets/.env.dev (gitignored) — DEV key, manual runs
+# WSL: /home/rfreire/projects/bets/.env.dev (gitignored) — DEV key, manual + test cron
 ODDS_API_KEY=<dev>
+NTFY_TOPIC_OVERRIDE=   # empty = silence ntfy on test stream
 ```
 
-Manual dev runs: `export $(cat .env.dev) && python3 scripts/scan_odds.py`. **Never** run manual scans on the Pi against the prod key (one exception: the post-cutover validation run on 2026-05-01).
+**Never** run manual scans on the Pi against the prod key (one exception: the post-cutover validation run on 2026-05-01).
 
-**A.4 dual-write toggle (WSL only; Pi must NOT set these):** to make WSL scans dual-write to Azure SQL on top of CSVs, add to `.env.dev`:
+### A.4 dual-write to Azure SQL — WSL only (Pi must NOT set these)
 
 ```bash
 BETS_DB_WRITE=1
-# Either: a literal pyodbc DSN (Azure SQL admin password embedded)
+# Either: literal pyodbc DSN with admin password embedded
 AZURE_SQL_DSN="Driver={ODBC Driver 18 for SQL Server};Server=tcp:kaunitz-dev-sql-uksouth-rfk1.database.windows.net,1433;Database=kaunitz;Uid=kaunitzadmin;Pwd=...;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
-# Or: the components + Key Vault references (BetRepo fetches the password at boot via `az keyvault secret show`)
+# Or: components + Key Vault refs (BetRepo fetches the password at boot via `az keyvault secret show`)
 # AZURE_SQL_SERVER=kaunitz-dev-sql-uksouth-rfk1.database.windows.net
 # AZURE_SQL_USER=kaunitzadmin
 # AZURE_SQL_DATABASE=kaunitz
@@ -98,121 +94,117 @@ AZURE_SQL_DSN="Driver={ODBC Driver 18 for SQL Server};Server=tcp:kaunitz-dev-sql
 # AZURE_SQL_KV_SECRET=sql-admin-password
 ```
 
-Without those, `BetRepo` runs in CSV-only mode and never imports `pyodbc` (Pi-safety contract). Switching the WSL cron to dual-write is a manual user step — not enabled by default after A.4.
-
-**A.5.5 raw API blob archive (WSL only; Pi must NOT set these):** to archive every Odds API response to Azure Blob Storage for retro data-quality checks, add to `.env.dev`:
+### A.5.5 raw API blob archive — WSL only (Pi must NOT set these)
 
 ```bash
 BLOB_ARCHIVE=1
-# Either: a literal blob storage connection string
+# Either: literal blob storage connection string
 AZURE_BLOB_CONN="DefaultEndpointsProtocol=https;AccountName=kaunitzdevstrfk1;..."
-# Or: Key Vault references (SnapshotArchive fetches the conn string at boot via `az keyvault secret show`)
+# Or: Key Vault refs
 # AZURE_BLOB_KV_VAULT=kaunitz-dev-kv-rfk1
 # AZURE_BLOB_KV_SECRET=blob-storage-connection-string
-# Optional override (default "raw-api-snapshots"):
+# Optional override (default "raw-api-snapshots")
 # AZURE_BLOB_CONTAINER=raw-api-snapshots
 ```
 
-Without those, `SnapshotArchive` is dormant and never imports `azure.storage.blob` (Pi-safety contract, mirrors A.4). On blob-write failure the response gzips into `logs/snapshots/` and uploads on the next successful run. No auto-delete: the archive is the substrate for future data-quality rules, so retention is indefinite (lifecycle rule tiers to cool at 30d only).
+**Pi-safety contract.** Without these env vars, `BetRepo` and `SnapshotArchive` stay dormant and never import `pyodbc` / `azure.storage.blob`. After `git pull` on Pi, behavior is byte-identical to pre-A.4/A.5.5. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
 
-Free tier: 500 requests/month per key. Production schedule uses ~474/month. Closing-line script adds ~6–10 calls on match days (zero on idle days). Each region (`uk`, `eu`) counts as a separate API call.
+API budget: free tier 500 requests/month per key; current schedule uses ~497/500 (5 football scans/wk × 2 regions × 6 leagues + bi-weekly sports check). Each region (`uk`, `eu`) counts as a separate API call. Migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
 
-**Note:** The Odds API blocks requests from cloud/server IPs. The scanner runs on the Pi (production) or WSL (dev). Multi-account split is a stopgap; migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
+## Cron schedule (UTC)
 
-## Cron schedule (Pi: `robert@192.168.0.28`, UTC)
-
-Cutover from WSL → Pi on 2026-05-01. Pi crontab uses `SHELL=/bin/bash` and the `cd ~/projects/bets && export $(cat .env) && .venv/bin/python3 ...` pattern (no inline API keys).
-
-**WSL also runs the same cron** (re-enabled later 2026-05-01) using `.env.dev` (separate dev API key) and `NTFY_TOPIC_OVERRIDE=""` (no notifications). It's a parallel test stream — gaps from laptop sleep are acceptable. WSL skips `research_scan.py` and `refresh_xg.py` (Pi-canonical, would conflict on git-tracked outputs). `NTFY_TOPIC` in `scan_odds.py` honours the env var.
+Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WSL is a parallel test stream (gaps from laptop sleep are acceptable). WSL skips `research_scan.py` and `refresh_xg.py` (Pi-canonical, would conflict on git-tracked outputs).
 
 ```
-# Scanner
-30 7  * * 1,2   Mon+Tue 7:30     — fresh weekly lines
-30 7  * * 5     Fri 7:30         — injury news drops
-30 19 * * 5     Fri 19:30        — lineup hints
-30 10 * * 6     Sat 10:30        — before 12:30 kick-off
-30 16 * * 6     Sat 16:30        — between 15:00 and 17:30 games
-30 12 * * 0     Sun 12:30        — before afternoon games
-0  9  * * 1,4   Mon+Thu 9:00     — tennis (capped at 2 tournaments)
-0  17 * * 1-5   Mon-Fri 17:00    — NBA before evening tip-offs
+# Football scans (both machines)
+30 7  * * 2     Tue 07:30           — fresh weekly lines
+30 19 * * 5     Fri 19:30           — lineup hints
+30 10 * * 6     Sat 10:30           — before 12:30 kick-off
+30 16 * * 6     Sat 16:30           — between 15:00 and 17:30 games
+30 12 * * 0     Sun 12:30           — before afternoon games
 
-# CLV backfill from football-data.co.uk free Pinnacle closing odds
-0  8  * * 1     Mon 08:00        — backfill pinnacle_close_prob + clv_pct on past-kickoff bets
+# CLV + housekeeping (both machines)
+0  8  * * 1     Mon 08:00           — football-data.co.uk CLV backfill
+0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
+0  3  * * *     Daily 3am           — bets.csv snapshot to bets.csv.bak.<date> (14d retention on snapshots only — live file untouched)
 
-# Housekeeping
-0  8  1,15 * *  Bi-weekly 8am    — sports discovery check
-0  3  * * *     3am daily        — bets.csv backup (14-day retention)
-
-# xG snapshot (feeds K_draw_bias filter)
-0  6  * * 1     Mon 06:00        — refresh logs/team_xg.json from Understat (last 5 matches/team)
-
-# Research scanner
-0 10 * * 1      Mon 10:00        — curated sources (Tier A change-watch + Tier B)
-0 10 1 * *      1st of month 10:00 — open-search (7 queries × 4 backends)
+# Pi only (WSL would conflict on git-tracked outputs)
+0  6  * * 1     Mon 06:00           — refresh logs/team_xg.json from Understat
+0 10  * * 1     Mon 10:00           — research scanner — curated sources
+0 10  1 * *     1st of month 10:00  — research scanner — open-search
 ```
+
+`scripts/closing_line.py` is paused (cron entry removed; kept in tree for fast revert). CLV now backfills weekly from FDCO — see CLV section below.
 
 ## Key files
 
 ```
 scripts/scan_odds.py        Main scanner
-scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.json
-scripts/closing_line.py     Closing-line + drift snapshot (paused; kept for revert)
 scripts/backfill_clv_from_fdco.py  Mon 08:00 CLV backfill from football-data.co.uk
+scripts/closing_line.py     (paused 2026-05-01; kept for revert)
+scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.json
 scripts/check_sports.py     Sports discovery (bi-weekly)
 scripts/model_signals.py    CatBoost signal cache generator
+scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
+scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent)
+
 app.py                      Flask dashboard
 templates/index.html        Dashboard UI
-logs/bets.csv               All suggested bets + results + CLV
-logs/closing_lines.csv      Pinnacle closing prob per bet at kick-off
-logs/drift.csv              Odds drift at T-60, T-15, T-1 before kick-off
-logs/scan.log               Scanner output
-logs/closing_line.log       Closing-line script output
-logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
-logs/bankroll.json          High-water mark for drawdown brake
-logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (263 tests across 21 files; run with `pytest`)
+
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
-src/storage/schema_sqlite.sql  SQLite mirror of the schema for in-memory smoke tests
-src/storage/migrate.py      Idempotent migration runner (--dsn for MSSQL, --sqlite for tests)
-src/storage/_keys.py        Deterministic UUID5 + sport-label helpers shared by repo + importer (don't change the namespace)
-src/storage/repo.py         BetRepo dual-writer (CSV always; Azure SQL when BETS_DB_WRITE=1 + DSN env set; Pi-safe lazy pyodbc import)
-src/storage/snapshots.py    SnapshotArchive: gzipped raw API responses → Azure Blob (BLOB_ARCHIVE=1; Pi-safe lazy azure-storage-blob import; logs/snapshots/ buffer on failure)
-scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent on rerun; --dsn or --sqlite)
+src/storage/schema_sqlite.sql  SQLite mirror for in-memory smoke tests
+src/storage/migrate.py      Idempotent migration runner
+src/storage/_keys.py        Deterministic UUID5 + sport-label helpers (don't change the namespace)
+src/storage/repo.py         BetRepo dual-writer (A.4; lazy pyodbc import)
+src/storage/snapshots.py    SnapshotArchive: gzipped raw API responses → Azure Blob (A.5.5; lazy azure-storage-blob import; logs/snapshots/ buffer on failure)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
-src/betting/strategies.py   16 paper strategy variants (A–P; A_production live, B–P shadow) + evaluate_strategy() entry point
-src/betting/consensus.py    Consensus computation helpers
-src/betting/kelly.py        Kelly criterion
-src/betting/walk_forward.py  Walk-forward backtest primitive (TimeSeriesSplit; Phase R.5.5a)
-logs/paper/                 Paper strategy CSVs (one per variant, same schema as bets.csv + strategy col)
-scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
-docs/STRATEGY_COMPARISON.md   Latest CLV comparison across all paper-portfolio strategy variants
-docs/PLAN.md                Phased improvement roadmap (Phases 0–10)
-docs/APPROACH.md            Full research-backed architecture
-docs/BACKTEST.md            Shin-corrected backtest (2026-04-29): raw vs shin tables + interpretation
-docs/RESEARCH_NOTES_2026-04.md  Manual deep-read findings (April 2026); TL;DR at top
-docs/PLAN_RESEARCH_2026-04.md   Implementation plan from above; bot-executable + bot-verifiable
-docs/RESEARCH_SCANNER.md    Automated scanner spec (Phases 11.0–11.9 shipped) + post-2026-04 improvements
+src/betting/strategies.py   16 paper variants (A–P; A_production live, B–P shadow) + evaluate_strategy()
+src/betting/walk_forward.py  Walk-forward backtest primitive (TimeSeriesSplit)
+
+logs/bets.csv               All suggested bets + results + CLV
+logs/paper/                 Paper strategy CSVs (one per variant)
+logs/team_xg.json           Per-team avg xG + q25 threshold (weekly; feeds K_draw_bias)
+logs/bankroll.json          High-water mark for drawdown brake
+logs/notified.json          Notification dedupe state
+logs/scan.log               Scanner output
+logs/backfill_clv.log       FDCO backfill output
+logs/closing_lines.csv      (frozen; closing_line.py paused — historical only)
+logs/drift.csv              (frozen; same)
+logs/closing_line.log       (frozen; same)
+
+tests/                      pytest suite (263 tests across 21 files; run with `pytest`)
+
+docs/PLAN.md                Phased improvement roadmap (Phases 0–10, foundation — historical for done phases)
+docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)
+docs/PLAN_RESEARCH_2026-04.md  Research sprint plan (R.0–R.11)
+docs/RESEARCH_NOTES_2026-04.md  Manual deep-read findings
+docs/BACKTEST.md            Shin-corrected backtest
+docs/STRATEGY_COMPARISON.md  Latest CLV comparison across paper variants
+docs/FIRST_WEEKEND.md       Live eval log + WSL/Pi divergence checklist
+docs/RESEARCH_SCANNER.md    Automated research scanner spec
 docs/RESEARCH_FEED.md       Auto-generated weekly findings (newest first)
-src/                        Statistical models (Dixon-Coles, pi-ratings, CatBoost)
+docs/APPROACH.md            Full research-backed architecture
+docs/REVIEW.md              Foundational review (2026-04-29; historical)
+docs/FDCO_INGEST_NOTES.md   Football-data.co.uk ingest details
+docs/AH_FEASIBILITY.md      Asian Handicap feasibility probe (R.9)
+docs/COMMISSIONS.md         Per-book commission rates
 data/raw/                   Football-data.co.uk CSVs + Understat xG
 ```
 
 ## Dashboard
 
 ```bash
-python3 app.py
-# Open http://localhost:5000
+python3 app.py    # → http://localhost:5000
 ```
 
-Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg CLV** (green if >0, only shown once any bets have CLV) · **Drift toward you %** (only shown once drift data exists; should be >50% if sharp) · **Research** (latest run count + mode · date from `docs/RESEARCH_FEED.md`).
+Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg CLV** (green if >0; only shown once any bets have CLV) · **Research** (latest run count + mode + date from `docs/RESEARCH_FEED.md`).
 
-Three bet sections:
-- **Placed — awaiting result**: logged stake, waiting to settle
-- **Suggested — not yet placed**: new scanner output
-- **Settled**: P&L, CLV%, drift direction per bet
+Three bet sections: **Placed — awaiting result** · **Suggested — not yet placed** · **Settled** (with P&L + CLV%).
 
-## Risk management (Phase 2)
+The public Azure dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` reads from Azure SQL DB-first with CSV fallback (A.5). Pi data is not visible in the Azure dashboard until A.10 — only Pi-local `python3 app.py` shows it.
+
+## Risk management
 
 Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 
@@ -224,80 +216,56 @@ Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 | Drawdown brake | If bankroll < 85% of high-water → stakes halved |
 | Bankroll source | `BANKROLL` env var → `config.json` → default £1000 |
 
-## CLV diagnostics (Phase 3)
+## CLV diagnostics
 
-CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, walks `bets.csv` + `logs/paper/*.csv`, and fills `pinnacle_close_prob` + `clv_pct` for any past-kickoff h2h or totals-2.5 row that's still empty. Idempotent: never overwrites a populated `pinnacle_close_prob`.
+CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, walks `bets.csv` + `logs/paper/*.csv`, and fills `pinnacle_close_prob` + `clv_pct` for any past-kickoff h2h or totals-2.5 row that's still empty. Idempotent.
 
-Source-swap rationale (2026-05-01): the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
+**Source-swap rationale (2026-05-01):** the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
 
 **Trade-offs vs the previous closing_line.py path:**
 - No drift (T-60/T-15/T-1 snapshots disabled). `logs/drift.csv` is frozen.
-- BTTS bets get no CLV (FDCO doesn't carry BTTS). The system has 0 BTTS bets anyway.
-- Totals only on the 2.5 line (FDCO's only published total).
-- ≥1-day delay vs at-close capture — fine for the weekly review, useless for live tracking.
-- Top-6 leagues only: EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2. NBA + tennis still have no CLV.
-
-`scripts/closing_line.py` is paused (cron entry removed) but kept in the tree for fast revert if FDCO becomes unreliable. Dashboard aggregates remain unchanged: avg CLV and CLV-positive %.
-
-**CLV is the gate**: if avg CLV stays negative over ~50 bets, the system has no real edge and further build-out (Phases 5–10) is pointless.
+- Top-6 leagues only: EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2.
+- Totals only on the 2.5 line; no BTTS (FDCO doesn't carry it; system has 0 BTTS bets anyway).
+- ≥1-day delay vs at-close capture — fine for weekly review, useless for live tracking.
 
 **CLV scope limitations:**
-- **Tennis + NBA + BTTS bets produce no CLV.** FDCO is football-only (six leagues above) and doesn't carry BTTS.
-- **Totals and BTTS bets always show `model_signal=?`.** The CatBoost model only produces signals for h2h on EPL, Bundesliga, Serie A, and Ligue 1. The 2–3% model-filtered notification path therefore only ever fires on h2h bets in those four leagues — never on totals, BTTS, Championship, Bundesliga 2, NBA, or tennis.
+- Tennis + NBA + BTTS bets produce no CLV (FDCO is football-only).
+- Totals + BTTS bets always show `model_signal=?` — CatBoost only produces signals for h2h on EPL/Bundesliga/Serie A/Ligue 1, so the 2–3% model-filtered notification path only ever fires on h2h bets in those four leagues.
+
+**CLV is the gate.** If avg CLV stays negative over ~50 bets, the system has no real edge and further build-out is pointless.
 
 ## Statistical model (built, not yet in production)
 
-Full pipeline in `src/` and `main.py`:
-- `src/ratings/pi_ratings.py` — dynamic team strength (Constantinou 2013)
-- `src/model/dixon_coles.py` — Poisson model with ρ low-score correction
-- `src/model/catboost_model.py` — CatBoost on pi-ratings + rolling xG features
-- `src/data/understat.py` — xG data from Understat (4,180 EPL matches 2014–2024)
+Pipeline in `src/`: `pi_ratings.py` (Constantinou 2013) → `dixon_coles.py` Poisson → `catboost_model.py`. xG from Understat (`src/data/understat.py`, 4,180 EPL matches 2014–2024).
 
-Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hold-out eval + calibration planned (Phase 7).
+Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hold-out eval + calibration is Phase 7.
 
 ## Implementation status
 
-| Phase | Description | Status |
-|---|---|---|
-| 0 | Hygiene: dedup, atomic writes, backups, no-bets throttle | ✅ Done |
-| 1 | Shin de-vigging + Pinnacle anchor | ✅ Done |
-| 2 | Risk management (rounding, caps, drawdown) | ✅ Done |
-| 3 | CLV + drift diagnostics | ✅ Done |
-| 4 | Filters: dispersion, outlier-book check + notification dedupe + test scaffolding | ✅ Done (dispersion/outlier via `strategies.py`; notification dedupe via `logs/notified.json` in `scan_odds.py`) |
-| 5 | New markets: totals, BTTS | ✅ Done |
-| 5.5 | Paper portfolios (initial 8 strategy variants A–H, shadow A/B; expanded to 16 in R.0–R.3 + R.8) | ✅ Done |
-| 5.6 | Phase 5.5 bugfix sweep (P0/P1) | ✅ Done |
-| 5.7 | Commission-aware edges (per-book commission, net Kelly) | ✅ Done |
-| 5.8 | Post-5.7 review fixes (schema reset, per-row CLV, impl_raw rename, tennis throttle) | ✅ Done |
-| 6 | Storage migration: SQL Server Express + UUIDs (was: SQLite — superseded by Azure direction below) | Pending |
-| 7 | Model overhaul: calibration, hold-out eval | Pending |
-| 8 | Betfair API auto-placement | Pending |
-| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.7 + A.5.5 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer + dashboard DB-first reads + public Container Apps dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` with Google OIDC + email allowlist `robert.freire@gmail.com` — pivoted from App Service due to 0 VM quota in Reply VSE; raw Odds API responses archived to `kaunitzdevstrfk1` blob storage, lifecycle tier-to-cool at 30d, no auto-delete). A.8/A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
-| 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
-| R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
-| R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`, `TimeSeriesSplit(5)` primitive) | ✅ Done |
-| R.5.5b | 16 new leagues from football-data.co.uk (91,492 matches / 22 leagues; see `docs/FDCO_INGEST_NOTES.md`). Pivot rationale: `docs/ZENODO_INGEST_NOTES.md` | ✅ Done |
-| R.4 | Weekend data collection (Sat–Sun, runs via existing cron) | Auto-runs |
-| R.5 | Monday analysis: §4.3, 4.5, 4.6 + compare_strategies output | Pending |
-| R.5.5c | Walk-forward run + 3-view per-fold report (all-22 / production-6 / per-league × 16); adds `consensus_mode` axis (mean vs pinnacle_only) | Pending |
-| R.6 | Graduate winning **variants** (production-6 evidence) AND winning **leagues** (per-league evidence) → scanner defaults | Pending (conditional on R.5.5c) |
-| R.7 | bets.csv schema: `devig_method`, `weight_scheme` columns | ✅ Done |
-| R.8 | Draw-bias variant K (xG from Understat; `scripts/refresh_xg.py` weekly cron) | ✅ Done |
-| R.9 | Asian Handicap feasibility probe (The Odds API) | ✅ Done (`docs/AH_FEASIBILITY.md`; AH fetchable via `spreads` key; UK books too thin; Pinnacle anchor viable post-upgrade) |
-| R.10 | AH probability conversion module (planning only) | Blocked on CLV confirmation (gate: R.6 graduations + avg CLV>0 over ≥50 bets + sharp-weighted shadow signal; see `docs/AH_FEASIBILITY.md` §6) |
+| Group | Status |
+|---|---|
+| Phases 0–5.8 (hygiene, devig, risk, CLV, filters, markets, paper portfolio, commission-aware) | ✅ all done |
+| Phase 6 (storage migration: SQLite + UUIDs) | superseded by Phase 9 Azure direction |
+| Phase 7 (model overhaul: calibration, hold-out eval) | pending |
+| Phase 8 (Betfair API auto-placement) | pending |
+| Phase 9a (Pi cron cutover) | ✅ done 2026-05-01 |
+| Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |
+| Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | pending (≥1 wk soak from 2026-05-01) |
+| Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |
+| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |
+| Phase 10 (long-term: syndicate, multi-account) | open |
+| Phase 11 (research scanner) | ✅ done |
+| R.0–R.3 + R.5.5a/b + R.7–R.9 + R.11 (2026-04 research sprint) | ✅ done |
+| R.5 / R.5.5c / R.6 (Mon analysis + walk-forward run + variant graduations) | pending |
+| R.10 (AH probability conversion module) | blocked on CLV evidence |
 
-Full roadmap: `docs/PLAN.md`. 2026-04 sprint: `docs/PLAN_RESEARCH_2026-04.md`.
+Detail in `docs/PLAN.md`, `docs/PLAN_AZURE_2026-05.md`, `docs/PLAN_RESEARCH_2026-04.md`.
 
-**Variants in shadow (paper portfolio only — not flipped as defaults):** I_power_devig, J_sharp_weighted, K_draw_bias, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner still uses A_production logic.
+**Variants in shadow** (paper portfolio only, not flipped as defaults): I_power_devig, J_sharp_weighted, K_draw_bias, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner uses A_production logic.
 
-## Research cycle (manual deep-read → variants → graduations)
+## Research cycle
 
-The automated scanner (`docs/RESEARCH_SCANNER.md`) writes shallow findings weekly to `docs/RESEARCH_FEED.md`. Quarterly (or signal-triggered), do a manual deep-read pass that produces:
-
-1. `docs/RESEARCH_NOTES_<YYYY-MM>.md` — judgement-laden findings; reads actual code from comparable repos and PDFs in full.
-2. `docs/PLAN_RESEARCH_<YYYY-MM>.md` — phased implementation plan derived from the notes; each phase = one PR, with explicit Acceptance, Verification, and Reviewer-focus blocks (bot-implementable, bot-verifiable).
-3. PRs landing variants in `src/betting/strategies.py` as Phase 5.5 paper portfolio.
-4. After ≥50 settled bets per variant + walk-forward backtest evidence, graduations flip scanner defaults.
+Three-stage: automated scanner (`docs/RESEARCH_SCANNER.md`) → quarterly manual deep-read producing `docs/RESEARCH_NOTES_<YYYY-MM>.md` + `docs/PLAN_RESEARCH_<YYYY-MM>.md` → PRs landing variants in `src/betting/strategies.py`. After ≥50 settled bets per variant + walk-forward backtest evidence, graduations flip scanner defaults.
 
 Latest cycle: **2026-04** — see `docs/RESEARCH_NOTES_2026-04.md` (TL;DR at top) and `docs/PLAN_RESEARCH_2026-04.md` (phases R.0 → R.10).
 
