@@ -2,6 +2,8 @@
 
 *Drafted: 2026-04-29 — derived from `docs/REVIEW.md`.*
 
+> **Status (2026-05-01):** Phases 0–5.8 + Phase 9 (Pi cron + Azure A.0–A.7 + A.5.5) ✅ shipped. **CLAUDE.md is the authoritative current-state doc** — that has the live phase table and the post-2026-04-29 architectural shifts (Phase 3's `closing_line.py` paused 2026-05-01 in favour of football-data.co.uk weekly CLV backfill; Phase 5.5 paper portfolio expanded from 8 → 16 variants in R.0–R.3). This file is retained as the historical design record for those phases — useful for understanding the **why**, not the current **what**. Phases 6, 7, 8, 10 still describe pending work; treat their narratives as current.
+
 This is a phased plan to roll the recommendations from the review into the system without breaking the daily scan in the meantime. Phases are ordered so each one delivers measurable value on its own; you can stop after any phase and still be better off than today.
 
 ---

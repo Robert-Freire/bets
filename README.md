@@ -164,30 +164,32 @@ See [`docs/RESEARCH_SCANNER.md`](docs/RESEARCH_SCANNER.md) for the full spec.
 
 ---
 
-## Cron schedule (WSL, UTC)
+## Cron schedule (UTC)
+
+Both Pi (production) and WSL (parallel test stream) run the same football scans. Pi additionally runs xG refresh and the research scanner.
 
 ```
-# Scanner
-30 7  * * 1,2   Mon+Tue 7:30        fresh weekly lines (football)
-30 7  * * 5     Fri 7:30            injury news drops (football)
+# Scanner — both machines
+30 7  * * 2     Tue 07:30           fresh weekly lines (football)
 30 19 * * 5     Fri 19:30           lineup hints (football)
 30 10 * * 6     Sat 10:30           before 12:30 kick-offs (football)
 30 16 * * 6     Sat 16:30           between 15:00 and 17:30 games (football)
 30 12 * * 0     Sun 12:30           before afternoon games (football)
-0  9  * * 1,4   Mon+Thu 9:00        tennis (capped at 2 tournaments)
-0  17 * * 1-5   Mon-Fri 17:00       NBA before evening tip-offs
 
-# Closing line + drift snapshots
-*/5 7-23 * * *  Every 5 min         T-60, T-15, T-1 drift + CLV at close
+# CLV backfill (replaces the old every-5-min closing_line.py path)
+0  8  * * 1     Mon 08:00           football-data.co.uk Pinnacle close odds → bets.csv + paper/
 
-# Housekeeping
+# Housekeeping — both machines
 0  8  1,15 * *  Bi-weekly 8:00      sports discovery check
-0  3  * * *     Daily 3:00          bets.csv backup (14-day retention)
+0  3  * * *     Daily 3:00          bets.csv snapshot to bets.csv.bak.<date> (14d retention on snapshots only)
 
-# Research scanner
-0 10 * * 1      Mon 10:00           curated sources (Tier A + Tier B)
-0 10 1 * *      1st of month        open-search (7 queries × 4 backends)
+# xG + research — Pi only (would conflict on git-tracked outputs if both ran)
+0  6  * * 1     Mon 06:00           xG refresh from Understat
+0 10  * * 1     Mon 10:00           research scanner — curated sources
+0 10  1 * *     1st of month        research scanner — open-search
 ```
+
+`scripts/closing_line.py` is paused (kept in tree for revert; CLV now backfills weekly from football-data.co.uk's free Pinnacle close odds — see `docs/CLAUDE.md` "CLV diagnostics" section).
 
 ---
 
@@ -198,8 +200,7 @@ See [`docs/RESEARCH_SCANNER.md`](docs/RESEARCH_SCANNER.md) for the full spec.
 ODDS_API_KEY=your_key_here
 ```
 
-Free tier: 500 requests/month. Scanner uses ~474/month; closing-line script adds ~6–10 calls on match days (zero on idle days).
-Each scan of all football leagues uses ~14 API calls (2 regions × 7 sports).
+Free tier: 500 requests/month per key. Production schedule uses ~497/500 calls/month per key with the trimmed cron (5 football scans/wk + bi-weekly sports check). Pi uses the prod key, WSL uses a separate dev key — manual scans never burn prod quota.
 
 Get a key at [the-odds-api.com](https://the-odds-api.com).
 
@@ -210,9 +211,11 @@ Get a key at [the-odds-api.com](https://the-odds-api.com).
 ```
 scripts/
   scan_odds.py          Daily scanner — finds value bets, sends notifications
-  closing_line.py       Closing-line + drift snapshots (runs every 5 min via cron)
+  backfill_clv_from_fdco.py  Mon 08:00 CLV backfill from football-data.co.uk
+  closing_line.py       (paused; kept for fast revert if FDCO becomes unreliable)
   model_signals.py      Trains CatBoost per league, caches predictions to JSON
   check_sports.py       Discovers new sports on The Odds API (run bi-weekly)
+  refresh_xg.py         Weekly xG snapshot from Understat → logs/team_xg.json
 
 src/
   betting/
@@ -237,12 +240,14 @@ app.py                  Flask dashboard
 templates/index.html    Dashboard UI
 logs/
   bets.csv              All suggested bets + results + CLV (your main log)
-  closing_lines.csv     Pinnacle closing devigged prob per bet at kick-off
-  drift.csv             Pinnacle + book odds at T-60, T-15, T-1 before kick-off
+  paper/<variant>.csv   16 paper-portfolio shadow strategies (A_production–P_max_odds_shopping)
+  team_xg.json          Per-team xG snapshot from Understat (feeds K_draw_bias)
+  closing_lines.csv     (frozen — closing_line.py paused; historical drift data only)
+  drift.csv             (frozen — see above)
   model_signals.json    CatBoost predictions cache (regenerated weekly)
   bankroll.json         High-water mark for drawdown brake
   scan.log              Scanner output log
-  closing_line.log      Closing-line script output log
+  backfill_clv.log      Mon 08:00 FDCO backfill log
 data/
   raw/                  football-data.co.uk CSVs (10+ seasons per league)
   raw/xg/               Understat xG CSVs
@@ -277,7 +282,7 @@ CLV % = your_odds × pinnacle_closing_fair_prob − 1
 
 Positive CLV means you beat the close — the market subsequently agreed with your bet. Consistently positive CLV (over ≥50 bets) is evidence of genuine edge, regardless of short-term P&L variance.
 
-`scripts/closing_line.py` captures Pinnacle odds at T-60, T-15, and T-1 minutes before kick-off, then writes `pinnacle_close_prob` and `clv_pct` back into `bets.csv`. The dashboard surfaces **avg CLV** and **% drift toward you** in the stats bar.
+CLV is backfilled weekly from football-data.co.uk's free Pinnacle close odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, walks `bets.csv` + `logs/paper/*.csv`, and fills `pinnacle_close_prob` + `clv_pct` for any past-kickoff h2h or totals-2.5 row that's still empty. Idempotent: never overwrites a populated `pinnacle_close_prob`. Scope: top-6 football leagues only (EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2). Dashboard surfaces **avg CLV** in the stats bar.
 
 **If avg CLV is consistently negative over 50+ bets, stop the build-out** — Phases 5–10 add no value without an underlying edge.
 
