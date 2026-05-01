@@ -30,6 +30,10 @@ try:
 except ImportError:
     _DEVIG = False
 
+# A.4: BetRepo dual-writes CSV + (optionally) Azure SQL. Pi-safe: the
+# DB code path stays dormant unless BETS_DB_WRITE=1 + DSN env are set.
+from src.storage.repo import BetRepo, PAPER_FIELDS as _PAPER_FIELDS_REPO
+
 try:
     from src.betting.risk import (
         get_bankroll as _get_bankroll,
@@ -692,8 +696,8 @@ def _paper_provenance(strategy) -> tuple[str, str]:
 
 def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
                       sport_label: str, now: str, scan_date: str, bankroll: float = 1000.0,
-                      strategy=None):
-    """Write paper strategy bets to logs/paper/<strategy_name>.csv."""
+                      strategy=None, repo: "BetRepo | None" = None):
+    """Write paper strategy bets to logs/paper/<strategy_name>.csv (and DB if `repo` is dual-write)."""
     if not paper_bets:
         return
     _PAPER_DIR.mkdir(exist_ok=True)
@@ -762,13 +766,16 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
     if not new_rows:
         return
 
-    write_header = not log_file.exists()
-    with open(log_file, "a", newline="") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        writer = csv.DictWriter(f, fieldnames=_PAPER_FIELDNAMES, extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
-        writer.writerows(new_rows)
+    if repo is not None:
+        repo.add_paper_bets(strategy_name, new_rows)
+    else:
+        write_header = not log_file.exists()
+        with open(log_file, "a", newline="") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            writer = csv.DictWriter(f, fieldnames=_PAPER_FIELDNAMES, extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+            writer.writerows(new_rows)
     print(f"[paper:{strategy_name}] {len(new_rows)} bet(s) → logs/paper/{strategy_name}.csv")
 
 
@@ -843,6 +850,14 @@ def main():
 
     all_sports = build_sport_list(args.sports, args.max_tennis)
 
+    # A.4: BetRepo handles CSV writes (always) + Azure SQL writes (only when
+    # BETS_DB_WRITE=1 and DSN env are set — i.e. WSL dev side, not the Pi).
+    repo = BetRepo()
+    if repo.db_enabled:
+        print("[scan] Dual-write mode: CSV + Azure SQL")
+    else:
+        print("[scan] CSV-only mode (BETS_DB_WRITE not set)")
+
     quota_remaining = "?"
     all_bets: list[dict] = []
     sport_summary: list[str] = []
@@ -871,7 +886,7 @@ def main():
                         )
                         _append_paper_csv(strategy.name, paper_bets,
                                           sport_label=label, now=now, scan_date=scan_date,
-                                          bankroll=BANKROLL, strategy=strategy)
+                                          bankroll=BANKROLL, strategy=strategy, repo=repo)
                     except Exception as pe:
                         print(f"[paper:{strategy.name}] ERROR for {label}: {pe}")
         except Exception as e:
@@ -1002,21 +1017,8 @@ def main():
             "result": "",
         })
 
-    write_header = not log_file.exists()
-    with open(log_file, "a", newline="") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        writer = csv.DictWriter(f, fieldnames=[
-            "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-            "side", "book", "odds", "impl_raw", "impl_effective",
-            "edge", "edge_gross", "effective_odds", "commission_rate",
-            "consensus", "pinnacle_cons",
-            "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-            "devig_method", "weight_scheme",
-            "stake", "result"
-        ], extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
-        writer.writerows(new_rows)
+    if new_rows:
+        repo.add_bets(new_rows)
     skipped = len(output_bets) - len(new_rows)
     print(f"[log] {len(new_rows)} bets appended to logs/bets.csv"
           + (f" ({skipped} duplicate(s) skipped)" if skipped else ""))
@@ -1065,6 +1067,8 @@ def main():
         _mark_notified(model_new, notified, now_dt)
 
     _save_notified(notified)
+
+    repo.close()
 
 
 if __name__ == "__main__":
