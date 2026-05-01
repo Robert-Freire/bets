@@ -296,18 +296,60 @@ The PR #17 implementation bot added an unrelated WARNING ntfy notification outsi
 
 Shipped 2026-05-01 alongside this doc update. Dev-only via `config.dev.json` + `LEAGUES_CONFIG=config.dev.json` in `.env.dev`. Pi unchanged.
 
+**First scan (manual, 20:49 UTC Fri 2026-05-01):** ran cleanly. La Liga loaded with 20 fixtures and 32 avg books. **160 paper-portfolio rows** added across variants (vs typical ~30 per scan on the prod leagues). One Kaunitz bet logged — Girona vs Mallorca AWAY at betvictor 1.2, edge 4.5%, 27 books MED. Bet pushed to prod ntfy by mistake (`.env.dev` was missing `NTFY_TOPIC_OVERRIDE=` line; cron itself sets it inline so cron is unaffected; `.env.dev` now patched locally).
+
+**Dispersion shape analysis ran offline against the archived blob (zero API cost):**
+- **78.3% of fixture×outcome rows are bimodal** — far above the 30% threshold. La Liga's dispersion is structured, not noise.
+- Sharp anchors confirmed: Pinnacle (89% centre rate), Marathonbet (88%), Matchbook (87%), Smarkets (78%).
+- `J_sharp_weighted` hardcoded weights need La Liga override: keep Pinnacle 3.0; reduce Betfair Exchange 2.5 → 1.5 (not centre-dominant on La Liga); add Marathonbet + Matchbook at 2.5 (currently default 1.0).
+- Soft UK books for edge-flagging: virginbet, livescorebet, paddypower, skybet, ladbrokes_uk, williamhill.
+- Anomaly: winamax_fr/de show extreme structural bias — always low on Draws, always high on Aways. Different pricing model entirely.
+
+→ **Run `scripts/analyse_dispersion.py --blob <path>` against Sat + Sun blobs to confirm cluster persistence across scans.** Persistent clusters = M.7 hypothesis validated; can move on M.6 weights.
+
 **Monday checks specific to M.4a:**
 - [ ] WSL Sat/Sun scans show La Liga in the per-scan summary (7 leagues vs Pi's 6).
 - [ ] `logs/paper/A_production.csv` and `logs/paper/J_sharp_weighted.csv` have La Liga rows; counts diverge between the two variants (proves the variants are filtering La Liga differently — informative even before CLV).
 - [ ] WSL dev key consumption in line with expected: ~7 leagues × 2 cr × 3 weekend scans = ~42 cr added vs the 6-league baseline.
 - [ ] No scan-log errors specific to La Liga (parse failures, FDCO mapping issues, etc.).
+- [ ] Run `scripts/analyse_dispersion.py --blob` on Sat 10:30 + Sun 12:30 La Liga blobs. Confirm shape distribution + sharp/soft books match Friday's findings.
 
 **Soft signals worth noting in the post-mortem write-up:**
 - Count of La Liga value-bet flags per variant on Sat/Sun, broken down by Kaunitz vs Model-filtered.
 - Spread of edge percentages on La Liga flags vs the 6 prod leagues' flags.
 - Whether `J_sharp_weighted` and `A_production` produce systematically different La Liga bet sets (overlap %), as a leading indicator before CLV lands.
 
-**Decision rule on M.4a continuation:** if La Liga produces obvious data-quality issues (parse errors, missing teams, mapping failures) → revert by removing La Liga from `config.dev.json`. If it runs cleanly → keep it through M.7 + M.4 to maximise the data window.
+**Decision rule on M.4a continuation:** if La Liga produces obvious data-quality issues (parse errors, missing teams, mapping failures) → revert by removing La Liga from `config.dev.json`. If it runs cleanly + cluster persistence holds → keep it through M.7 + M.4 to maximise the data window.
+
+### Reuse-archived-data principle (lesson from this session)
+
+When doing analysis on already-collected data, **always prefer Azure Blob `raw-api-snapshots` over a fresh API call**. Each Odds API call costs 2cr against a 500/mo budget; the blob archive (A.5.5, live on WSL) holds every Odds API response. The dispersion-shape analysis in this section was done at zero API cost by parsing the archived blob from the 20:49 scan. `scripts/analyse_dispersion.py --blob <path>` is the canonical pattern. Memory note: `feedback_reuse_archived_data.md`.
+
+### All-leagues dispersion analysis (2026-05-01) — captured for reference
+
+Ran `scripts/analyse_dispersion.py` against blobs for all 10 currently-archived leagues. Results in `docs/DISPERSION_SHAPES_2026-05.md`. Three findings worth surfacing here:
+
+1. **Bimodality is universal** (75–93% across every league). The original M.7 threshold was useless. Replaced with **cluster amplitude** as the differentiator (mean distance between low and high cluster medians).
+2. **Ligue 1 has the highest cluster amplitude (0.0518)** — even higher than La Liga (0.0441). Already in prod. Either there's unrealised edge or amplitude alone doesn't translate to extractable edge. Investigate against existing CLV data once it lands.
+3. **Sharp identity shifts per league.** Marathonbet is a near-universal sharp (8 of 10 leagues) but currently weighted 1.0 in `J_sharp_weighted`. Pinnacle's sharpness varies — top sharp on La Liga + Championship, mid-pack on EPL/Bundesliga/Serie A/Ligue 1. Hardcoded weights are league-blind and leave signal on the table.
+
+**Methodology limitation flagged.** "Sharp = high centre rate" is a proxy that can mislabel a real sharp as soft when many UK books cluster together. M.7 should add Pinnacle-anchored deviation (and eventually closing-line deviation, post-CLV) as a more robust metric. See `docs/DISPERSION_SHAPES_2026-05.md` § "Methodology limitation".
+
+### D.8 — Weekly post-mortem dispersion analysis (standing item)
+
+Added 2026-05-01 as a recurring Monday post-mortem step. **Zero API cost** — runs entirely against archived blobs.
+
+**Standing procedure** (full script in `docs/DISPERSION_SHAPES_2026-05.md` § "Weekly post-mortem cadence"):
+
+1. Pull each scanned league's most recent weekend blob from Azure Blob `raw-api-snapshots`.
+2. Run `scripts/analyse_dispersion.py --blob <path>` per league.
+3. Compare top sharps + cluster amplitude against prior week's run.
+4. Flag drift: book dropping out of top sharps, amplitude shift > 0.005, new book appearing at >80% centre.
+5. If drift is structural (persists ≥ 2 weeks), update `book_weights` in `config.json` / `config.dev.json`.
+
+**Outcome over time.** By 4–6 weekly post-mortems we have empirical evidence on which books are *persistently* sharp per league — validating M.6 weights against fresh data, not a one-shot guess. Memory: `project_weekly_postmortem_cadence.md`.
+
+**Don't run with `--fetch`.** That'd burn 22cr/week on data we already have archived. The whole point is to avoid that.
 
 ---
 

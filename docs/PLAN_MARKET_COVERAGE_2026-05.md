@@ -17,7 +17,7 @@ This doc is self-contained for asynchronous bot execution. Follow the same proto
 | M.2 | Move league list to `config.json`; env-overridable per host | ✅ done (PR #17, 2026-05-01) |
 | M.4a | La Liga early-add to dev (no AH, no per-league weights) | ✅ done (PR #18, 2026-05-01) |
 | M.3 | Add passing leagues to prod config | pending (depends on M.1, M.2; gated on Mon 2026-05-04 post-mortem) |
-| M.7 | Dispersion shape analysis per league | pending (depends on M.1) — **runs before M.6** |
+| M.7 | Dispersion shape analysis per league | **partial** — `scripts/analyse_dispersion.py` shipped 2026-05-01; ran on La Liga (78.3% bimodal). Tests + per-league report across all 11 leagues still pending. |
 | M.6 | Configurable book weights via `config.json` | pending (depends on M.7) |
 | M.4 | Add `spreads` market + structured experiments to dev config | pending (depends on M.6, M.3, M.4a) |
 | M.5 | Doc + memory updates; delete this plan | pending (depends on M.4) |
@@ -254,38 +254,32 @@ grep -i "la liga\|spain" logs/paper/A_production.csv logs/paper/J_sharp_weighted
 
 ## Phase M.7 — Dispersion shape analysis per league
 
-**Goal.** Characterise the *shape* of book disagreement per league, not just summary statistics. A league's `p95 = 0.083` could mean (a) wide unimodal noise — flat consensus is fine, (b) bimodal clusters of "sharp" and "soft" books — sharp-weighting can exploit it, or (c) no structure — drop the league. Without this diagnostic, M.6's per-league weight overrides would be guesses, and M.4's "add La Liga to dev as a sharp-weighted experiment" is a bet without evidence.
+**Goal.** Characterise the *shape* of book disagreement per league, not just summary statistics. A league's `p95 = 0.083` could mean (a) wide unimodal noise — flat consensus is fine, (b) bimodal clusters of "sharp" and "soft" books — sharp-weighting can exploit it, or (c) no structure — drop the league. Without this diagnostic, M.6's per-league weight overrides would be guesses.
 
-**Inputs.** M.1's probe data (or fresh dev-scan run); list of all currently-scanned + candidate leagues.
+**Status (2026-05-01).** Scaffold shipped: `scripts/analyse_dispersion.py` exists and runs end-to-end. Tested on La Liga (single scan, 60 fixture×outcome rows): **78.3% bimodal** (well above the 30% threshold), Pinnacle/Marathonbet/Matchbook identified as sharp anchors. Pending: tests, per-league report covering all 11 leagues, persistence-across-scans calculation.
+
+**Inputs.** Azure Blob `raw-api-snapshots/odds_api/` (preferred — no API cost) OR fresh dev-scan run (with `--fetch` flag).
 
 **Outputs.**
-- `scripts/analyse_dispersion.py` — read-only script that computes shape stats from a single league's odds fetch.
-- `docs/DISPERSION_SHAPES_2026-05.md` — table per league with shape distribution (% unimodal, % bimodal, % no-structure) + cluster persistence score + identity of recurring "low cluster" books.
+- `scripts/analyse_dispersion.py` — read-only script that computes shape stats from a single odds snapshot. **Defaults to reading from a local gzipped blob (no API cost); fresh fetch requires `--fetch` flag.** Per memory `feedback_reuse_archived_data.md`.
+- `docs/DISPERSION_SHAPES_2026-05.md` — table per league with shape distribution (% unimodal, % bimodal, % no-structure) + cluster persistence score across multiple scans + identity of recurring "low cluster" books.
 - `docs/LEAGUE_COVERAGE_2026-05.md` updated with a "shape verdict" column per league.
 
-**Tasks.**
+**Tasks.** (M.7.0 = scaffold done; M.7.1 onward pending)
 
-1. Implement `scripts/analyse_dispersion.py`:
-   - Accept `--sport <key>`. Reuse `scan_odds.fetch_odds` + `scan_odds._devig_book` to get per-book Shin-fair probabilities per fixture × outcome (h2h: H/D/A).
-   - For each fixture × outcome with **≥10 books**:
-     - Compute median + MAD (median absolute deviation).
-     - Classify each book into `low_cluster` (fair_prob < median - 1.5·MAD), `high_cluster` (fair_prob > median + 1.5·MAD), or `centre` (within ±1.5·MAD).
-     - Determine shape:
-       - **Unimodal-tight:** `< 2 books` total in either tail cluster.
-       - **Unimodal-fat:** `2-3 books` in one tail, `< 2` in the other.
-       - **Bimodal:** `≥ 2 books` in BOTH tail clusters.
-       - **No-structure:** stdev > 1.5 × p95-stdev-of-EPL (calibration constant from EPL probe data).
-   - Aggregate per league:
-     - Counts and percentages of each shape category across all fixture×outcome rows.
-     - Per-book cluster-membership tally: `n_times_in_low_cluster`, `n_times_in_high_cluster`, `n_total_appearances`.
-     - **Cluster persistence score:** Spearman correlation between book identity and cluster membership across fixtures. Range: `[0, 1]`. ≥ 0.6 = strong sharp/soft split, exploitable; < 0.3 = noise, not exploitable.
-2. Generate `docs/DISPERSION_SHAPES_2026-05.md` from probe runs across **all 6 prod leagues + 5 M.1 candidates**. Total cost: 11 leagues × 2 cr = ~22 cr on dev key.
+0. **[done]** Implement `scripts/analyse_dispersion.py` per the design above. Defaults to `--blob <path>`; `--fetch` is opt-in. Runs end-to-end on La Liga.
+1. Add `tests/test_dispersion_shape.py`:
+   - synthetic unimodal-tight input → `unimodal-tight` verdict.
+   - synthetic two-cluster input → `bimodal` verdict.
+   - per-book cluster tally on hand-rolled fixtures matches expected counts.
+   - blob-loading path round-trips a `SnapshotArchive` envelope correctly.
+2. Generate `docs/DISPERSION_SHAPES_2026-05.md` by running the script against the **already-archived blobs** for all 6 prod leagues + La Liga (M.4a) + 4 other M.1 candidates. **Use blob archive — no fresh API calls.** Compute cluster persistence across 3+ scans per league (Fri/Sat/Sun within the same weekend) using Spearman correlation between per-book bias scores across scans.
 3. Add a "Shape verdict" column to `docs/LEAGUE_COVERAGE_2026-05.md`:
    - **Add to prod (sharp-weighted)** — bimodal-dominant + persistence ≥ 0.6.
    - **Add to prod (flat consensus fine)** — unimodal-dominant.
    - **Add to dev only** — bimodal-dominant + persistence 0.3–0.6.
    - **Drop** — no-structure dominant OR persistence < 0.3.
-4. Tests: `tests/test_dispersion_shape.py` covers (a) synthetic unimodal-tight input → unimodal-tight output, (b) synthetic two-cluster input → bimodal output, (c) cluster-persistence on synthetic always-same-books-low data → ≥ 0.9.
+4. Update memory `project_market_coverage_2026_05.md` with shape verdicts per league + recommended `book_weights.by_league` seed values for M.6.
 
 **Acceptance.**
 - [ ] `scripts/analyse_dispersion.py` runs without writing to logs/CSV/DB/ntfy (read-only, like M.1).
