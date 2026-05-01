@@ -7,8 +7,8 @@ Uses CatBoost (handles NaN natively). Falls back to XGBoost if CatBoost is not i
 
 import numpy as np
 import pandas as pd
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import cross_val_score
+from sklearn.calibration import CalibratedClassifierCV, IsotonicRegression
+from sklearn.model_selection import cross_val_score, TimeSeriesSplit
 
 try:
     from catboost import CatBoostClassifier
@@ -43,12 +43,15 @@ class MatchPredictor:
         self.calibrate = calibrate
         self.model_ = None
         self.feature_cols_ = None
+        self._calibrators = None  # list of 3 IsotonicRegression (one per class, CatBoost path)
+
+    def _resolved_backend(self) -> str:
+        if self.backend == "auto":
+            return "catboost" if CATBOOST_AVAILABLE else "xgboost"
+        return self.backend
 
     def _make_model(self):
-        if self.backend == "auto":
-            backend = "catboost" if CATBOOST_AVAILABLE else "xgboost"
-        else:
-            backend = self.backend
+        backend = self._resolved_backend()
 
         if backend == "catboost":
             if not CATBOOST_AVAILABLE:
@@ -105,18 +108,54 @@ class MatchPredictor:
         ) if "home_n_matches" in train.columns else pd.Series(True, index=train.index)
         train = train[has_history]
 
-        X = train[feature_cols].values.astype(float)
-        y = train["outcome"].values.astype(int)
+        backend = self._resolved_backend()
+        self._calibrators = None
 
-        model = self._make_model()
+        if self.calibrate and backend == "catboost":
+            # Option A: temporal 80/20 split — calibrate on most-recent 20% of training data.
+            # Isotonic regression per class (one-vs-rest) applied to raw CatBoost probabilities.
+            train_sorted = train.sort_values("Date") if "Date" in train.columns else train
+            split = max(1, int(len(train_sorted) * 0.8))
+            fit_slice = train_sorted.iloc[:split]
+            cal_slice = train_sorted.iloc[split:]
 
-        if self.calibrate and not CATBOOST_AVAILABLE:
-            # CatBoost has built-in calibration; for XGBoost wrap with isotonic
-            self.model_ = CalibratedClassifierCV(model, cv=3, method="isotonic")
+            raw_model = self._make_model()
+            raw_model.fit(
+                fit_slice[feature_cols].values.astype(float),
+                fit_slice["outcome"].values.astype(int),
+            )
+            self.model_ = raw_model
+
+            if len(cal_slice) >= 20:
+                raw_proba = raw_model.predict_proba(
+                    cal_slice[feature_cols].values.astype(float)
+                )
+                y_cal = cal_slice["outcome"].values.astype(int)
+                # Only calibrate if the raw model output has all 3 classes
+                if raw_proba.shape[1] == 3:
+                    calibrators = []
+                    for cls in range(3):
+                        iso = IsotonicRegression(out_of_bounds="clip")
+                        iso.fit(raw_proba[:, cls], (y_cal == cls).astype(float))
+                        calibrators.append(iso)
+                    self._calibrators = calibrators
+        elif self.calibrate and backend == "xgboost":
+            # TimeSeriesSplit-aware calibration for XGBoost
+            raw_model = self._make_model()
+            cv = TimeSeriesSplit(n_splits=3)
+            self.model_ = CalibratedClassifierCV(raw_model, cv=cv, method="isotonic")
+            self.model_.fit(
+                train[feature_cols].values.astype(float),
+                train["outcome"].values.astype(int),
+            )
         else:
+            model = self._make_model()
+            model.fit(
+                train[feature_cols].values.astype(float),
+                train["outcome"].values.astype(int),
+            )
             self.model_ = model
 
-        self.model_.fit(X, y)
         return self
 
     def predict_proba(self, matches: pd.DataFrame) -> pd.DataFrame:
@@ -127,7 +166,17 @@ class MatchPredictor:
             raise RuntimeError("Model not fitted. Call fit() first.")
 
         X = matches[self.feature_cols_].values.astype(float)
-        proba = self.model_.predict_proba(X)
+        raw_proba = self.model_.predict_proba(X)
+
+        if self._calibrators is not None:
+            cal = np.column_stack([
+                self._calibrators[c].predict(raw_proba[:, c]) for c in range(3)
+            ])
+            row_sums = cal.sum(axis=1, keepdims=True)
+            row_sums = np.where(row_sums == 0, 1.0, row_sums)
+            proba = cal / row_sums
+        else:
+            proba = raw_proba
 
         return pd.DataFrame(
             proba,

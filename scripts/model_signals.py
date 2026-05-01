@@ -30,6 +30,7 @@ from src.model.catboost_model import MatchPredictor
 
 TRAIN_WINDOW = 3
 OUTPUT = ROOT / "logs" / "model_signals.json"
+OUTPUT_CALIBRATED = ROOT / "logs" / "model_signals_calibrated.json"
 
 
 def extract_team_states(matches_with_features: pd.DataFrame) -> dict:
@@ -88,7 +89,7 @@ def build_fixture_features(home: str, away: str, pi: PiRatings, states: dict) ->
     }
 
 
-def process_league(sport_key: str, existing_signals: dict) -> int:
+def process_league(sport_key: str, existing_signals: dict, calibrate: bool = False) -> int:
     """Train model and generate signals for one league. Returns number of signals added."""
     label = LEAGUES[sport_key]["label"]
     print(f"\n{'='*50}")
@@ -138,7 +139,7 @@ def process_league(sport_key: str, existing_signals: dict) -> int:
     train_data = completed[completed["season"].isin(train_seasons)]
     print(f"  Training on: {train_seasons}")
 
-    model = MatchPredictor(backend="catboost", calibrate=False)
+    model = MatchPredictor(backend="catboost", calibrate=calibrate)
     model.fit(train_data)
 
     team_states = extract_team_states(completed)
@@ -177,6 +178,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--league", default=None, help="Only process this sport_key (e.g. soccer_epl)")
     parser.add_argument("--download", action="store_true", help="Download missing data first")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="Use calibrated model; writes to model_signals_calibrated.json (not the live file)")
     args = parser.parse_args()
 
     if args.download:
@@ -186,11 +189,15 @@ def main():
                 continue
             download_league(sport_key, since="1415")
 
+    output_path = OUTPUT_CALIBRATED if args.calibrate else OUTPUT
+    if args.calibrate:
+        print("Calibrate mode: writing to model_signals_calibrated.json (live file untouched)")
+
     # Load existing signals to merge into (preserves other leagues when updating one)
     signals = {}
-    if OUTPUT.exists():
+    if output_path.exists():
         try:
-            with open(OUTPUT) as f:
+            with open(output_path) as f:
                 signals = json.load(f).get("signals", {})
         except Exception:
             pass
@@ -206,13 +213,13 @@ def main():
         # Also handle old EPL signals (no prefix) for backward compat
         if sport_key == "soccer_epl":
             signals = {k: v for k, v in signals.items() if ":" in k or not k}
-        total += process_league(sport_key, signals)
+        total += process_league(sport_key, signals, calibrate=args.calibrate)
 
-    OUTPUT.parent.mkdir(exist_ok=True)
-    with open(OUTPUT, "w") as f:
+    output_path.parent.mkdir(exist_ok=True)
+    with open(output_path, "w") as f:
         json.dump({"generated_at": datetime.utcnow().isoformat(), "signals": signals}, f, indent=2)
 
-    print(f"\nSaved {len(signals)} total signals to {OUTPUT}")
+    print(f"\nSaved {len(signals)} total signals to {output_path}")
 
 
 if __name__ == "__main__":
