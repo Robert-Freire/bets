@@ -14,6 +14,8 @@ logs/research_seen.json
 logs/bankroll.json
 logs/notified.json
 logs/scan_state.json
+logs/snapshots/
 logs/*.csv.bak.*
 docs/papers/
 todo.md
+logs/paper/*.csv
