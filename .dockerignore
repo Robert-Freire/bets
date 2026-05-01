@@ -1,0 +1,37 @@
+# Build context exclusions for the dashboard image. Keep the image
+# minimal and the build context small (faster `az containerapp up`).
+
+# Tests, CI, dev tooling
+tests/
+pytest.ini
+.pytest_cache/
+.venv/
+.git/
+.github/
+.claude/
+
+# Heavy data files the dashboard does not need
+data/
+docs/*.md
+!docs/RESEARCH_FEED.md
+logs/*.json
+logs/*.log
+logs/paper/
+logs/csv-archive/
+logs/scan_state.json
+logs/bankroll.json
+logs/notified.json
+
+# Source code we don't want shipped
+scripts/
+notebooks/
+*.ipynb
+
+# Editor / OS noise
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local env files (secrets)
+.env
+.env.dev

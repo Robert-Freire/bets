@@ -40,9 +40,9 @@ Phased migration from local CSV storage to a SQL-Server-Express-backed Flask das
 | Writer | WSL cron (dev API key) | Pi cron (prod API key) |
 | Always-on? | **No — freely stoppable to save credits.** | **Yes — soak target, never stopped.** |
 | SQL DB compute | Serverless `GP_S_Gen5_2`, `--auto-pause-delay 60` | Free offer (`--use-free-limit`) if available, else serverless with longer pause delay |
-| App Service | F1 free; `az webapp stop` when not in use | F1 free initially; B1 if cold-starts hurt |
+| Web tier | **Container Apps Consumption** (scale-to-zero; A.6 pivot — Reply VSE has 0 App Service VM quota); image in ACR Basic ~£4/mo | **Container Apps Consumption** with min replicas ≥1 if cold-starts hurt; same ACR Basic |
 | Free SQL offer (one per subscription) | Goes to **prod**, not dev | ✅ Reserved for here |
-| Dashboard URL identity | `kaunitz-dev-dashboard-<rand>.azurewebsites.net` | `kaunitz-prod-dashboard-<rand>.azurewebsites.net` |
+| Dashboard URL identity | `kaunitz-dev-dashboard-rfk1.<env-id>.uksouth.azurecontainerapps.io` (live) | `kaunitz-prod-dashboard-rfk1.<env-id>.uksouth.azurecontainerapps.io` (A.10 will mirror) |
 | Blast radius if broken | Dev test data only; prod and Pi cron unaffected | Real CLV stream; mirror dev's stability before promoting |
 
 **Why two RGs and not one shared DB with a `source` column?**
@@ -71,6 +71,12 @@ WSL (home network — dev cron, dev API key)
                                     │                   closing_lines, drift,
                                     │                   paper_bets, strategies
                                     ├── kaunitz-dev-kv-<rand> (secrets)
+                                    ├── kaunitz-dev-st-<rand> (storage account)
+                                    │     └── container: raw-api-snapshots
+                                    │           (gzipped JSON of every external API
+                                    │            response — Odds API now;
+                                    │            Pinnacle/Betfair/etc. future.
+                                    │            Lifecycle: hot 30d → cool 90d → delete.)
                                     └── kaunitz-dev-plan / kaunitz-dev-dashboard-<rand>
                                           (F1, stoppable; Easy Auth Google OIDC,
                                            allowlist robert.freire@gmail.com)
@@ -89,7 +95,9 @@ Raspberry Pi (home network — UNCHANGED in A.0–A.9)
                                     ├── kaunitz-prod-sql-uksouth-<rand>  (free offer if avail)
                                     │     └── DB: kaunitz (always-on or long auto-pause)
                                     ├── kaunitz-prod-kv-<rand>
-                                    └── kaunitz-prod-plan / kaunitz-prod-dashboard-<rand>
+                                    ├── kaunitzprodacr<rand>  (ACR Basic, image registry)
+                                    ├── kaunitz-prod-env  (Container Apps managed env)
+                                    └── kaunitz-prod-dashboard-<rand>  (Container App, mirrors dev pivot)
 
 └────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -115,6 +123,7 @@ A.0–A.9 stand up only the dev stack. WSL is the sole writer; Pi continues writ
 | Migration style | **Dual-write transition on WSL only** (A.4–A.8): WSL scanner writes both CSV and DB; dashboard reads DB-first with CSV fallback. Cut over once 1 week of clean DB-only operation on the WSL side. Pi is NOT part of this transition — Pi stays CSV-only. | Lets us roll back cheaply if DB writes fail. Keeps Pi production isolated from any Azure-side breakage. |
 | Schema primary key | **`uniqueidentifier` (UUID)** for `bets.id`, `paper_bets.id` | Closes the historical "Phase 6: SQLite + UUIDs" intent without needing app-side coordination of integer sequences. |
 | Historical CSV data | **WSL CSVs only** backfilled in A.3 (one-shot importer); WSL CSVs archived to `logs/csv-archive/` after A.8 cutover; deleted in A.9. **Pi CSVs are NOT touched by any phase in this plan.** | Preserves the WSL test-stream data; Pi production data stays in its own CSVs untouched. |
+| Where do raw API responses live? | **Azure Blob Storage** (`kaunitz-dev-st-<rand>` storage account in `kaunitz-dev-rg`, container `raw-api-snapshots`). Phase A.5.5 stands this up; mirrors the BetRepo dual-writer contract from A.4 (env-gated, Pi-safe lazy import). Local `logs/snapshots/` only as transient offline buffer. Lifecycle rule: hot 30d → cool 90d → delete. | We never persisted raw odds API output; on 2026-05-01 we found we couldn't retro-test proposed data-quality rules (Pinnacle overround sanity, book dropout, stale response). Blob = cheap, durable, queryable, and natural fit for the Azure migration already in flight. |
 
 ---
 
@@ -130,7 +139,8 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | ✅ Done 2026-05-01 | A.2 |
 | A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | ✅ Done 2026-05-01 | A.2 |
 | A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | ✅ Done 2026-05-01 | A.2, A.4 |
-| A.6 | Provision dev App Service + deploy `app.py` | dev | no | pending | A.5 |
+| A.5.5 | Blob archive for raw API responses (Odds API, future Pinnacle/Betfair) — **WSL only**, env-flag gated | dev | no (gated; Pi never sets the flag) | pending | A.4 |
+| A.6 | Provision dev App Service + deploy `app.py` (**pivoted to Container Apps** — Reply VSE has 0 App Service VM quota) | dev | no | ✅ Done 2026-05-01 | A.5 |
 | A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | pending | A.6 |
 | A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | pending | A.7 + 1 week stable A.4/A.5 |
 | A.9 | Decommission WSL CSV path entirely | dev | no | pending | A.8 + 1 week stable |
@@ -149,8 +159,9 @@ Two stacks costed separately. Reply VSE provides ~£150/month MSDN credit (recur
 | Azure SQL DB — dev (serverless `GP_S_Gen5_2`, 60-min auto-pause) | £0–£5 (depending on weekend usage; £0 while paused) |
 | App Service F1 — dev (`az webapp stop` between sessions) | £0 |
 | Key Vault — dev (first 10k ops free) | £0 |
+| Storage account — dev (LRS hot, ~50 MB/month raw snapshots, lifecycle to cool/delete) | £0–£1 |
 | Outbound bandwidth | £0 |
-| **Dev subtotal during this plan** | **£0–£5/mo** |
+| **Dev subtotal during this plan** | **£0–£6/mo** |
 
 **After A.10 (dev + prod stacks both running):**
 
@@ -419,61 +430,157 @@ curl -s localhost:5000/ | grep -c "<tr"  # row count sanity check
 
 ---
 
-## Phase A.6 — Provision App Service + deploy `app.py`
+## Phase A.5.5 — Blob archive for raw API responses (WSL only, env-flag gated)
 
-**Goal.** Public Azure URL serves the dashboard, reads from the same Azure SQL DB the Pi writes to.
+**Goal.** Every external API request — Odds API today, Pinnacle/Betfair/etc. in the future — persists its raw, unparsed response to Azure Blob Storage **before** any parsing/devigging/filtering, so future data-quality rules (Pinnacle overround sanity, book dropout, stale response, per-book deviation) can be retro-tested against real history. Mirrors A.4's BetRepo dual-writer contract: WSL only, env-flag gated, Pi-safe lazy import.
+
+**Motivation (anchor).** On 2026-05-01 we evaluated four proposed data-quality rules and could only retro-check one against past WSL scans — the others needed raw per-book odds, full Pinnacle two-sided prices, or response timestamps that the scanner had thrown away. Without raw archival, every new integrity rule has to wait for fresh data before it can be validated, and any silent API-side bug (stale book, dropped book, units glitch) is invisible after the fact.
+
+**Pi safety contract.** Identical to A.4. The new module must be import-safe even when `azure-storage-blob` / `BLOB_ARCHIVE` / `AZURE_BLOB_CONN` are absent. Pi's `git pull` brings in the new code; on next cron fire, Pi runs the scanner with no env flag → the blob path is short-circuited → Pi behavior is byte-identical to pre-A.5.5.
 
 **Tasks.**
-1. `az appservice plan create -g kaunitz-dev-rg -n kaunitz-dev-plan --sku F1 --is-linux`.
-2. `az webapp create -g kaunitz-dev-rg -p kaunitz-dev-plan -n kaunitz-dev-dashboard-<random> --runtime "PYTHON:3.11"`.
-3. Configure app settings: `AZURE_SQL_DSN` (referencing Key Vault secret), `AZURE_MODE=true`.
-4. Deploy: `az webapp up -n kaunitz-dev-dashboard-<random> -g kaunitz-dev-rg --runtime "PYTHON:3.11"`.
-5. Confirm Application Settings → Identity → System-assigned managed identity ON; grant it `get` on the Key Vault secret.
-6. Smoke-test the public URL; check cold-start latency. If F1 cold starts > 10s, escalate decision to B1 in A.7.
+1. Provision storage:
+   - `az storage account create -g kaunitz-dev-rg -n kaunitz-dev-st-<rand> -l uksouth --sku Standard_LRS --kind StorageV2 --access-tier Hot --allow-blob-public-access false`.
+   - `az storage container create --account-name kaunitz-dev-st-<rand> -n raw-api-snapshots --auth-mode login`.
+   - Lifecycle rule via `az storage account management-policy create`: tierToCool after 30 days, delete after 120 days.
+   - Add Key Vault secret `blob-storage-connection-string` referencing the storage account's connection string.
+2. New module `src/storage/snapshots.py` with `SnapshotArchive` class:
+   - `archive(source: str, endpoint: str, params: dict, status: int, headers: dict, body: bytes) -> None`.
+   - Lazy `from azure.storage.blob import BlobServiceClient` only inside the enabled branch.
+   - Activated only when `BLOB_ARCHIVE=1` AND (`AZURE_BLOB_CONN` set OR `AZURE_BLOB_KV_VAULT`+`AZURE_BLOB_KV_SECRET` set, mirroring A.4's KV resolution).
+   - Blob key: `<source>/<endpoint_sanitised>/<YYYY>/<MM>/<DD>/<scan_iso>_<sport_key>.json.gz`.
+   - Blob body: gzipped JSON `{captured_at, source, endpoint, params (api_key redacted), status, headers (allowlist: x-requests-remaining, x-requests-used, date, content-type), body_raw}`.
+   - On any blob-write error: log + fall back to `logs/snapshots/` local buffer (gzipped, same key shape). Buffer is drained on next successful run.
+3. Wire into `scripts/scan_odds.py`'s `api_get(...)` and any future `closing_line.py` API call sites — capture happens inside `api_get` so every endpoint is covered automatically. Single archive call per HTTP response, before parse.
+4. **WSL `.env.dev`** adds `BLOB_ARCHIVE=1` + KV-resolution vars (or `AZURE_BLOB_CONN` direct). Pi `.env` does NOT.
+5. Add `tests/test_snapshot_archive.py`:
+   - With env flag on (mocked Azure SDK): one `api_get` call → one blob write with correct key/payload/redaction.
+   - With env flag off: `import src.storage.snapshots` does not import `azure.storage.blob` (verified via `'azure.storage.blob' in sys.modules`); no archive attempted; no errors.
+   - Failure isolation: blob client raises → archive degrades to local buffer; scanner continues; CSV/DB writes still succeed.
+   - Buffer drain: pre-seeded `logs/snapshots/` files upload on next successful archive call and are deleted only after upload confirmation.
+6. Add `logs/snapshots/` to `.gitignore`.
+7. **No backfill** — we don't have historical raw responses. Coverage starts at deploy time.
 
 **Acceptance.**
-- [ ] `curl https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health` returns `{"db":"ok"}`.
-- [ ] Dashboard renders bet history from DB (matches Pi-side data).
-- [ ] App Service log stream shows no startup errors.
+- [ ] WSL scan with `BLOB_ARCHIVE=1` → one blob per `api_get(...)` call lands under `odds_api/<endpoint>/YYYY/MM/DD/<scan_iso>_<sport_key>.json.gz`. Verified via `az storage blob list` + decompress + JSON-parse one sample.
+- [ ] Sample blob's metadata includes `x-requests-remaining` and the request params with `api_key` redacted (literal string `"<redacted>"`, not the real key).
+- [ ] Pi run with no env flags: `python3 -c "import src.storage.snapshots; import sys; assert 'azure.storage.blob' not in sys.modules"` passes; scan produces zero blobs; CSV/DB writes unchanged.
+- [ ] Lifecycle rule visible via `az storage account management-policy show` with the 30d→cool / 120d→delete tier transitions.
+- [ ] Failure isolation: with bad `AZURE_BLOB_CONN`, scan still completes, CSV row still written, error logged once. Local `logs/snapshots/` accumulates the failed archives.
+- [ ] On the next successful archive call, the `logs/snapshots/` buffer is drained (files uploaded then deleted).
+- [ ] `pytest tests/test_snapshot_archive.py` — all four cases pass.
 
 **Reviewer focus.**
-- Managed identity (not connection-string-in-app-setting) must be the auth path to Key Vault.
-- App must NOT have ODDS_API_KEY (only DB DSN — odds fetching stays on Pi).
-- Confirm public dashboard does not expose any settle/admin endpoints without auth (next phase).
+- **Pi safety:** lazy import; importing `src.storage.snapshots` with no env flags must not pull `azure.storage.blob`. Single hardest constraint to get right — same family of bug as A.4's pyodbc trap.
+- **API key redaction:** `params` dict written to blob must have `api_key` removed/replaced. Add a unit test asserting the literal API key string is never in the gzipped blob body.
+- **Container access:** must be private (`--allow-blob-public-access false` on the storage account). Confirm via `az storage account show ... --query "allowBlobPublicAccess"`.
+- **Connection re-use:** one `BlobServiceClient` per scan run, not per archive call.
+- **Blob key collisions:** if two scans fire in the same UTC second for the same sport, second blob must not overwrite the first. Either include milliseconds in the key or fail loud on existence.
+- **Cost guard:** confirm the lifecycle rule lands; without it, cold blobs accumulate at hot rates.
+- **Scope creep:** this phase only stands up the archive. Building data-quality rules on top is a separate future phase (call it A.5.6 when we get there).
 
 **Verification commands.**
 ```bash
-az webapp show -g kaunitz-dev-rg -n kaunitz-dev-dashboard-<random> --query "{state:state, defaultHostName:defaultHostName}" -o json
-curl -s https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health
-az webapp log tail -g kaunitz-dev-rg -n kaunitz-dev-dashboard-<random>  # interactive — confirm no errors
+# WSL — blob path active
+export $(cat .env.dev) && BLOB_ARCHIVE=1 python3 scripts/scan_odds.py --sports football
+az storage blob list --account-name kaunitz-dev-st-<rand> -c raw-api-snapshots --prefix odds_api/ --num-results 5 -o table
+az storage blob download --account-name kaunitz-dev-st-<rand> -c raw-api-snapshots -n <one-blob-key> -f /tmp/sample.json.gz
+zcat /tmp/sample.json.gz | jq '{captured_at, source, endpoint, status, params}'
+# Confirm api_key redaction
+zcat /tmp/sample.json.gz | grep -c "$ODDS_API_KEY"   # expect 0
+
+# Pi — dormant path
+ssh robert@192.168.0.28 'cd ~/projects/bets && git pull && export $(cat .env) && .venv/bin/python3 -c "import src.storage.snapshots, sys; assert \"azure.storage.blob\" not in sys.modules; print(\"pi-safe: ok\")"'
+
+# Lifecycle rule sanity
+az storage account management-policy show --account-name kaunitz-dev-st-<rand> -g kaunitz-dev-rg -o json
 ```
 
 ---
 
-## Phase A.7 — Easy Auth (Google OIDC) on dashboard
+## Phase A.6 — Provision App Service + deploy `app.py` — pivoted to Container Apps  ✅ Done 2026-05-01
+
+**Pivot.** Reply VSE subscription has **0 App Service VM quota** across every SKU (Free/Basic/Standard/Premium) in UK South — discovered when `az appservice plan create --sku F1 --is-linux` returned `Current Limit (Free VMs): 0`. Same for B1 / S1 / P0v3. Quota is a subscription-level cap, not regional. Rather than wait on a quota request, pivoted to **Azure Container Apps** (different compute family — explicitly registered + provisionable in Reply VSE) which gives us scale-to-zero Consumption pricing and a public HTTPS URL.
+
+**What landed:**
+- `Dockerfile` (`python:3.11-slim` + `msodbcsql18` from the Microsoft repo + Flask + gunicorn).
+- `requirements-app.txt` (minimal: `flask`, `gunicorn`, `pyodbc` — no pandas/catboost; image stays ~57MB).
+- `.dockerignore` (drops tests, scripts, paper CSVs, model JSON, virtualenv).
+- `kaunitzdevacrrfk1` (Basic ACR; ~£4/mo; built via `az acr build`).
+- `kaunitz-dev-env` (Container Apps managed environment).
+- `kaunitz-dev-dashboard-rfk1` container app:
+  - 0.25 vCPU / 0.5Gi RAM, min replicas 0 (scale-to-zero), max 1.
+  - System-assigned managed identity → `AcrPull` on ACR + KV `get/list secrets` on `kaunitz-dev-kv-rfk1`.
+  - Container Apps secret `sql-dsn` resolved via Key Vault reference (`keyvaultref:.../secrets/sql-dsn,identityref:system`); env `AZURE_SQL_DSN=secretref:sql-dsn` injects the resolved DSN at boot. **No password on disk anywhere.**
+  - Env: `BETS_DB_WRITE=1`, `AZURE_SQL_DSN=secretref:sql-dsn`. No `ODDS_API_KEY` (odds fetching stays on Pi/WSL cron).
+- New KV secret `sql-dsn` containing the full pyodbc DSN (server + user + KV-fetched password).
+
+**Public URL:** `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` (no auth yet — A.7).
+
+**Smoke test results:**
+
+| Probe | Result |
+|---|---|
+| `/health` | `200 {"csv":"ok","db":"ok"}` |
+| `/` row count | 52 (matches local DB-mode) |
+| Banner | hidden (db=ok) |
+| Warm `/health` latency | ~150ms |
+
+**Cost.** ACR Basic ~£4/mo, Container Apps consumption (~£0 idle, fractions of a penny per request), SQL DB serverless auto-pauses → £0 idle. Whole dev stack ≈ £4–10/mo.
+
+**Acceptance.**
+- [x] `curl https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/health` returns `200 {"csv":"ok","db":"ok"}`. (Hostname differs from planned `*.azurewebsites.net` because of the App Service → Container Apps pivot.)
+- [x] Dashboard renders bet history from DB (matches WSL-side data — Pi data is out of scope until A.10).
+- [x] Container Apps log stream shows no startup errors after the v1→v2 Dockerfile fix (initial v1 had `apt-get purge --auto-remove` which silently removed `msodbcsql18` deps; v2 keeps them).
+
+**Reviewer focus.**
+- Managed identity (not connection-string-in-env-setting) is the auth path to Key Vault. Container Apps `keyvaultref:...,identityref:system` resolves at boot using the system-assigned identity. ✓
+- App container must NOT have `ODDS_API_KEY` (only DB DSN — odds fetching stays on Pi/WSL). ✓
+- Confirm public dashboard does not expose any settle/admin endpoints without auth — A.7 covers this. *Currently the dashboard is fully open to the public internet; Easy Auth lands next.*
+
+**Verification commands.**
+```bash
+APP=kaunitz-dev-dashboard-rfk1
+RG=kaunitz-dev-rg
+FQDN=$(az containerapp show -g $RG -n $APP --query "properties.configuration.ingress.fqdn" -o tsv)
+curl -sS "https://$FQDN/health"
+az containerapp logs show -g $RG -n $APP --tail 50 --type console     # python stdout/stderr
+az containerapp logs show -g $RG -n $APP --tail 50 --type system      # platform events
+```
+
+---
+
+## Phase A.7 — Container Apps auth (Google OIDC) on dashboard
 
 **Goal.** Public URL requires Google sign-in; only `robert.freire@gmail.com` is authorized. (The Azure resources sit in the Reply VSE subscription, but the *application* identity layer is intentionally decoupled — see Phase A.0 identity boundary note.)
 
+**Pivot note.** Originally planned as App Service Easy Auth; A.6 pivoted the dashboard to Container Apps (0 App Service VM quota). Container Apps offers the same Google OIDC + email allowlist via `az containerapp auth update` — different surface, equivalent capability.
+
+**Live URL to protect:** `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io`
+
 **Tasks.**
-1. Portal: App Service → Authentication → Add identity provider → Google.
-2. Set up Google OAuth client at console.cloud.google.com (OAuth 2.0 Client ID, Web app, redirect URI `https://kaunitz-dev-dashboard-<random>.azurewebsites.net/.auth/login/google/callback`). Owner of this OAuth client is the user's personal Google account, not the Reply identity.
-3. Configure App Service: "Require authentication" + "Allowed identities" → restrict to `robert.freire@gmail.com`.
-4. **Decision branch (document in PR body):** if Easy Auth setup hits a snag (Google verification, SP issues, Reply tenant blocking the redirect), fall back to HTTP Basic Auth — 1 LOC in `app.py` checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Bitwarden + App Settings.
+1. Create Google OAuth 2.0 Web client at console.cloud.google.com. Authorized redirect URI: `https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/.auth/login/google/callback`. Owner = personal Google account, not the Reply identity.
+2. Store the Google client secret in Key Vault (`kaunitz-dev-kv-rfk1`, secret name `dashboard-google-client-secret`) and reference it from the container app via the existing managed-identity → KV binding.
+3. `az containerapp auth microsoft|google update -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1 --client-id <id> --client-secret-name <secret-ref> --enable-token-store true` then `az containerapp auth update --action RedirectToLoginPage --require-authentication true`.
+4. Restrict to `robert.freire@gmail.com` via `--allowed-principals` (or `excluded-paths /health` so monitoring still works unauthenticated).
+5. **Decision branch (document in PR body):** if Container Apps auth hits a snag (Google verification, redirect URI mismatch, Reply tenant blocking), fall back to HTTP Basic Auth in `app.py` — 1 LOC checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Key Vault + Container App env.
 
 **Acceptance.**
-- [ ] `curl -i https://kaunitz-dev-dashboard-<random>.azurewebsites.net/` returns 302 to Google login (or 401 with Basic Auth fallback).
+- [ ] `curl -i https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io/` returns 302 to Google login (or 401 with Basic Auth fallback).
 - [ ] Browser test: sign in as `robert.freire@gmail.com` → dashboard renders. Sign in as different account → 403.
-- [ ] Pi → App Service link still works (Pi calls public URL; should be allowed via internal allowlist, OR the dashboard doesn't need this).
+- [ ] `/health` endpoint stays open (excluded paths) so smoke probes still work.
 
 **Reviewer focus.**
 - Allowlist must be email-exact; "anyone with a Google account" is unacceptable.
-- /health endpoint should remain unauth (for monitoring).
+- `/health` endpoint should remain unauth (for monitoring).
 - Confirm no auth bypass via direct DB/blob access from internet.
 
 **Verification commands.**
 ```bash
-curl -i https://kaunitz-dev-dashboard-<random>.azurewebsites.net/ | head -1  # expect 302 or 401
-curl -s https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health     # should still return 200
+FQDN=kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
+curl -i "https://$FQDN/" | head -1          # expect 302 or 401
+curl -s "https://$FQDN/health"              # should still return 200
+az containerapp auth show -g kaunitz-dev-rg -n kaunitz-dev-dashboard-rfk1
 ```
 
 ---
@@ -599,3 +706,5 @@ ssh robert@192.168.0.28 'cd ~/projects/bets && ls logs/*.csv 2>&1'  # expect "No
 5. **CSV → DB importer non-deterministic UUIDs** → A.3's deterministic-UUID rule prevents reimport duplication; verified in Acceptance.
 6. **Dashboard cold-start UX** → measured in A.6; B1 escalation path exists.
 7. **Forgetting Phase A.10** — easy to ship A.0–A.9 and forget Pi is still on CSVs. Mitigation: the dashboard banner "Showing WSL data only — Pi still on CSVs" should appear in A.5 until A.10 ships.
+8. **Forgotten raw-archive coverage when adding a new API source** — A.5.5 covers Odds API; if Pinnacle/Betfair/scraper integrations later bypass the `SnapshotArchive` wrapper, raw history quietly stops being captured. Mitigation: add a unit test that asserts every external HTTP call site for known sources goes through `SnapshotArchive`; document this contract in CLAUDE.md alongside A.4's Pi-safety contract.
+9. **API key leakage in archived blobs** — if the redaction logic regresses, every archived snapshot leaks the API key. Mitigation: A.5.5 ships a unit test asserting the literal API key never appears in any sample blob body; reviewer focus item explicit on this.
