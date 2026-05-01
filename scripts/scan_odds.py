@@ -34,6 +34,11 @@ except ImportError:
 # DB code path stays dormant unless BETS_DB_WRITE=1 + DSN env are set.
 from src.storage.repo import BetRepo, PAPER_FIELDS as _PAPER_FIELDS_REPO
 
+# A.5.5: SnapshotArchive captures every raw API response to Azure Blob
+# Storage when BLOB_ARCHIVE=1 + connection inputs are set. Pi-safe: lazy
+# import of azure.storage.blob; module imports nothing extra at top level.
+from src.storage.snapshots import get_archive as _get_snapshot_archive
+
 try:
     from src.betting.risk import (
         get_bankroll as _get_bankroll,
@@ -165,8 +170,20 @@ def api_get(path: str, params: dict) -> tuple[list | dict, str]:
     params["apiKey"] = API_KEY
     url = f"{BASE_URL}{path}?{urllib.parse.urlencode(params)}"
     with urllib.request.urlopen(url, timeout=15) as r:
-        remaining = r.headers.get("X-Requests-Remaining", "?")
-        return json.loads(r.read()), remaining
+        status = r.status
+        headers = dict(r.headers.items())
+        body = r.read()
+    parts = path.strip("/").split("/")
+    sport_key = parts[1] if len(parts) >= 2 and parts[0] == "sports" else ""
+    try:
+        _get_snapshot_archive().archive(
+            source="odds_api", endpoint=path, params=params,
+            status=status, headers=headers, body=body, sport_key=sport_key,
+        )
+    except Exception as _e:
+        print(f"[snapshots] WARN: archive call raised: {_e}", file=sys.stderr)
+    remaining = headers.get("X-Requests-Remaining", "?")
+    return json.loads(body), remaining
 
 
 def get_active_tennis_sports(max_tournaments: int = 99) -> list[tuple[str, str, int]]:

@@ -100,6 +100,21 @@ AZURE_SQL_DSN="Driver={ODBC Driver 18 for SQL Server};Server=tcp:kaunitz-dev-sql
 
 Without those, `BetRepo` runs in CSV-only mode and never imports `pyodbc` (Pi-safety contract). Switching the WSL cron to dual-write is a manual user step — not enabled by default after A.4.
 
+**A.5.5 raw API blob archive (WSL only; Pi must NOT set these):** to archive every Odds API response to Azure Blob Storage for retro data-quality checks, add to `.env.dev`:
+
+```bash
+BLOB_ARCHIVE=1
+# Either: a literal blob storage connection string
+AZURE_BLOB_CONN="DefaultEndpointsProtocol=https;AccountName=kaunitzdevstrfk1;..."
+# Or: Key Vault references (SnapshotArchive fetches the conn string at boot via `az keyvault secret show`)
+# AZURE_BLOB_KV_VAULT=kaunitz-dev-kv-rfk1
+# AZURE_BLOB_KV_SECRET=blob-storage-connection-string
+# Optional override (default "raw-api-snapshots"):
+# AZURE_BLOB_CONTAINER=raw-api-snapshots
+```
+
+Without those, `SnapshotArchive` is dormant and never imports `azure.storage.blob` (Pi-safety contract, mirrors A.4). On blob-write failure the response gzips into `logs/snapshots/` and uploads on the next successful run. No auto-delete: the archive is the substrate for future data-quality rules, so retention is indefinite (lifecycle rule tiers to cool at 30d only).
+
 Free tier: 500 requests/month per key. Production schedule uses ~474/month. Closing-line script adds ~6–10 calls on match days (zero on idle days). Each region (`uk`, `eu`) counts as a separate API call.
 
 **Note:** The Odds API blocks requests from cloud/server IPs. The scanner runs on the Pi (production) or WSL (dev). Multi-account split is a stopgap; migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
@@ -155,12 +170,13 @@ logs/closing_line.log       Closing-line script output
 logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (257 tests across 20 files; run with `pytest`)
+tests/                      pytest suite (263 tests across 21 files; run with `pytest`)
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
 src/storage/schema_sqlite.sql  SQLite mirror of the schema for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner (--dsn for MSSQL, --sqlite for tests)
 src/storage/_keys.py        Deterministic UUID5 + sport-label helpers shared by repo + importer (don't change the namespace)
 src/storage/repo.py         BetRepo dual-writer (CSV always; Azure SQL when BETS_DB_WRITE=1 + DSN env set; Pi-safe lazy pyodbc import)
+src/storage/snapshots.py    SnapshotArchive: gzipped raw API responses → Azure Blob (BLOB_ARCHIVE=1; Pi-safe lazy azure-storage-blob import; logs/snapshots/ buffer on failure)
 scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent on rerun; --dsn or --sqlite)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
@@ -256,7 +272,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 6 | Storage migration: SQL Server Express + UUIDs (was: SQLite — superseded by Azure direction below) | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
-| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.7 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer + dashboard DB-first reads + public Container Apps dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` with Google OIDC + email allowlist `robert.freire@gmail.com` — pivoted from App Service due to 0 VM quota in Reply VSE). A.5.5/A.8/A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
+| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.7 + A.5.5 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer + dashboard DB-first reads + public Container Apps dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` with Google OIDC + email allowlist `robert.freire@gmail.com` — pivoted from App Service due to 0 VM quota in Reply VSE; raw Odds API responses archived to `kaunitzdevstrfk1` blob storage, lifecycle tier-to-cool at 30d, no auto-delete). A.8/A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 | R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
 | R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`, `TimeSeriesSplit(5)` primitive) | ✅ Done |

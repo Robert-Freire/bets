@@ -123,7 +123,7 @@ A.0–A.9 stand up only the dev stack. WSL is the sole writer; Pi continues writ
 | Migration style | **Dual-write transition on WSL only** (A.4–A.8): WSL scanner writes both CSV and DB; dashboard reads DB-first with CSV fallback. Cut over once 1 week of clean DB-only operation on the WSL side. Pi is NOT part of this transition — Pi stays CSV-only. | Lets us roll back cheaply if DB writes fail. Keeps Pi production isolated from any Azure-side breakage. |
 | Schema primary key | **`uniqueidentifier` (UUID)** for `bets.id`, `paper_bets.id` | Closes the historical "Phase 6: SQLite + UUIDs" intent without needing app-side coordination of integer sequences. |
 | Historical CSV data | **WSL CSVs only** backfilled in A.3 (one-shot importer); WSL CSVs archived to `logs/csv-archive/` after A.8 cutover; deleted in A.9. **Pi CSVs are NOT touched by any phase in this plan.** | Preserves the WSL test-stream data; Pi production data stays in its own CSVs untouched. |
-| Where do raw API responses live? | **Azure Blob Storage** (`kaunitz-dev-st-<rand>` storage account in `kaunitz-dev-rg`, container `raw-api-snapshots`). Phase A.5.5 stands this up; mirrors the BetRepo dual-writer contract from A.4 (env-gated, Pi-safe lazy import). Local `logs/snapshots/` only as transient offline buffer. Lifecycle rule: hot 30d → cool 90d → delete. | We never persisted raw odds API output; on 2026-05-01 we found we couldn't retro-test proposed data-quality rules (Pinnacle overround sanity, book dropout, stale response). Blob = cheap, durable, queryable, and natural fit for the Azure migration already in flight. |
+| Where do raw API responses live? | **Azure Blob Storage** (`kaunitzdevstrfk1` storage account in `kaunitz-dev-rg`, container `raw-api-snapshots`). Phase A.5.5 stands this up; mirrors the BetRepo dual-writer contract from A.4 (env-gated, Pi-safe lazy import). Local `logs/snapshots/` only as transient offline buffer. Lifecycle rule: hot → cool at 30d, **no auto-delete** (the archive is the substrate for future data-quality rules — retention is indefinite). | We never persisted raw odds API output; on 2026-05-01 we found we couldn't retro-test proposed data-quality rules (Pinnacle overround sanity, book dropout, stale response). Blob = cheap, durable, queryable, and natural fit for the Azure migration already in flight. Volumes are tiny (~50 MB/month → ~3 GB after 5 years; pennies on cool tier) so retention cost is not a binding constraint. |
 
 ---
 
@@ -139,7 +139,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | ✅ Done 2026-05-01 | A.2 |
 | A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | ✅ Done 2026-05-01 | A.2 |
 | A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | ✅ Done 2026-05-01 | A.2, A.4 |
-| A.5.5 | Blob archive for raw API responses (Odds API, future Pinnacle/Betfair) — **WSL only**, env-flag gated | dev | no (gated; Pi never sets the flag) | pending | A.4 |
+| A.5.5 | Blob archive for raw API responses (Odds API, future Pinnacle/Betfair) — **WSL only**, env-flag gated | dev | no (gated; Pi never sets the flag) | ✅ Done 2026-05-01 | A.4 |
 | A.6 | Provision dev App Service + deploy `app.py` (**pivoted to Container Apps** — Reply VSE has 0 App Service VM quota) | dev | no | ✅ Done 2026-05-01 | A.5 |
 | A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | ✅ Done 2026-05-01 | A.6 |
 | A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | pending | A.7 + 1 week stable A.4/A.5 |
@@ -430,70 +430,57 @@ curl -s localhost:5000/ | grep -c "<tr"  # row count sanity check
 
 ---
 
-## Phase A.5.5 — Blob archive for raw API responses (WSL only, env-flag gated)
+## Phase A.5.5 — Blob archive for raw API responses (WSL only, env-flag gated)  ✅ Done 2026-05-01
 
 **Goal.** Every external API request — Odds API today, Pinnacle/Betfair/etc. in the future — persists its raw, unparsed response to Azure Blob Storage **before** any parsing/devigging/filtering, so future data-quality rules (Pinnacle overround sanity, book dropout, stale response, per-book deviation) can be retro-tested against real history. Mirrors A.4's BetRepo dual-writer contract: WSL only, env-flag gated, Pi-safe lazy import.
 
-**Motivation (anchor).** On 2026-05-01 we evaluated four proposed data-quality rules and could only retro-check one against past WSL scans — the others needed raw per-book odds, full Pinnacle two-sided prices, or response timestamps that the scanner had thrown away. Without raw archival, every new integrity rule has to wait for fresh data before it can be validated, and any silent API-side bug (stale book, dropped book, units glitch) is invisible after the fact.
+**Lifecycle decision (corrected mid-execution).** Original plan was tier-to-cool at 30d, **delete at 120d**. Dropped the delete: the archive's whole purpose is retro-testing future data-quality rules, and 120d is shorter than the time horizon for many of those checks. Volumes are tiny (~50 MB/month → ~3 GB after 5 years; pennies on cool tier), so retention cost is not a binding constraint. Active rule: tier-to-cool at 30d, **no auto-delete**.
 
-**Pi safety contract.** Identical to A.4. The new module must be import-safe even when `azure-storage-blob` / `BLOB_ARCHIVE` / `AZURE_BLOB_CONN` are absent. Pi's `git pull` brings in the new code; on next cron fire, Pi runs the scanner with no env flag → the blob path is short-circuited → Pi behavior is byte-identical to pre-A.5.5.
-
-**Tasks.**
-1. Provision storage:
-   - `az storage account create -g kaunitz-dev-rg -n kaunitz-dev-st-<rand> -l uksouth --sku Standard_LRS --kind StorageV2 --access-tier Hot --allow-blob-public-access false`.
-   - `az storage container create --account-name kaunitz-dev-st-<rand> -n raw-api-snapshots --auth-mode login`.
-   - Lifecycle rule via `az storage account management-policy create`: tierToCool after 30 days, delete after 120 days.
-   - Add Key Vault secret `blob-storage-connection-string` referencing the storage account's connection string.
-2. New module `src/storage/snapshots.py` with `SnapshotArchive` class:
-   - `archive(source: str, endpoint: str, params: dict, status: int, headers: dict, body: bytes) -> None`.
-   - Lazy `from azure.storage.blob import BlobServiceClient` only inside the enabled branch.
-   - Activated only when `BLOB_ARCHIVE=1` AND (`AZURE_BLOB_CONN` set OR `AZURE_BLOB_KV_VAULT`+`AZURE_BLOB_KV_SECRET` set, mirroring A.4's KV resolution).
-   - Blob key: `<source>/<endpoint_sanitised>/<YYYY>/<MM>/<DD>/<scan_iso>_<sport_key>.json.gz`.
-   - Blob body: gzipped JSON `{captured_at, source, endpoint, params (api_key redacted), status, headers (allowlist: x-requests-remaining, x-requests-used, date, content-type), body_raw}`.
-   - On any blob-write error: log + fall back to `logs/snapshots/` local buffer (gzipped, same key shape). Buffer is drained on next successful run.
-3. Wire into `scripts/scan_odds.py`'s `api_get(...)` and any future `closing_line.py` API call sites — capture happens inside `api_get` so every endpoint is covered automatically. Single archive call per HTTP response, before parse.
-4. **WSL `.env.dev`** adds `BLOB_ARCHIVE=1` + KV-resolution vars (or `AZURE_BLOB_CONN` direct). Pi `.env` does NOT.
-5. Add `tests/test_snapshot_archive.py`:
-   - With env flag on (mocked Azure SDK): one `api_get` call → one blob write with correct key/payload/redaction.
-   - With env flag off: `import src.storage.snapshots` does not import `azure.storage.blob` (verified via `'azure.storage.blob' in sys.modules`); no archive attempted; no errors.
-   - Failure isolation: blob client raises → archive degrades to local buffer; scanner continues; CSV/DB writes still succeed.
-   - Buffer drain: pre-seeded `logs/snapshots/` files upload on next successful archive call and are deleted only after upload confirmation.
-6. Add `logs/snapshots/` to `.gitignore`.
-7. **No backfill** — we don't have historical raw responses. Coverage starts at deploy time.
+**What landed.**
+- Storage account `kaunitzdevstrfk1` (Standard_LRS, hot, public-access disabled, TLS 1.2 minimum) in `kaunitz-dev-rg`.
+- Container `raw-api-snapshots` (private).
+- Lifecycle rule `raw-api-snapshots-tier`: hot → cool at 30d, no delete.
+- Key Vault secret `blob-storage-connection-string` in `kaunitz-dev-kv-rfk1`.
+- New module `src/storage/snapshots.py` with `SnapshotArchive` class:
+  - Lazy `from azure.storage.blob import BlobServiceClient` only inside the activated branch.
+  - Activated only when `BLOB_ARCHIVE=1` AND (`AZURE_BLOB_CONN` set OR `AZURE_BLOB_KV_VAULT`+`AZURE_BLOB_KV_SECRET` set, mirroring A.4's KV resolution).
+  - Blob key: `<source>/<endpoint_sanitised>/<YYYY>/<MM>/<DD>/<scan_iso_with_microseconds>_<sport_key>.json.gz`. Microsecond resolution + `overwrite=False` upload eliminates collision risk.
+  - Blob body: gzipped JSON `{captured_at, source, endpoint, params (apiKey/api_key redacted to "<redacted>"), status, headers (allowlist: x-requests-remaining, x-requests-used, date, content-type), body_raw}`.
+  - On any blob-write error: log + fall back to `logs/snapshots/<same-key>` local buffer. Buffer drained on next successful archive call (once per process), files deleted only after confirmed upload.
+- Wired into `scripts/scan_odds.py`'s `api_get(...)` — single archive call per HTTP response, before parse, sport_key parsed from path so every endpoint is covered automatically.
+- `tests/test_snapshot_archive.py` (6 cases): Pi-safety no-import; activated path with redaction + key shape + header allowlist; api_key never in archived body; failure isolation → local buffer; buffer drain on success; buffer persists on drain failure.
+- `logs/snapshots/` added to `.gitignore`.
+- **No backfill** — coverage starts at deploy time.
 
 **Acceptance.**
-- [ ] WSL scan with `BLOB_ARCHIVE=1` → one blob per `api_get(...)` call lands under `odds_api/<endpoint>/YYYY/MM/DD/<scan_iso>_<sport_key>.json.gz`. Verified via `az storage blob list` + decompress + JSON-parse one sample.
-- [ ] Sample blob's metadata includes `x-requests-remaining` and the request params with `api_key` redacted (literal string `"<redacted>"`, not the real key).
-- [ ] Pi run with no env flags: `python3 -c "import src.storage.snapshots; import sys; assert 'azure.storage.blob' not in sys.modules"` passes; scan produces zero blobs; CSV/DB writes unchanged.
-- [ ] Lifecycle rule visible via `az storage account management-policy show` with the 30d→cool / 120d→delete tier transitions.
-- [ ] Failure isolation: with bad `AZURE_BLOB_CONN`, scan still completes, CSV row still written, error logged once. Local `logs/snapshots/` accumulates the failed archives.
-- [ ] On the next successful archive call, the `logs/snapshots/` buffer is drained (files uploaded then deleted).
-- [ ] `pytest tests/test_snapshot_archive.py` — all four cases pass.
+- [x] `pytest tests/test_snapshot_archive.py` — 6/6 pass; full suite 263/263.
+- [x] Lifecycle rule visible via `az storage account management-policy show` (`tierToCool@30d`, no delete action).
+- [x] `--allow-blob-public-access false` on the storage account.
+- [ ] **Manual smoke pending user `.env.dev` flip** — set `BLOB_ARCHIVE=1` + `AZURE_BLOB_KV_VAULT=kaunitz-dev-kv-rfk1` + `AZURE_BLOB_KV_SECRET=blob-storage-connection-string`, run a scan, verify a sample blob lands and contains `<redacted>` instead of the real key.
 
-**Reviewer focus.**
-- **Pi safety:** lazy import; importing `src.storage.snapshots` with no env flags must not pull `azure.storage.blob`. Single hardest constraint to get right — same family of bug as A.4's pyodbc trap.
-- **API key redaction:** `params` dict written to blob must have `api_key` removed/replaced. Add a unit test asserting the literal API key string is never in the gzipped blob body.
-- **Container access:** must be private (`--allow-blob-public-access false` on the storage account). Confirm via `az storage account show ... --query "allowBlobPublicAccess"`.
-- **Connection re-use:** one `BlobServiceClient` per scan run, not per archive call.
-- **Blob key collisions:** if two scans fire in the same UTC second for the same sport, second blob must not overwrite the first. Either include milliseconds in the key or fail loud on existence.
-- **Cost guard:** confirm the lifecycle rule lands; without it, cold blobs accumulate at hot rates.
-- **Scope creep:** this phase only stands up the archive. Building data-quality rules on top is a separate future phase (call it A.5.6 when we get there).
+**Reviewer focus (resolved).**
+- **Pi safety:** module-level imports are stdlib only; `azure.storage.blob` is imported only inside the activated branch. Verified by `test_pi_safety_no_env_means_no_azure_import`.
+- **API key redaction:** keys matching `apikey`/`api_key` (case-insensitive) replaced with `<redacted>`. `test_api_key_never_in_archived_blob` asserts the literal key string is absent from the gzipped body.
+- **Container access:** `--allow-blob-public-access false` set at storage-account level.
+- **Connection re-use:** single `BlobServiceClient` per `SnapshotArchive` instance; one instance per process via the module singleton.
+- **Blob key collisions:** microsecond timestamps + `upload_blob(..., overwrite=False)` so collisions fail loud rather than clobber.
+- **Cost guard:** lifecycle rule confirmed. Tier-to-cool only; no delete.
+- **Scope creep:** this phase only stands up the archive. Data-quality rules on top of it are deferred (label A.5.6 if/when we build them).
 
 **Verification commands.**
 ```bash
-# WSL — blob path active
-export $(cat .env.dev) && BLOB_ARCHIVE=1 python3 scripts/scan_odds.py --sports football
-az storage blob list --account-name kaunitz-dev-st-<rand> -c raw-api-snapshots --prefix odds_api/ --num-results 5 -o table
-az storage blob download --account-name kaunitz-dev-st-<rand> -c raw-api-snapshots -n <one-blob-key> -f /tmp/sample.json.gz
+# Lifecycle rule sanity
+az storage account management-policy show --account-name kaunitzdevstrfk1 -g kaunitz-dev-rg -o json
+
+# WSL — once .env.dev is flipped, blob path active
+export $(cat .env.dev) && python3 scripts/scan_odds.py
+az storage blob list --account-name kaunitzdevstrfk1 -c raw-api-snapshots --prefix odds_api/ --num-results 5 -o table --auth-mode login
+az storage blob download --account-name kaunitzdevstrfk1 -c raw-api-snapshots -n <one-blob-key> -f /tmp/sample.json.gz --auth-mode login
 zcat /tmp/sample.json.gz | jq '{captured_at, source, endpoint, status, params}'
-# Confirm api_key redaction
 zcat /tmp/sample.json.gz | grep -c "$ODDS_API_KEY"   # expect 0
 
-# Pi — dormant path
-ssh robert@192.168.0.28 'cd ~/projects/bets && git pull && export $(cat .env) && .venv/bin/python3 -c "import src.storage.snapshots, sys; assert \"azure.storage.blob\" not in sys.modules; print(\"pi-safe: ok\")"'
-
-# Lifecycle rule sanity
-az storage account management-policy show --account-name kaunitz-dev-st-<rand> -g kaunitz-dev-rg -o json
+# Pi — dormant path (already enforced by tests; this is the env-level smoke)
+ssh robert@192.168.0.28 'cd ~/projects/bets && git pull && export $(cat .env) && .venv/bin/python3 -c "from src.storage.snapshots import SnapshotArchive; SnapshotArchive().archive(source=\"odds_api\", endpoint=\"/sports/\", params={\"apiKey\":\"x\"}, status=200, headers={}, body=b\"[]\"); import sys; assert \"azure.storage.blob\" not in sys.modules; print(\"pi-safe: ok\")"'
 ```
 
 ---
