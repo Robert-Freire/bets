@@ -31,34 +31,70 @@ Phased migration from local CSV storage to a SQL-Server-Express-backed Flask das
 
 ---
 
+## Two stacks: `kaunitz-dev-rg` (this plan) vs `kaunitz-prod-rg` (A.10)
+
+**Decision (2026-05-01):** dev and prod live in **separate resource groups**, mirroring the existing WSL-dev / Pi-prod split (`project_dev_prod_split` memory). Each stack has its own SQL server, DB, Key Vault, App Service plan, and web app. The two stacks never share a DB.
+
+| Aspect | `kaunitz-dev-rg` (A.0–A.9, now) | `kaunitz-prod-rg` (A.10, deferred) |
+|---|---|---|
+| Writer | WSL cron (dev API key) | Pi cron (prod API key) |
+| Always-on? | **No — freely stoppable to save credits.** | **Yes — soak target, never stopped.** |
+| SQL DB compute | Serverless `GP_S_Gen5_2`, `--auto-pause-delay 60` | Free offer (`--use-free-limit`) if available, else serverless with longer pause delay |
+| App Service | F1 free; `az webapp stop` when not in use | F1 free initially; B1 if cold-starts hurt |
+| Free SQL offer (one per subscription) | Goes to **prod**, not dev | ✅ Reserved for here |
+| Dashboard URL identity | `kaunitz-dev-dashboard-<rand>.azurewebsites.net` | `kaunitz-prod-dashboard-<rand>.azurewebsites.net` |
+| Blast radius if broken | Dev test data only; prod and Pi cron unaffected | Real CLV stream; mirror dev's stability before promoting |
+
+**Why two RGs and not one shared DB with a `source` column?**
+- Stronger isolation: a botched dev migration cannot corrupt prod data.
+- Mirrors the architecturally-decided dev/prod split already in place at the cron + API key level.
+- One-click teardown of either env via `az group delete`.
+- Ops cost (~£0–£5/mo extra for dev) is well within the £150/mo Reply VSE credit.
+
+---
+
 ## Architecture target
 
 ```
+┌──────────────────────────  THIS PLAN (A.0–A.9)  ──────────────────────────┐
+
 WSL (home network — dev cron, dev API key)
   └── scan_odds.py, closing_line.py (cron)
         ├── writes to logs/*.csv (existing path, always on)
         └── writes to Azure SQL via pyodbc (NEW, gated by BETS_DB_WRITE=1 env flag)
                                                     │
                                                     ▼
-                                    Azure SQL Database (UK South, Free tier)
-                                    schema: bets, fixtures, books, closing_lines,
-                                            drift, paper_bets, strategies
-                                                    ▲
-                                    reads from above; writes settle-bet POSTs back
-                                                    │
-                                    Azure App Service (F1 free tier)
-                                    app.py — Flask dashboard
-                                    Easy Auth (Google OIDC) — robert.freire@gmail.com only
-                                    Shows: WSL-source data only (during this plan)
+                                    kaunitz-dev-rg (UK South)
+                                    ├── kaunitz-dev-sql-uksouth-<rand>
+                                    │     └── DB: kaunitz (serverless, auto-pause 60min)
+                                    │           schema: bets, fixtures, books,
+                                    │                   closing_lines, drift,
+                                    │                   paper_bets, strategies
+                                    ├── kaunitz-dev-kv-<rand> (secrets)
+                                    └── kaunitz-dev-plan / kaunitz-dev-dashboard-<rand>
+                                          (F1, stoppable; Easy Auth Google OIDC,
+                                           allowlist robert.freire@gmail.com)
+                                          Shows: WSL-source data only.
 
+└────────────────────────────────────────────────────────────────────────────┘
 
-Raspberry Pi (home network — UNCHANGED in this plan)
+┌──────────────────────────  FUTURE: A.10 prod stack  ──────────────────────┐
+
+Raspberry Pi (home network — UNCHANGED in A.0–A.9)
   └── scan_odds.py, closing_line.py, refresh_xg.py, research_scan.py (cron)
-        └── writes to ~/projects/bets/logs/*.csv ONLY
-              (no Azure writes; Pi onboarding deferred to Phase A.10)
+        └── writes to ~/projects/bets/logs/*.csv ONLY (until A.10)
+                                                    │
+                                                    ▼ (A.10)
+                                    kaunitz-prod-rg (UK South — NOT created in this plan)
+                                    ├── kaunitz-prod-sql-uksouth-<rand>  (free offer if avail)
+                                    │     └── DB: kaunitz (always-on or long auto-pause)
+                                    ├── kaunitz-prod-kv-<rand>
+                                    └── kaunitz-prod-plan / kaunitz-prod-dashboard-<rand>
+
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-WSL is the sole writer to Azure SQL during this plan. Pi remains the canonical production data source on local CSVs.
+A.0–A.9 stand up only the dev stack. WSL is the sole writer; Pi continues writing local CSVs, untouched. A.10 stands up the prod stack and onboards Pi to it.
 
 ---
 
@@ -66,9 +102,11 @@ WSL is the sole writer to Azure SQL during this plan. Pi remains the canonical p
 
 | Question | Decision | Why |
 |---|---|---|
-| Where does the DB live? | **Azure SQL Database Free tier** (fallback: Basic ~£5/mo if Free quota exhausted) | Managed, automated backups, scales if needed, no patching. Self-hosted SQL Express on a VM saves £0 but adds ops burden. |
+| Dev/prod split | **Two separate resource groups** (`kaunitz-dev-rg` now, `kaunitz-prod-rg` in A.10). No shared DB. Each stack has its own SQL server, KV, App Service plan, web app. | Mirrors existing WSL-dev / Pi-prod split; isolates dev mistakes from prod data; supports independent stop/start; one-click teardown per env. |
+| Stop/start ergonomics | **Dev = stoppable** (`az webapp stop` for app; serverless DB auto-pauses after 60 min idle). **Prod = always-on** during match windows, never explicitly stopped. | User wants to stop dev cheaply between work sessions; prod runs the canonical CLV pipeline so any stop shows up as a closing-line gap. |
+| Where does the DB live? | **Azure SQL Database** in the per-env RG. **Dev:** serverless `GP_S_Gen5_2` with `--auto-pause-delay 60` (cost £0 while paused, ~£5/mo if active 24/7). **Prod (A.10):** the once-per-subscription free offer (`--use-free-limit`) if still available — else Basic (~£5/mo) or longer-pause serverless. Fallback: paid Basic ~£5/mo. | Managed, auto-backups, no patching. Self-hosted SQL Express saves nothing and adds ops burden. The free offer (one per subscription) is reserved for prod because prod must be always-on. |
 | What flavour of SQL? | **Azure SQL DB** (T-SQL, MSSQL-flavoured) — *not* SQL Server Express on a VM | Same engine family as the original "SQL Server Express" intent; user gets the cloud benefits. Phase-6 doc copy still says "SQL Server Express" for continuity. |
-| Where does the web app live? | **Azure App Service F1 (free)** | Always-on Linux Python runtime; deploy via `az webapp up`. If F1 cold starts hurt UX, escalate to B1 (~£10/mo) in A.7. |
+| Where does the web app live? | **Azure App Service F1 (free)**, separate plan per env. Dev plan stoppable via `az webapp stop`. | Always-on Linux Python runtime; deploy via `az webapp up`. If F1 cold starts hurt UX, escalate to B1 (~£10/mo) on prod first; dev can stay F1. |
 | Auth on public dashboard? | **App Service Easy Auth with Google OIDC** (one allowed email: `robert.freire@gmail.com`). Decoupled from the Reply VSE subscription on purpose — the subscription owns the Azure resources, but the dashboard identity is the user's personal Google account. | One-click in portal; no auth code in app.py. Falls back to HTTP Basic Auth (1 LOC) if Easy Auth setup blocks. |
 | Pi → Azure SQL transport | **N/A in this plan** — Pi is not touched. Future Phase A.10 will add this (TCP 1433 outbound, TLS, SQL auth from Key Vault). | Avoid touching production-critical Pi cron during a multi-phase Azure stand-up. Onboard Pi only after dev side has soaked for ≥1 week. |
 | WSL → Azure SQL transport | TCP 1433 outbound, TLS required (Azure default), SQL auth (username/password from Azure Key Vault → env var on WSL) | TLS+SQL auth is the simplest path. WSL is on home network so firewall rule allows the WSL public IP. |
@@ -82,58 +120,103 @@ WSL is the sole writer to Azure SQL during this plan. Pi remains the canonical p
 
 ## Phase status tracker
 
-| Phase | Title | Touches Pi? | Status | Depends on |
-|---|---|---|---|---|
-| A.0 | Provision Azure account + resource group | no | pending | — |
-| A.1 | Stand up Azure SQL Database (Free tier) | no | pending | A.0 |
-| A.2 | Schema DDL + idempotent migrations runner | no | pending | A.1 |
-| A.3 | CSV → DB importer — **WSL CSVs only** | no | pending | A.2 |
-| A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | no (code is gated; Pi never sets the flag) | pending | A.2 |
-| A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | no | pending | A.2, A.4 |
-| A.6 | Provision App Service + deploy `app.py` | no | pending | A.5 |
-| A.7 | Easy Auth (Google OIDC) on dashboard | no | pending | A.6 |
-| A.8 | Cutover: WSL DB-only, archive WSL CSVs | no | pending | A.7 + 1 week stable A.4/A.5 |
-| A.9 | Decommission WSL CSV path entirely | no | pending | A.8 + 1 week stable |
-| **A.10** | **Pi onboarding to Azure SQL** (future sprint — separate plan doc) | **yes** | **deferred** | A.9 + ≥1 week soak |
+All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that creates `kaunitz-prod-rg` and touches Pi.
+
+| Phase | Title | RG | Touches Pi? | Status | Depends on |
+|---|---|---|---|---|---|
+| A.0 | Provision Azure account + dev resource group | dev | no | ✅ Done 2026-05-01 | — |
+| A.1 | Stand up dev Azure SQL Database (serverless, auto-pause) | dev | no | pending | A.0 |
+| A.2 | Schema DDL + idempotent migrations runner | dev | no | pending | A.1 |
+| A.3 | CSV → DB importer — **WSL CSVs only** | dev | no | pending | A.2 |
+| A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | dev | no (code is gated; Pi never sets the flag) | pending | A.2 |
+| A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | dev | no | pending | A.2, A.4 |
+| A.6 | Provision dev App Service + deploy `app.py` | dev | no | pending | A.5 |
+| A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | pending | A.6 |
+| A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | pending | A.7 + 1 week stable A.4/A.5 |
+| A.9 | Decommission WSL CSV path entirely | dev | no | pending | A.8 + 1 week stable |
+| **A.10** | **Stand up `kaunitz-prod-rg` + onboard Pi** (future sprint — separate plan doc) | **prod (new)** | **yes** | **deferred** | A.9 + ≥1 week soak |
 
 ---
 
 ## Cost estimate
 
+Two stacks costed separately. Reply VSE provides ~£150/month MSDN credit (recurring), so even worst-case is well-covered.
+
+**During A.0–A.9 (dev stack only):**
+
 | Service | Cost/month |
 |---|---|
-| Azure SQL DB (Free tier) | £0.00 |
-| App Service F1 (free) | £0.00 |
-| Outbound bandwidth (well within free) | £0.00 |
-| Azure AD / Easy Auth | £0.00 |
-| **Total during/after migration** | **£0.00** |
-| Fallback if Free SQL quota tight | + ~£5/mo for Basic |
-| Fallback if F1 cold-starts hurt | + ~£10/mo for B1 |
+| Azure SQL DB — dev (serverless `GP_S_Gen5_2`, 60-min auto-pause) | £0–£5 (depending on weekend usage; £0 while paused) |
+| App Service F1 — dev (`az webapp stop` between sessions) | £0 |
+| Key Vault — dev (first 10k ops free) | £0 |
+| Outbound bandwidth | £0 |
+| **Dev subtotal during this plan** | **£0–£5/mo** |
 
-Reply Visual Studio Enterprise Subscription provides ~£150/month MSDN credit (recurring), which covers any of the escalations above with comfortable headroom.
+**After A.10 (dev + prod stacks both running):**
+
+| Service | Cost/month |
+|---|---|
+| Dev (as above) | £0–£5 |
+| Azure SQL DB — prod (`--use-free-limit` if still available; else Basic) | £0 (free offer) or ~£5 (Basic) |
+| App Service F1 — prod (always-on) | £0 |
+| Key Vault — prod | £0 |
+| **Total post-A.10** | **£0–£10/mo (most likely £0)** |
+| Fallback if F1 cold-starts hurt prod UX | + ~£10/mo for B1 on prod plan |
+
+The £150/month Reply VSE credit covers any escalation with ~10–15× headroom, so cost is not a binding constraint on architectural choices.
 
 ---
 
-## Phase A.0 — Provision Azure account + resource group
+## Dev stop/start operations (cost control)
 
-**Goal.** Single Azure resource group `kaunitz-rg` in UK South, under the Reply Visual Studio Enterprise Subscription (Azure account `r.freire@reply.eu`, tenant `reply.onmicrosoft.com`, subscription id `bab24bda-5316-4e9e-9565-056e5e57e64f`, ~£150/month MSDN credit). All future resources land here for one-click teardown.
+The dev stack is designed to be cheaply stoppable. Once A.1+A.6 land, use these commands.
+
+**Stop dev (between sessions; saves ~£0.20/day at dev usage levels):**
+```bash
+# App Service: explicit stop (still costs £0 on F1; this only stops compute)
+az webapp stop -g kaunitz-dev-rg -n kaunitz-dev-dashboard-<rand>
+# SQL DB: auto-pauses after 60 min idle; force pause if desired:
+az sql db pause -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<rand> -n kaunitz
+```
+
+**Start dev:**
+```bash
+az webapp start -g kaunitz-dev-rg -n kaunitz-dev-dashboard-<rand>
+# SQL DB: any query auto-resumes; or explicitly:
+az sql db resume -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<rand> -n kaunitz
+```
+
+**Nuclear option** (preserves nothing; recreate via the phase commands):
+```bash
+az group delete -n kaunitz-dev-rg --yes  # tear down entire dev stack
+```
+
+Prod (`kaunitz-prod-rg`, A.10) is **never** stopped during normal ops — closing-line scans run every 5 minutes during match windows and a paused DB introduces drift gaps.
+
+---
+
+## Phase A.0 — Provision dev resource group  ✅ Done 2026-05-01
+
+**Goal.** Single Azure resource group `kaunitz-dev-rg` in UK South, under the Reply Visual Studio Enterprise Subscription (Azure account `r.freire@reply.eu`, tenant `reply.onmicrosoft.com`, subscription id `bab24bda-5316-4e9e-9565-056e5e57e64f`, ~£150/month MSDN credit). All A.0–A.9 resources land here for one-click teardown. The matching `kaunitz-prod-rg` is NOT created in this phase — it lands in A.10.
 
 **Identity boundary** — *only the Azure subscription/admin uses the Reply identity.* Application-level identity (dashboard auth allowlist, OAuth client owner, contact email on alerts) is the user's personal `robert.freire@gmail.com`. Phases below should not conflate the two.
 
 **Tasks.**
 1. Confirm `az account show` reports the Reply VSE subscription as default. (Done 2026-05-01.)
-2. `az group create -n kaunitz-rg -l uksouth`.
+2. `az group create -n kaunitz-dev-rg -l uksouth --tags env=dev project=kaunitz owner=rfreire`. (Done 2026-05-01.)
 
 **Acceptance.**
-- [ ] `az group show -n kaunitz-rg` returns the group with `provisioningState: Succeeded`.
-- [ ] Resource group visible at portal.azure.com under the user's subscription.
+- [x] `az group show -n kaunitz-dev-rg` returns the group with `provisioningState: Succeeded`.
+- [x] Resource group visible at portal.azure.com under the user's subscription.
+- [x] Tags `env=dev`, `project=kaunitz`, `owner=rfreire` set so future cost queries can filter by env.
 
 **Reviewer focus.** None (provisioning only).
 
 **Verification commands.**
 ```bash
 az account show --query "{name:name, user:user.name}" -o table  # confirm logged-in user
-az group list -o table | grep kaunitz-rg                            # confirm group exists
+az group list -o table | grep kaunitz-dev-rg                            # confirm group exists
+az group show -n kaunitz-dev-rg --query "{name:name,location:location,tags:tags}" -o json
 ```
 
 ---
@@ -143,11 +226,11 @@ az group list -o table | grep kaunitz-rg                            # confirm gr
 **Goal.** A working Azure SQL DB instance reachable from the Pi over TCP 1433+TLS.
 
 **Tasks.**
-1. `az sql server create -g kaunitz-rg -n kaunitz-sql-uksouth-<random> -l uksouth --admin-user kaunitzadmin --admin-password <generated, store in Bitwarden>`.
-2. `az sql db create -g kaunitz-rg -s kaunitz-sql-uksouth-<random> -n kaunitz --tier GeneralPurpose --family Gen5 --capacity 2 --compute-model Serverless --auto-pause-delay 60 --backup-storage-redundancy Local` (or `--use-free-limit` if the free-tier flag is available in current az CLI; check `az sql db create --help`).
+1. `az sql server create -g kaunitz-dev-rg -n kaunitz-dev-sql-uksouth-<random> -l uksouth --admin-user kaunitzadmin --admin-password <generated, store in Bitwarden>`.
+2. `az sql db create -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -n kaunitz --tier GeneralPurpose --family Gen5 --capacity 2 --compute-model Serverless --auto-pause-delay 60 --backup-storage-redundancy Local` (or `--use-free-limit` if the free-tier flag is available in current az CLI; check `az sql db create --help`).
 3. Firewall: `az sql server firewall-rule create` to allow (a) Pi's public IP, (b) WSL's public IP, (c) Azure services (`0.0.0.0` rule with name `AllowAzureServices`).
 4. On Pi: install ODBC driver (`sudo apt install -y unixodbc-dev` + Microsoft repo for `msodbcsql18`).
-5. Create `kaunitz-rg`-scoped Azure Key Vault `kaunitz-kv-<random>`; store SQL admin password as secret `sql-admin-password`. (Phase A.4 will pull from Key Vault into Pi env.)
+5. Create `kaunitz-dev-rg`-scoped Azure Key Vault `kaunitz-dev-kv-<random>`; store SQL admin password as secret `sql-admin-password`. (Phase A.4 will pull from Key Vault into Pi env.)
 
 **Acceptance.**
 - [ ] From Pi: `python3 -c "import pyodbc; conn = pyodbc.connect(<conn_str>); print(conn.execute('SELECT 1').fetchone())"` returns `(1,)`.
@@ -161,8 +244,8 @@ az group list -o table | grep kaunitz-rg                            # confirm gr
 
 **Verification commands.**
 ```bash
-az sql db show -g kaunitz-rg -s kaunitz-sql-uksouth-<random> -n kaunitz --query "{name:name, status:status, sku:currentSku}" -o json
-az sql server firewall-rule list -g kaunitz-rg -s kaunitz-sql-uksouth-<random> -o table
+az sql db show -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -n kaunitz --query "{name:name, status:status, sku:currentSku}" -o json
+az sql server firewall-rule list -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> -o table
 ssh robert@192.168.0.28 'python3 -c "import pyodbc; print(pyodbc.drivers())"'  # expect msodbcsql18 in list
 ```
 
@@ -311,15 +394,15 @@ curl -s localhost:5000/ | grep -c "<tr"  # row count sanity check
 **Goal.** Public Azure URL serves the dashboard, reads from the same Azure SQL DB the Pi writes to.
 
 **Tasks.**
-1. `az appservice plan create -g kaunitz-rg -n kaunitz-plan --sku F1 --is-linux`.
-2. `az webapp create -g kaunitz-rg -p kaunitz-plan -n kaunitz-dashboard-<random> --runtime "PYTHON:3.11"`.
+1. `az appservice plan create -g kaunitz-dev-rg -n kaunitz-dev-plan --sku F1 --is-linux`.
+2. `az webapp create -g kaunitz-dev-rg -p kaunitz-dev-plan -n kaunitz-dev-dashboard-<random> --runtime "PYTHON:3.11"`.
 3. Configure app settings: `AZURE_SQL_DSN` (referencing Key Vault secret), `AZURE_MODE=true`.
-4. Deploy: `az webapp up -n kaunitz-dashboard-<random> -g kaunitz-rg --runtime "PYTHON:3.11"`.
+4. Deploy: `az webapp up -n kaunitz-dev-dashboard-<random> -g kaunitz-dev-rg --runtime "PYTHON:3.11"`.
 5. Confirm Application Settings → Identity → System-assigned managed identity ON; grant it `get` on the Key Vault secret.
 6. Smoke-test the public URL; check cold-start latency. If F1 cold starts > 10s, escalate decision to B1 in A.7.
 
 **Acceptance.**
-- [ ] `curl https://kaunitz-dashboard-<random>.azurewebsites.net/health` returns `{"db":"ok"}`.
+- [ ] `curl https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health` returns `{"db":"ok"}`.
 - [ ] Dashboard renders bet history from DB (matches Pi-side data).
 - [ ] App Service log stream shows no startup errors.
 
@@ -330,9 +413,9 @@ curl -s localhost:5000/ | grep -c "<tr"  # row count sanity check
 
 **Verification commands.**
 ```bash
-az webapp show -g kaunitz-rg -n kaunitz-dashboard-<random> --query "{state:state, defaultHostName:defaultHostName}" -o json
-curl -s https://kaunitz-dashboard-<random>.azurewebsites.net/health
-az webapp log tail -g kaunitz-rg -n kaunitz-dashboard-<random>  # interactive — confirm no errors
+az webapp show -g kaunitz-dev-rg -n kaunitz-dev-dashboard-<random> --query "{state:state, defaultHostName:defaultHostName}" -o json
+curl -s https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health
+az webapp log tail -g kaunitz-dev-rg -n kaunitz-dev-dashboard-<random>  # interactive — confirm no errors
 ```
 
 ---
@@ -343,12 +426,12 @@ az webapp log tail -g kaunitz-rg -n kaunitz-dashboard-<random>  # interactive �
 
 **Tasks.**
 1. Portal: App Service → Authentication → Add identity provider → Google.
-2. Set up Google OAuth client at console.cloud.google.com (OAuth 2.0 Client ID, Web app, redirect URI `https://kaunitz-dashboard-<random>.azurewebsites.net/.auth/login/google/callback`). Owner of this OAuth client is the user's personal Google account, not the Reply identity.
+2. Set up Google OAuth client at console.cloud.google.com (OAuth 2.0 Client ID, Web app, redirect URI `https://kaunitz-dev-dashboard-<random>.azurewebsites.net/.auth/login/google/callback`). Owner of this OAuth client is the user's personal Google account, not the Reply identity.
 3. Configure App Service: "Require authentication" + "Allowed identities" → restrict to `robert.freire@gmail.com`.
 4. **Decision branch (document in PR body):** if Easy Auth setup hits a snag (Google verification, SP issues, Reply tenant blocking the redirect), fall back to HTTP Basic Auth — 1 LOC in `app.py` checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Bitwarden + App Settings.
 
 **Acceptance.**
-- [ ] `curl -i https://kaunitz-dashboard-<random>.azurewebsites.net/` returns 302 to Google login (or 401 with Basic Auth fallback).
+- [ ] `curl -i https://kaunitz-dev-dashboard-<random>.azurewebsites.net/` returns 302 to Google login (or 401 with Basic Auth fallback).
 - [ ] Browser test: sign in as `robert.freire@gmail.com` → dashboard renders. Sign in as different account → 403.
 - [ ] Pi → App Service link still works (Pi calls public URL; should be allowed via internal allowlist, OR the dashboard doesn't need this).
 
@@ -359,8 +442,8 @@ az webapp log tail -g kaunitz-rg -n kaunitz-dashboard-<random>  # interactive �
 
 **Verification commands.**
 ```bash
-curl -i https://kaunitz-dashboard-<random>.azurewebsites.net/ | head -1  # expect 302 or 401
-curl -s https://kaunitz-dashboard-<random>.azurewebsites.net/health     # should still return 200
+curl -i https://kaunitz-dev-dashboard-<random>.azurewebsites.net/ | head -1  # expect 302 or 401
+curl -s https://kaunitz-dev-dashboard-<random>.azurewebsites.net/health     # should still return 200
 ```
 
 ---
@@ -391,7 +474,7 @@ curl -s https://kaunitz-dashboard-<random>.azurewebsites.net/health     # should
 ```bash
 ssh robert@192.168.0.28 'cd ~/projects/bets && export $(cat .env) && .venv/bin/python3 scripts/scan_odds.py --sports football && stat -c "%y %n" logs/bets.csv'
 # mtime should match the archive copy, NOT the current scan time.
-az sql db show-deleted -g kaunitz-rg -s kaunitz-sql-uksouth-<random> 2>/dev/null  # confirm restore-from-deleted available
+az sql db show-deleted -g kaunitz-dev-rg -s kaunitz-dev-sql-uksouth-<random> 2>/dev/null  # confirm restore-from-deleted available
 ```
 
 ---
@@ -430,28 +513,39 @@ ssh robert@192.168.0.28 'cd ~/projects/bets && ls logs/*.csv 2>&1'  # expect "No
 
 ---
 
-## Phase A.10 — Pi onboarding to Azure SQL (deferred — separate sprint)
+## Phase A.10 — Stand up `kaunitz-prod-rg` + onboard Pi (deferred — separate sprint)
 
 **Status.** Deferred. Not part of this plan. Listed here so future sessions know it's the natural follow-up.
 
+**Scope (substantially larger than the original "Pi onboarding"):** A.10 mirrors the entire dev stack into a brand-new prod RG, then connects Pi to it. Dev keeps running independently (different DB, different dashboard URL).
+
 **Trigger gate (all must hold before unblocking A.10):**
-1. A.0–A.9 fully done on WSL side.
+1. A.0–A.9 fully done on the dev stack.
 2. ≥1 calendar week of clean WSL DB-only operation (no rollbacks, no data corruption).
-3. WSL data in the Azure dashboard matches WSL CSVs by spot-check.
-4. Pi production cron has not regressed during the WSL Azure rollout (verified by tailing `~/projects/bets/logs/scan.log` on Pi — line counts grew normally, no errors).
+3. WSL data in the dev dashboard matches WSL CSVs by spot-check.
+4. Pi production cron has not regressed during the dev Azure rollout (verified by tailing `~/projects/bets/logs/scan.log` on Pi — line counts grew normally, no errors).
 
-**When unblocked, A.10 will cover:**
-- Pi `.env` adds `BETS_DB_WRITE=1` + `AZURE_SQL_DSN` + Key Vault secret access.
-- Azure SQL firewall opens to Pi's public IP.
+**When unblocked, A.10 will cover (sketch — to be detailed in a fresh `PLAN_PI_AZURE_<YYYY-MM>.md` doc when the gate clears):**
+
+**Step 1 — Stand up the prod stack (mirror of A.0–A.7 but in `kaunitz-prod-rg`):**
+- `az group create -n kaunitz-prod-rg -l uksouth --tags env=prod project=kaunitz owner=rfreire`.
+- Provision `kaunitz-prod-sql-uksouth-<rand>` with `--use-free-limit` if available (the once-per-subscription free offer is reserved for here), else serverless with longer auto-pause delay (e.g. 6 hours) to keep prod warm during match windows. Admin user `kaunitzadmin` (separate password from dev — store distinct Bitwarden entry).
+- `kaunitz-prod-kv-<rand>` with the prod SQL admin password.
+- `kaunitz-prod-plan` (F1) + `kaunitz-prod-dashboard-<rand>`. Deploy current `app.py`. Configure Easy Auth (Google OIDC, allowlist `robert.freire@gmail.com`) — same identity as dev, but separate web app so the URLs are distinct.
+- Run `src/storage/migrate.py` against the prod DB to apply schema.
+
+**Step 2 — Onboard Pi:**
+- Pi `.env` adds `BETS_DB_WRITE=1` + `AZURE_SQL_DSN` (pointing at `kaunitz-prod-sql-uksouth-<rand>`) + Key Vault secret access for Pi's identity.
+- Prod Azure SQL firewall opens to Pi's public IP.
 - Pi `git pull` picks up the dual-write code (already deployed to Pi as dormant since A.4).
-- One-shot import of Pi historical CSVs (`scripts/migrate_csv_to_db.py` re-run pointed at Pi data).
-- Verify Pi rows appear in Azure dashboard.
-- ≥1 week soak with both Pi and WSL writing.
-- Eventually: Pi CSV decommission (mirror of A.8/A.9 but for Pi).
+- One-shot import of Pi historical CSVs (`scripts/migrate_csv_to_db.py` re-run pointed at Pi data + prod DSN).
+- Verify Pi rows appear in the prod dashboard.
 
-**Tasks** (sketched only — to be detailed in a fresh `PLAN_PI_AZURE_<YYYY-MM>.md` doc when the gate clears).
+**Step 3 — Soak + decommission:**
+- ≥1 week soak with Pi writing to prod and WSL writing to dev — no cross-pollination.
+- Eventually: Pi CSV decommission (mirror of A.8/A.9 but for Pi, against prod DB).
 
-**Why deferred:** Pi is production. Touching it during a fresh Azure stand-up risks breaking the canonical data stream that we depend on for CLV evaluation. Better to debug Azure on dev data first, then onboard Pi from a known-good base.
+**Why deferred:** Pi is production. Touching it during a fresh Azure stand-up risks breaking the canonical data stream that we depend on for CLV evaluation. Better to debug Azure on dev data first, then onboard Pi from a known-good base. The two-stack split also means dev experiments can keep running through any prod incidents.
 
 ---
 
