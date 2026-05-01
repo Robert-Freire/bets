@@ -1,6 +1,6 @@
 # Azure Migration Plan — 2026-05
 
-Phased migration from local CSV-on-Pi to a SQL-Server-Express-backed Flask dashboard hosted on Azure. Supersedes the earlier `docs/PI_AZURE_SETUP.md` (deleted on 2026-05-01) which assumed Blob-storage-only and a static read-only dashboard.
+Phased migration from local CSV storage to a SQL-Server-Express-backed Flask dashboard hosted on Azure. Supersedes the earlier `docs/PI_AZURE_SETUP.md` (deleted on 2026-05-01).
 
 **Driving question.** Pi cron is in production (Phase 9a ✅ done 2026-05-01). The two open questions: (1) where does data live now that the system is no longer a single-host setup? (2) how does the user view/settle bets from a phone, anywhere? This plan answers both with one consistent stack: Azure SQL DB + Azure App Service.
 
@@ -8,23 +8,57 @@ Phased migration from local CSV-on-Pi to a SQL-Server-Express-backed Flask dashb
 
 ---
 
+## Scope: dev-first migration; Pi UNTOUCHED throughout
+
+> ⚠️ **Decision (2026-05-01):** This plan migrates **only the WSL/dev side** to Azure. The **Raspberry Pi production cron is NOT modified by any phase in this document.** Pi keeps writing to its own local `~/projects/bets/logs/*.csv` exactly as it does today. This means: if any Azure phase breaks anything, the worst-case blast radius is dev/test data on WSL — production data on Pi is fully isolated.
+
+**What's IN scope (WSL/dev only):**
+- Provision Azure resources (SQL DB, App Service, Key Vault, RG)
+- Migrate WSL `logs/*.csv` data into Azure SQL
+- WSL `scan_odds.py` writes both CSV and Azure SQL (dual-write, env-flag gated)
+- Dashboard (`app.py`) reads from Azure SQL — sees **only WSL data** during this plan
+- Public Azure URL with Google OIDC auth
+
+**What's OUT of scope (deferred to future plan):**
+- Pi `scan_odds.py` writing to Azure SQL — Pi stays on CSVs.
+- Pi data appearing in the Azure dashboard — Pi data is not in the DB during this plan.
+- Decommissioning Pi's local CSVs.
+- Unifying WSL + Pi data — they remain two parallel streams (per `project_dev_prod_split` memory).
+
+**Implications for "stop-after-here" thinking:**
+- After Phase A.7 lands, you have a fully working public Azure dashboard backed by Azure SQL — but it shows only the WSL test stream's data. The Pi production stream is still canonical and visible only via Pi-side CSVs / direct ssh.
+- Pi onboarding (Phase A.10 below) is a **separate future sprint** — only attempt after this plan has soaked for ≥1 week.
+
+---
+
 ## Architecture target
 
 ```
-Raspberry Pi (home network — production cron only)
-  └── scan_odds.py, closing_line.py, refresh_xg.py, research_scan.py (cron)
-        └── writes via pyodbc to →
-                                    Azure SQL Database (single source of truth)
+WSL (home network — dev cron, dev API key)
+  └── scan_odds.py, closing_line.py (cron)
+        ├── writes to logs/*.csv (existing path, always on)
+        └── writes to Azure SQL via pyodbc (NEW, gated by BETS_DB_WRITE=1 env flag)
+                                                    │
+                                                    ▼
+                                    Azure SQL Database (UK South, Free tier)
                                     schema: bets, fixtures, books, closing_lines,
                                             drift, paper_bets, strategies
-                                            ↑
-                                    reads ↑                    ↓ writes (settle bet)
+                                                    ▲
+                                    reads from above; writes settle-bet POSTs back
+                                                    │
                                     Azure App Service (F1 free tier)
                                     app.py — Flask dashboard
-                                    Easy Auth (Google) for public URL
+                                    Easy Auth (Google) — robert.freire@gmail.com only
+                                    Shows: WSL-source data only (during this plan)
+
+
+Raspberry Pi (home network — UNCHANGED in this plan)
+  └── scan_odds.py, closing_line.py, refresh_xg.py, research_scan.py (cron)
+        └── writes to ~/projects/bets/logs/*.csv ONLY
+              (no Azure writes; Pi onboarding deferred to Phase A.10)
 ```
 
-WSL stays as the dev environment. Local manual scans either (a) write to the same Azure SQL DB or (b) use a local SQLite scratch DB (decision deferred to A.4).
+WSL is the sole writer to Azure SQL during this plan. Pi remains the canonical production data source on local CSVs.
 
 ---
 
@@ -36,28 +70,31 @@ WSL stays as the dev environment. Local manual scans either (a) write to the sam
 | What flavour of SQL? | **Azure SQL DB** (T-SQL, MSSQL-flavoured) — *not* SQL Server Express on a VM | Same engine family as the original "SQL Server Express" intent; user gets the cloud benefits. Phase-6 doc copy still says "SQL Server Express" for continuity. |
 | Where does the web app live? | **Azure App Service F1 (free)** | Always-on Linux Python runtime; deploy via `az webapp up`. If F1 cold starts hurt UX, escalate to B1 (~£10/mo) in A.7. |
 | Auth on public dashboard? | **App Service Easy Auth with Google OIDC** (one allowed email: `robert.freire@gmail.com`) | One-click in portal; no auth code in app.py. Falls back to HTTP Basic Auth (1 LOC) if Easy Auth setup blocks. |
-| Pi → Azure SQL transport | TCP 1433 outbound, TLS required (Azure default), SQL auth (username/password from Azure Key Vault → env var on Pi) | TLS+SQL auth is the simplest path. AAD auth from a Pi is awkward (no AAD identity). |
+| Pi → Azure SQL transport | **N/A in this plan** — Pi is not touched. Future Phase A.10 will add this (TCP 1433 outbound, TLS, SQL auth from Key Vault). | Avoid touching production-critical Pi cron during a multi-phase Azure stand-up. Onboard Pi only after dev side has soaked for ≥1 week. |
+| WSL → Azure SQL transport | TCP 1433 outbound, TLS required (Azure default), SQL auth (username/password from Azure Key Vault → env var on WSL) | TLS+SQL auth is the simplest path. WSL is on home network so firewall rule allows the WSL public IP. |
+| Pi onboarding scope | **Deferred to Phase A.10** (separate future sprint, post-soak). Pi keeps writing CSVs only during A.0–A.9. | Pi is production; protecting it from Azure-related disruption is the entire point of the dev-first scope above. |
 | Region | **UK South** | Lowest-latency UK region for the Pi; matches the user's location and bookmaker fixture timezones. |
-| Migration style | **Dual-write transition** (A.4–A.8): scanner writes both CSV and DB; dashboard reads DB-first with CSV fallback. Cut over once 1 week of clean DB-only operation. | Lets us roll back cheaply if DB writes fail. |
+| Migration style | **Dual-write transition on WSL only** (A.4–A.8): WSL scanner writes both CSV and DB; dashboard reads DB-first with CSV fallback. Cut over once 1 week of clean DB-only operation on the WSL side. Pi is NOT part of this transition — Pi stays CSV-only. | Lets us roll back cheaply if DB writes fail. Keeps Pi production isolated from any Azure-side breakage. |
 | Schema primary key | **`uniqueidentifier` (UUID)** for `bets.id`, `paper_bets.id` | Closes the historical "Phase 6: SQLite + UUIDs" intent without needing app-side coordination of integer sequences. |
-| Historical CSV data | Backfilled in A.3 (one-shot importer); CSVs archived to `logs/csv-archive/` after A.8 cutover; deleted in A.9 | Preserves the ~6 months of accumulated bets/closing-lines/drift/paper data. |
+| Historical CSV data | **WSL CSVs only** backfilled in A.3 (one-shot importer); WSL CSVs archived to `logs/csv-archive/` after A.8 cutover; deleted in A.9. **Pi CSVs are NOT touched by any phase in this plan.** | Preserves the WSL test-stream data; Pi production data stays in its own CSVs untouched. |
 
 ---
 
 ## Phase status tracker
 
-| Phase | Title | Status | Depends on |
-|---|---|---|---|
-| A.0 | Provision Azure account + resource group | pending | — |
-| A.1 | Stand up Azure SQL Database (Free tier) | pending | A.0 |
-| A.2 | Schema DDL + idempotent migrations runner | pending | A.1 |
-| A.3 | CSV → DB importer (one-shot, idempotent) | pending | A.2 |
-| A.4 | Storage layer + dual-write in scanner | pending | A.2 |
-| A.5 | Dashboard reads DB-first with CSV fallback | pending | A.2, A.4 |
-| A.6 | Provision App Service + deploy `app.py` | pending | A.5 |
-| A.7 | Easy Auth (Google OIDC) on dashboard | pending | A.6 |
-| A.8 | Cutover: DB-only, archive CSVs | pending | A.7 + 1 week stable A.4/A.5 |
-| A.9 | Decommission CSV path entirely | pending | A.8 + 1 week stable |
+| Phase | Title | Touches Pi? | Status | Depends on |
+|---|---|---|---|---|
+| A.0 | Provision Azure account + resource group | no | pending | — |
+| A.1 | Stand up Azure SQL Database (Free tier) | no | pending | A.0 |
+| A.2 | Schema DDL + idempotent migrations runner | no | pending | A.1 |
+| A.3 | CSV → DB importer — **WSL CSVs only** | no | pending | A.2 |
+| A.4 | Storage layer + dual-write in scanner — **WSL only**, env-flag gated so Pi `git pull` is safe | no (code is gated; Pi never sets the flag) | pending | A.2 |
+| A.5 | Dashboard reads DB-first with CSV fallback — **shows WSL data only** | no | pending | A.2, A.4 |
+| A.6 | Provision App Service + deploy `app.py` | no | pending | A.5 |
+| A.7 | Easy Auth (Google OIDC) on dashboard | no | pending | A.6 |
+| A.8 | Cutover: WSL DB-only, archive WSL CSVs | no | pending | A.7 + 1 week stable A.4/A.5 |
+| A.9 | Decommission WSL CSV path entirely | no | pending | A.8 + 1 week stable |
+| **A.10** | **Pi onboarding to Azure SQL** (future sprint — separate plan doc) | **yes** | **deferred** | A.9 + ≥1 week soak |
 
 ---
 
@@ -165,9 +202,9 @@ pytest -q tests/test_schema.py
 
 ---
 
-## Phase A.3 — CSV → DB importer (one-shot, idempotent)
+## Phase A.3 — CSV → DB importer (one-shot, idempotent) — WSL CSVs only
 
-**Goal.** Backfill all historical data from `logs/*.csv` and `logs/paper/*.csv` into the new DB.
+**Goal.** Backfill historical data from **WSL's** `logs/*.csv` and `logs/paper/*.csv` into the new DB. **Pi's CSVs are NOT imported** (Pi onboarding is Phase A.10, deferred).
 
 **Tasks.**
 1. Create `scripts/migrate_csv_to_db.py` reading:
@@ -198,32 +235,41 @@ python3 -c "import pyodbc; c = pyodbc.connect('$AZURE_SQL_DSN'); print('bets:', 
 
 ---
 
-## Phase A.4 — Storage layer + dual-write in scanner
+## Phase A.4 — Storage layer + dual-write in scanner — WSL only
 
-**Goal.** Production scanner writes to both CSV (existing) and DB (new) on every scan. Env flag `BETS_DB_WRITE` gates the new path.
+**Goal.** **WSL's** `scan_odds.py` writes to both CSV (existing) and Azure SQL (new) on every scan. Env flag `BETS_DB_WRITE=1` gates the new path. **Pi's `scan_odds.py` is NOT modified beyond what `git pull` brings in — Pi never sets `BETS_DB_WRITE`, so the dual-write code path stays dormant on Pi.**
+
+**Pi safety contract.** The `BetRepo` module must be import-safe even when `pyodbc` / `AZURE_SQL_DSN` / `BETS_DB_WRITE` are absent. Pi's `git pull` brings in the new code; on next cron fire, Pi runs the scanner with no env flag → the DB write path is short-circuited → Pi behavior is byte-identical to pre-A.4. Verify this in tests.
 
 **Tasks.**
-1. New module `src/storage/repo.py` with `BetRepo` class: `add_bet(...)`, `add_paper_bet(...)`, `add_closing_line(...)`, `add_drift_snapshot(...)`. CSV writer and DB writer behind a common interface.
-2. Wire into `scripts/scan_odds.py` and `scripts/closing_line.py` — both now call `repo.add_*` instead of writing CSVs directly.
-3. Default config: CSV write always on; DB write controlled by `BETS_DB_WRITE=1` env var. Pi `.env` adds the flag + `AZURE_SQL_DSN`.
-4. Connection pulled from Azure Key Vault via `az keyvault secret show` at boot (cache for process lifetime).
-5. Add `tests/test_repo_dual_write.py` — confirms a single `add_bet` writes one CSV row and one DB row, both with same UUID.
+1. New module `src/storage/repo.py` with `BetRepo` class: `add_bet(...)`, `add_paper_bet(...)`, `add_closing_line(...)`, `add_drift_snapshot(...)`. CSV writer always-on; DB writer activated only when `BETS_DB_WRITE=1` AND `AZURE_SQL_DSN` is set.
+2. Wire into `scripts/scan_odds.py` and `scripts/closing_line.py` — both call `repo.add_*` instead of writing CSVs directly.
+3. **WSL `.env.dev`** adds `BETS_DB_WRITE=1` + `AZURE_SQL_DSN`. Pi `.env` does NOT — Pi stays CSV-only.
+4. Connection pulled from Azure Key Vault via `az keyvault secret show` at boot on WSL (cache for process lifetime).
+5. Add `tests/test_repo_dual_write.py` — confirms (a) a single `add_bet` writes one CSV row and one DB row when flag is on; (b) **no DB import or connection attempt occurs when `BETS_DB_WRITE` is unset** (the Pi-safety case).
 
 **Acceptance.**
-- [ ] Smoke scan on Pi (with `BETS_DB_WRITE=1`) appends a row to `logs/bets.csv` AND inserts a row into `bets` table; UUIDs match.
-- [ ] With `BETS_DB_WRITE=0`, only CSV is written (current behaviour preserved).
+- [ ] Smoke scan on **WSL** (with `BETS_DB_WRITE=1`) appends a row to `logs/bets.csv` AND inserts a row into `bets` table; UUIDs match.
+- [ ] With `BETS_DB_WRITE` unset (Pi case), only CSV is written; no pyodbc import attempted; no errors logged.
+- [ ] After `git pull` on Pi, next scheduled cron runs unchanged (verify by tailing Pi's `logs/scan.log` — same line count growth as before A.4).
 - [ ] No double-writes on cron retries (covered by upsert in repo layer).
 
 **Reviewer focus.**
-- Failure isolation: if DB insert fails, scanner still writes CSV and logs the error. Don't block the scan on DB outage.
+- **Pi safety:** import path must not require pyodbc/azure-* libs unless `BETS_DB_WRITE=1`. Lazy import inside the DB writer code path. Verify Pi can run scanner without those libs installed.
+- Failure isolation: if DB insert fails on WSL, scanner still writes CSV and logs the error. Don't block the scan on DB outage.
 - Connection re-use: open one pyodbc connection per scan run, not per row.
-- Key Vault token caching: don't re-authenticate per scan (slow + costly).
+- Key Vault token caching: don't re-authenticate per scan.
 
 **Verification commands.**
 ```bash
-ssh robert@192.168.0.28 'cd ~/projects/bets && export $(cat .env) && BETS_DB_WRITE=1 .venv/bin/python3 scripts/scan_odds.py --sports football 2>&1 | tail -20'
-# Expect: scan completes; check both CSV and DB for new rows with same kickoff/home/away/side/book.
-ssh robert@192.168.0.28 'tail -5 ~/projects/bets/logs/bets.csv | cut -d, -f1-6'
+# WSL — dual-write should fire
+export $(cat .env.dev) && BETS_DB_WRITE=1 python3 scripts/scan_odds.py --sports football 2>&1 | tail -20
+# Expect: scan completes; row count grows in both logs/bets.csv AND Azure SQL bets table.
+
+# Pi — dormant path, behavior unchanged
+ssh robert@192.168.0.28 'cd ~/projects/bets && git pull && export $(cat .env) && .venv/bin/python3 scripts/scan_odds.py --sports football 2>&1 | tail -20'
+# Expect: scan completes normally; no pyodbc errors; no Azure connection attempted.
+
 python3 -c "import pyodbc; c = pyodbc.connect('$AZURE_SQL_DSN'); print(c.execute('SELECT TOP 5 created_at, side FROM bets ORDER BY created_at DESC').fetchall())"
 ```
 
@@ -383,10 +429,36 @@ ssh robert@192.168.0.28 'cd ~/projects/bets && ls logs/*.csv 2>&1'  # expect "No
 
 ---
 
-## Out of scope
+## Phase A.10 — Pi onboarding to Azure SQL (deferred — separate sprint)
 
+**Status.** Deferred. Not part of this plan. Listed here so future sessions know it's the natural follow-up.
+
+**Trigger gate (all must hold before unblocking A.10):**
+1. A.0–A.9 fully done on WSL side.
+2. ≥1 calendar week of clean WSL DB-only operation (no rollbacks, no data corruption).
+3. WSL data in the Azure dashboard matches WSL CSVs by spot-check.
+4. Pi production cron has not regressed during the WSL Azure rollout (verified by tailing `~/projects/bets/logs/scan.log` on Pi — line counts grew normally, no errors).
+
+**When unblocked, A.10 will cover:**
+- Pi `.env` adds `BETS_DB_WRITE=1` + `AZURE_SQL_DSN` + Key Vault secret access.
+- Azure SQL firewall opens to Pi's public IP.
+- Pi `git pull` picks up the dual-write code (already deployed to Pi as dormant since A.4).
+- One-shot import of Pi historical CSVs (`scripts/migrate_csv_to_db.py` re-run pointed at Pi data).
+- Verify Pi rows appear in Azure dashboard.
+- ≥1 week soak with both Pi and WSL writing.
+- Eventually: Pi CSV decommission (mirror of A.8/A.9 but for Pi).
+
+**Tasks** (sketched only — to be detailed in a fresh `PLAN_PI_AZURE_<YYYY-MM>.md` doc when the gate clears).
+
+**Why deferred:** Pi is production. Touching it during a fresh Azure stand-up risks breaking the canonical data stream that we depend on for CLV evaluation. Better to debug Azure on dev data first, then onboard Pi from a known-good base.
+
+---
+
+## Out of scope (in this plan)
+
+- **Pi onboarding to Azure SQL** — see Phase A.10 above; deferred to separate future sprint.
 - **Multi-tenant auth** — only one user (`robert.freire@gmail.com`) for the foreseeable future.
-- **Real-time streaming** — Pi scans on cron, dashboard polls; no WebSockets.
+- **Real-time streaming** — scans on cron, dashboard polls; no WebSockets.
 - **DB-level row encryption** — Azure SQL is encrypted at rest by default; no PII in the schema beyond bet history.
 - **Multi-region failover** — single UK South region is enough.
 - **Betfair API auto-placement** — that's Phase 8 in `CLAUDE.md`, runs in parallel with Azure but not part of this plan.
@@ -395,8 +467,10 @@ ssh robert@192.168.0.28 'cd ~/projects/bets && ls logs/*.csv 2>&1'  # expect "No
 
 ## Cross-cutting risks
 
-1. **Pi → Azure SQL connectivity outage** mid-scan → handled by A.4's failure-isolation (CSV stays as fallback during dual-write; alert via ntfy if DB writes fail >5 consecutive scans).
-2. **Free-tier SQL quota exhaustion** mid-month → escalate to Basic (~£5/mo) per A.1's decision table.
-3. **Easy Auth + Google verification delays** → A.7's documented Basic Auth fallback covers this.
-4. **CSV → DB importer non-deterministic UUIDs** → A.3's deterministic-UUID rule prevents reimport duplication; verified in Acceptance.
-5. **Dashboard cold-start UX** → measured in A.6; B1 escalation path exists.
+1. **Pi safety contract violation** (the new top risk in this dev-first scope) → if any phase accidentally touches Pi cron behavior (e.g., A.4 module imports pyodbc unconditionally and Pi doesn't have it installed), Pi production silently breaks. Mitigated by A.4's lazy-import requirement + the `git pull on Pi` smoke test in A.4 Acceptance. **Reviewer must explicitly verify Pi-side smoke after every code-touching phase.**
+2. **WSL → Azure SQL connectivity outage** mid-scan → handled by A.4's failure-isolation (CSV stays as fallback during dual-write; alert via ntfy if DB writes fail >5 consecutive scans on WSL).
+3. **Free-tier SQL quota exhaustion** mid-month → escalate to Basic (~£5/mo) per A.1's decision table.
+4. **Easy Auth + Google verification delays** → A.7's documented Basic Auth fallback covers this.
+5. **CSV → DB importer non-deterministic UUIDs** → A.3's deterministic-UUID rule prevents reimport duplication; verified in Acceptance.
+6. **Dashboard cold-start UX** → measured in A.6; B1 escalation path exists.
+7. **Forgetting Phase A.10** — easy to ship A.0–A.9 and forget Pi is still on CSVs. Mitigation: the dashboard banner "Showing WSL data only — Pi still on CSVs" should appear in A.5 until A.10 ships.
