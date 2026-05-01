@@ -227,3 +227,63 @@ ssh robert@192.168.0.28 'crontab -l | grep -cE "scan_odds|backfill_clv"'        
 - [ ] **A.8 cutover eligibility:** ≥1 calendar week of clean WSL dual-write soak (clock started 2026-05-01) → eligible ~2026-05-08.
 - [ ] **Decide on paid Odds API tier** ($25/mo, 100k credits) based on CLV evidence after the first 50 settled bets with `clv_pct` populated.
 - [ ] **Delete this doc** if R.11 + Azure + FDCO all worked cleanly — it's a transient runbook, the durable state lives in CLAUDE.md + memory. Don't delete without asking the user first.
+
+---
+
+## Market-coverage rollout — Monday decisions (PR #17 follow-up)
+
+PR #17 (`market-coverage-m0-m2-2026-05`) merged to main 2026-05-01 with M.0–M.2 of `docs/PLAN_MARKET_COVERAGE_2026-05.md`. Pi was intentionally **not pulled** to keep the eval window clean. The Monday post-mortem must close out the following decisions before any further market-coverage work resumes.
+
+### D.1 — Pull PR #17 onto Pi?
+
+**Default:** yes, pull immediately after the post-mortem signs off on the weekend.
+
+**Conditions to hold:**
+- Pi scan log shows any 401 / quota / paper-schema-loop / new-error pattern over the weekend → diagnose first; do not pull a config-loader change onto a wedged Pi.
+- Post-mortem flags any divergence > 20% in WSL vs Pi paper-bet counts per variant → treat the same way; understand divergence first.
+
+**Action if pulling:**
+```bash
+ssh robert@192.168.0.28 'cd ~/projects/bets && git fetch && git log --oneline HEAD..origin/main && git pull && .venv/bin/pytest -q'
+# Verify markets=h2h is what Pi will request next
+ssh robert@192.168.0.28 'grep -n "markets" ~/projects/bets/scripts/scan_odds.py | head -5'
+# Confirm config.json leagues array loads
+ssh robert@192.168.0.28 'cd ~/projects/bets && .venv/bin/python3 -c "import json; print(len(json.load(open(\"config.json\"))[\"leagues\"]))"'
+```
+
+**If holding:** add a one-line note in the **Live evaluation log** with the reason and a re-evaluate date.
+
+### D.2 — Promote M.3 (add probe-passing leagues to prod `config.json`)?
+
+**Default:** yes — La Liga 2, Eredivisie, Primeira Liga, Ligue 2 cleared the prod bar (`avg_books ≥ 20 AND p95_dispersion ≤ 0.04`) per `docs/LEAGUE_COVERAGE_2026-05.md`. La Liga **fails** (p95 dispersion 0.083) — exclude.
+
+**Pre-condition:** D.1 done, Pi running PR #17 cleanly for at least one scan cycle.
+
+**Budget verification before merging M.3:** `(6 + 4) × 2 cr × 5 scans/wk × 4.345 = 434/mo`, leaves 66cr buffer in the 500/mo cap. ✓ Re-run the M.3 phase verification command in the plan doc before merging.
+
+**Action:** open a fresh PR off main with the four added entries in `config.json`, the updated `CLAUDE.md` "Sports actively scanned" table, and the M.3 acceptance checklist filled in. **Do not bundle with M.4.**
+
+### D.3 — Promote M.4 (dev AH probe via `extra_markets=["spreads"]`)?
+
+**Default:** yes if D.1 + D.2 both clean for one full scan cycle. AH is the highest-leverage edge probe in the plan.
+
+**Pre-conditions:**
+- D.2 merged and live on Pi.
+- WSL crontab being trimmed 5 → 3 scans/wk (Tue 07:30 + Sat 16:30 + Sun 12:30) to fit the dev budget. Pi crontab unchanged.
+- New `Q_asian_handicap` paper variant builds and writes a row on at least one synthetic spreads fixture in the test suite.
+
+**Budget verification before merging M.4:** dev burn = `10 leagues × 4 cr (h2h+spreads) × 3 scans × 4.345 = 522/mo`. **Marginally over** 500/mo dev key — recompute against the Plan §M.4 mitigation table and pick option (a) or a tighter variant. Update the plan doc if the chosen option deviates.
+
+### D.4 — Decide on paid Odds API tier ($25/mo, 100k credits)
+
+Mostly an existing checklist item, but the M.0 totals-drop and M.4 AH-probe both interact with it. Re-evaluate using the actual weekend credit consumption from both keys, not the stale 497/500 figure.
+
+**Trigger to flip paid:** ≥50 settled bets with `clv_pct` populated **AND** average CLV positive on at least one paper variant on the weekend cohort. Without that signal, free tier remains right.
+
+### D.5 — La Liga revisit cadence
+
+`project_la_liga_excluded.md` is now sourced from real probe numbers (p95 dispersion 0.083). **Don't re-probe in < 90 days** unless something materially changed (paid tier, new region added, dispersion threshold relaxed). Drop into dev only if D.3 lands with budget headroom remaining; never to prod on the current evidence.
+
+### D.6 — Bot scope-creep follow-up
+
+The PR #17 implementation bot added an unrelated WARNING ntfy notification outside the M.0/M.1/M.2 task list (it was the user's separate request — no harm, but a process miss). If we keep using a sub-agent for plan execution, tighten the bot-execution protocol in `docs/PLAN_RESEARCH_2026-04.md` (and reuse for future plans) to add an explicit "no drive-by changes; out-of-scope work goes to a follow-up PR" line.
