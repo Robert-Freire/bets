@@ -17,8 +17,10 @@ This doc is self-contained for asynchronous bot execution. Follow the same proto
 | M.2 | Move league list to `config.json`; env-overridable per host | ✅ done (PR #17, 2026-05-01) |
 | M.4a | La Liga early-add to dev (no AH, no per-league weights) | ✅ done (PR #18, 2026-05-01) |
 | M.3 | Add passing leagues to prod config | pending (depends on M.1, M.2; gated on Mon 2026-05-04 post-mortem) |
-| M.7 | Dispersion shape analysis per league | **partial** — `scripts/analyse_dispersion.py` shipped 2026-05-01; ran on La Liga (78.3% bimodal). Tests + per-league report across all 11 leagues still pending. |
-| M.6 | Configurable book weights via `config.json` | pending (depends on M.7) |
+| M.7 | Dispersion shape analysis per league | **partial** — `scripts/analyse_dispersion.py` + `scripts/eval_books_vs_results.py` shipped 2026-05-01; cross-validated on all 10 leagues with archived data. Tests + persistence-across-scans still pending. |
+| M.6.5 | Book stats aggregator (combine centre-rate + Brier into rolling JSON) | pending (depends on M.7) |
+| M.6.6 | Weight derivation script (`config.book_weights.suggested.json`) | pending (depends on M.6.5) |
+| M.6 | Configurable book weights via `config.json` (scanner reads them) | pending (depends on M.6.6) |
 | M.4 | Add `spreads` market + structured experiments to dev config | pending (depends on M.6, M.3, M.4a) |
 | M.5 | Doc + memory updates; delete this plan | pending (depends on M.4) |
 
@@ -301,6 +303,85 @@ grep -E "csv|ntfy|BetRepo|SnapshotArchive|append" scripts/analyse_dispersion.py 
 pytest -q tests/test_dispersion_shape.py
 export $(cat .env.dev) && python3 scripts/analyse_dispersion.py --sport soccer_spain_la_liga
 ```
+
+---
+
+## Phase M.6.5 — Book stats aggregator
+
+**Goal.** A single weekly snapshot combining centre-rate (from `analyse_dispersion.py`) and Brier (from `eval_books_vs_results.py`) per book per league. Builds rolling history that M.6.6 can derive weights from. **Zero API cost** — pure aggregation of data already on disk + in blob archive.
+
+**Inputs.** Azure Blob `raw-api-snapshots` (Odds API responses) + `data/raw/*_<season>.csv` (FDCO).
+
+**Outputs.**
+- `scripts/aggregate_book_stats.py` — orchestrator. Defaults to "latest weekend" but accepts `--weekend YYYY-MM-DD`.
+- `logs/book_stats/<YYYY-MM-DD>.json` — append-only weekly snapshot.
+
+**Schema.**
+```json
+{
+  "captured_at": "2026-05-04T09:00:00Z",
+  "season": "2526",
+  "leagues": {
+    "EPL": {
+      "n_fixtures_scanned": 20,
+      "n_matches_settled": 339,
+      "books": {
+        "pinnacle": {"centre_rate": 0.85, "n_centre_obs": 50, "brier": 0.591, "n_brier_obs": 339, "low_pct": 0.05, "high_pct": 0.05},
+        "bet365": {"centre_rate": 0.78, "n_centre_obs": 50, "brier": 0.610, "n_brier_obs": 339, "low_pct": 0.10, "high_pct": 0.12},
+        "marathonbet": {"centre_rate": 0.96, "n_centre_obs": 50, "brier": null, "n_brier_obs": 0}
+      }
+    }
+  }
+}
+```
+
+**Tasks.**
+1. Refactor the analysis loops in `scripts/analyse_dispersion.py` and `scripts/eval_books_vs_results.py` so their core stats functions are importable (don't print, return dicts).
+2. Implement `scripts/aggregate_book_stats.py`:
+   - Find the freshest blob per league for the target weekend.
+   - Run dispersion stats per league → per-book centre/low/high rates.
+   - Run Brier stats per league using `--season` arg → per-book mean brier + n.
+   - Merge into the JSON schema above.
+   - Write to `logs/book_stats/<weekend>.json` — never overwrite (append behaviour: error if file exists, force with `--overwrite`).
+3. Tests: `tests/test_aggregate_book_stats.py` — synthetic blob + synthetic FDCO CSV → expected JSON output.
+
+**Acceptance.**
+- [ ] Weekly snapshot captures all 11 candidate leagues (or all leagues with blobs available).
+- [ ] No API calls (verify with grep).
+- [ ] Brier `null` when FDCO doesn't cover a book — clearly distinguishable from "0 observations."
+- [ ] Append-only — running twice on the same weekend errors unless `--overwrite`.
+
+---
+
+## Phase M.6.6 — Weight derivation
+
+**Goal.** Read the rolling `logs/book_stats/*.json` history, derive a recommended `book_weights.by_league` config, write `config.book_weights.suggested.json` for human review. Never auto-deployed.
+
+**Derivation rules.**
+
+1. **Brier-validated weight** (when book has ≥ 100 Brier observations from FDCO):
+   ```
+   weight = clip(2.0 - (brier - league_median_brier) / 0.05, 0.5, 3.0)
+   ```
+   Books with Brier 0.05 below league median → weight 3.0; at median → 2.0; 0.05 above → 1.0; floor at 0.5.
+2. **Centre-rate weight** (when no Brier, but ≥ 30 centre observations):
+   ```
+   weight = clip(centre_rate × 2.0, 0.5, 2.0)
+   ```
+   Capped at 2.0 to keep centre-rate-derived weights below Brier-validated weights — confidence reflects evidence quality.
+3. **Default weight** = 1.0 when neither metric has enough data.
+
+**Time decay.** Per-(book, league) stats are exponentially smoothed across the last 4 weekly snapshots: `smoothed = 0.5 × current + 0.3 × prev + 0.15 × prev_prev + 0.05 × oldest`. Reduces noise from any single weekend.
+
+**Outputs.**
+- `scripts/derive_book_weights.py` — reads `logs/book_stats/*.json` (last 4 by date), writes `config.book_weights.suggested.json` (full block, ready to copy into `config.json`).
+- `logs/book_weights_diff.log` — appendable log of "what changed in this run" — books that crossed weight boundaries since prior run, leagues where median Brier shifted.
+
+**Acceptance.**
+- [ ] Output JSON validates against the M.6 schema.
+- [ ] Books with no data get weight 1.0 (not omitted — explicit fallback).
+- [ ] Diff log shows clear "moved from 1.0 → 1.5" entries; user sees what would change before manually copying.
+- [ ] Tests: synthetic 4-week stats history → expected weights in output.
 
 ---
 

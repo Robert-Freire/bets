@@ -364,6 +364,24 @@ Added 2026-05-01 as a recurring Monday post-mortem step. **Zero API cost** — r
 - Bet365 and Bwin are broadly sharp (top-3 on 3 leagues each); currently weighted 1.0 in `J_sharp_weighted` — should be 2.0 / 1.5.
 - Centre-rate is unreliable for ranking sharpness on densely-priced markets. Demoted to secondary signal for FDCO-covered books; remains primary for books FDCO doesn't cover (with weak-evidence label).
 
+### D.9 — Book stats pipeline (next-week direction)
+
+The dispersion + Brier scripts are point-in-time tools. To **continuously refine `book_weights` as data arrives**, three new phases are queued in the plan doc:
+
+| Phase | What | When |
+|---|---|---|
+| M.6.5 | `scripts/aggregate_book_stats.py` — weekly JSON snapshot combining centre-rate + Brier per book per league. Writes to `logs/book_stats/<YYYY-MM-DD>.json` (append-only history). | Next Tuesday |
+| M.6.6 | `scripts/derive_book_weights.py` — reads rolling history, derives recommended weights with confidence-weighted blending (Brier overrides centre-rate when available, time-decayed across 4 weekends). Outputs `config.book_weights.suggested.json` for **human review**. Never auto-deployed. | Next Wednesday |
+| M.6 | Scanner reads `book_weights` from config; `J_sharp_weighted` becomes config-driven; `J2_sharp_weighted_per_league` variant added. | Next Thursday |
+
+**Refinement loop after these land:**
+1. Mon AM — weekly post-mortem (D.8) runs Step 1 + Step 2 (analysis) and Step 3 (aggregator + deriver).
+2. User compares `config.book_weights.suggested.json` vs current `config.json`. Reviews drift in the log.
+3. If happy, copies suggested values into `config.json` (and/or `config.dev.json` for per-dev overrides).
+4. Scanner picks up new weights on next scan.
+
+**After 4-6 weeks** of snapshots, the deriver has enough history that recommendations stabilise. The pattern is **build initial weights from current evidence; refine continuously as more arrives**. No book stays mis-weighted for long, no weight is locked in based on one weekend's data.
+
 ---
 
 ## Strategic direction for next week (decided 2026-05-01)
