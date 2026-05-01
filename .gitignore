@@ -2,6 +2,7 @@ data/raw/
 data/raw/zenodo/
 data/processed/
 .env
+.env.dev
 __pycache__/
 *.pyc
 *.pyo
