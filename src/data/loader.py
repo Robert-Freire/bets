@@ -102,6 +102,9 @@ def load_league(sport_key: str, since: str = "1415") -> pd.DataFrame:
                 df["best_odds_H"] = df[home_cols].max(axis=1)
                 df["best_odds_D"] = df[draw_cols].max(axis=1)
                 df["best_odds_A"] = df[away_cols].max(axis=1)
+                df["avg_odds_H"] = df[home_cols].mean(axis=1)
+                df["avg_odds_D"] = df[draw_cols].mean(axis=1)
+                df["avg_odds_A"] = df[away_cols].mean(axis=1)
 
             frames.append(df.sort_values("Date").reset_index(drop=True))
         except Exception as e:

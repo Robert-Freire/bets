@@ -2,39 +2,38 @@
 
 ## TL;DR
 
-Isotonic calibration (Option A: temporal 80/20 split) did not improve model accuracy: EPL RPS gap worsened (0.0171→0.0182) and EPL Brier worsened (0.6083→0.6099). Calibration produced implausibly large probability shifts (mean 0.21–0.29 per fixture, max 0.73), indicating the 20%-slice calibrator is fitting noise. Do not flip; the model has no demonstrated edge over the market on any league with measurable odds.
+Isotonic calibration (Option A: temporal 80/20 split) improved overall model accuracy across all 6 leagues: overall RPS gap fell from 0.01990 to 0.01803, overall Brier fell from 0.64406 to 0.63613. 4 of 6 leagues improved on both metrics; EPL and Bundesliga degraded slightly. No league has edge over the bookmaker yet. Do not flip now — wait for ≥50 settled bets with CLV before reconsidering.
 
 ## Numbers
 
 | league | n_seasons_eval | mean_rps_gap_uncal | mean_rps_gap_cal | mean_brier_uncal | mean_brier_cal | calibration_verdict |
 |---|---|---|---|---|---|---|
-| soccer_epl | 9 | 0.01711 | 0.01821 | 0.60831 | 0.60990 | MISCALIBRATED |
-| soccer_germany_bundesliga | 9 | n/a¹ | n/a¹ | 0.63601 | 0.63688 | MISCALIBRATED |
-| soccer_italy_serie_a | 9 | n/a¹ | n/a¹ | 0.62363 | 0.61399 | MISCALIBRATED |
-| soccer_efl_champ | 9 | n/a¹ | n/a¹ | 0.66787 | 0.65746 | MISCALIBRATED |
-| soccer_france_ligue_one | 9 | n/a¹ | n/a¹ | 0.63859 | 0.63252 | MISCALIBRATED |
-| soccer_germany_bundesliga2 | 9 | n/a¹ | n/a¹ | 0.68996 | 0.66594 | MISCALIBRATED |
+| soccer_epl | 9 | 0.01706 | 0.01821 | 0.60831 | 0.60990 | MISCALIBRATED |
+| soccer_germany_bundesliga | 9 | 0.02244 | 0.02476 | 0.63602 | 0.63691 | MISCALIBRATED |
+| soccer_italy_serie_a | 9 | 0.02013 | 0.01927 | 0.62358 | 0.61404 | MISCALIBRATED |
+| soccer_efl_champ | 9 | 0.01806 | 0.01484 | 0.66785 | 0.65750 | MISCALIBRATED |
+| soccer_france_ligue_one | 9 | 0.02006 | 0.01868 | 0.63856 | 0.63247 | MISCALIBRATED |
+| soccer_germany_bundesliga2 | 9 | 0.02165 | 0.01242 | 0.69001 | 0.66593 | MISCALIBRATED |
+| **OVERALL** | | **0.01990** | **0.01803** | **0.64406** | **0.63613** | |
 
-¹ Non-EPL data files do not include `avg_odds_*` columns; bookmaker RPS cannot be computed. Edge comparison only possible for EPL.
-
-Brier improved with calibration in 4 of 6 leagues (Serie A, Championship, Ligue 1, Bundesliga 2), but worsened for EPL and Bundesliga — the two leagues with the highest xG merge rates (91.9% and 71.1%). No league reached `WELL_CALIBRATED` status (max abs deviation ≥ 0.04 in every qualifying bin).
+Calibration improved RPS and Brier in 4/6 leagues (Serie A, Championship, Ligue 1, Bundesliga 2); EPL and Bundesliga degraded slightly. No league reached `WELL_CALIBRATED` status. All bookmaker_rps values are now populated for all 6 leagues — the avg_odds gap in `load_league` for non-EPL was fixed in this sprint.
 
 ## Where the model has any edge
 
 No (league × season) cell shows `has_edge=True` AND `n_matches ≥ 200` post-calibration.
 
-For EPL (the only league where bookmaker RPS is measurable), every one of the 9 evaluated seasons shows the model RPS strictly above the bookmaker RPS — the market is consistently sharper.
+All 6 leagues show positive rps_gap in every evaluated season — the market is consistently sharper than the model. Calibration narrows the gap in 4/6 leagues but does not close it.
 
 ## Recommendation
 
-**STOP** — calibration made accuracy worse on EPL (the most data-rich league with xG), and produced implausibly large probability swings (mean shift 0.21–0.29 total abs per fixture, max 0.73). These magnitudes indicate the 20%-slice isotonic calibrators are fitting noise, not signal. Do not ship `model_signals_calibrated.json`.
+**HOLD** — calibration improved overall probabilistic accuracy (RPS gap 0.01990→0.01803, Brier 0.64406→0.63613) but no league shows a clear edge over the market yet. EPL and Bundesliga (the two leagues with the most xG coverage) both degrade slightly with calibration, suggesting the 20% calibration slice is adding noise where xG features already do the work. The calibrated `model_signals_calibrated.json` is preferable on aggregate but not unambiguously so on the primary scanning leagues.
 
-Root-cause hypothesis: the calibration slice (~20% of 3 training seasons ≈ ~200 matches) is too small to reliably fit isotonic regression for 3 classes simultaneously. The Ligue 1/Championship/Bundesliga 2 Brier improvements are marginal (1–3%) and do not overcome EPL degradation.
+Wait for ≥50 settled bets with `clv_pct` populated, then re-evaluate. If avg CLV is positive across the model-filtered subset, flip.
 
-Suggested follow-up before reconsidering calibration:
-- Switch to Option B (`CalibratedClassifierCV` with `TimeSeriesSplit(n_splits=3)`) — requires more compute but uses more data for calibration fitting.
-- Or increase the calibration window: fit isotonic on the last full season rather than the last 20% of training data.
-- Add `avg_odds_*` columns to non-EPL league loaders so we can measure bookmaker RPS for all 6 leagues.
+To flip when ready (human-only):
+```bash
+mv logs/model_signals_calibrated.json logs/model_signals.json
+```
 
 ## What we did NOT touch
 
@@ -49,8 +48,8 @@ Revert the entire sprint: `git checkout main`.
 
 ## Open questions / follow-ups
 
-- Non-EPL odds coverage: `load_league()` does not compute `avg_odds_*` for non-EPL leagues; edge is unmeasurable for 5/6 leagues in this eval.
-- Tennis + NBA are excluded — not in scope (CatBoost model is football-only).
-- Phase 8 Betfair auto-placement should consume the **uncalibrated** `model_signals.json` from day one; do not use `_calibrated.json` until a future sprint validates calibration.
-- CLV gate still applies: once ≥50 settled bets have `clv_pct` populated, revisit whether the 2–3% model-filtered notification path is adding value beyond pure Kaunitz consensus.
-- The calibration code (Option A + Option B paths in `catboost_model.py`) is harmless to have in tree — it ships regardless of this STOP decision and will be the starting point for the next calibration attempt.
+- EPL and Bundesliga degrade with calibration: both have the best xG coverage (91.9% and 71.1%); calibration may add noise where xG features already constrain the probabilities well. Option B (`CalibratedClassifierCV` with `TimeSeriesSplit`) would use more data for calibration and is worth trying if HOLD persists after CLV review.
+- Probability shift magnitudes (mean 0.21–0.29 per fixture, max 0.73) are large; inspect per-bin reliability curves before the flip decision.
+- Tennis + NBA excluded — model is football-only.
+- Phase 8 Betfair auto-placement: use the uncalibrated `model_signals.json` for now; revisit after CLV gate.
+- CLV gate: ≥50 settled bets with `clv_pct` populated is the trigger to re-evaluate this HOLD decision.
