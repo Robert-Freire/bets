@@ -195,8 +195,10 @@ def _signal_is_positive(signal: str) -> bool:
         return signal == "agree"  # backward compat with old CSV rows
 
 
-NTFY_TOPIC = "robert-epl-bets-m4x9k"
-NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+# NTFY_TOPIC_OVERRIDE env var: set on WSL/dev cron to a different topic (separate
+# channel) or "" (empty = disable ntfy entirely). Default = production topic.
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC_OVERRIDE", "robert-epl-bets-m4x9k")
+NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}" if NTFY_TOPIC else ""
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 MIN_EDGE = 0.03        # Kaunitz-only threshold (no model required)
@@ -538,6 +540,9 @@ def format_bet_line(vb: dict) -> str:
 
 
 def notify(title: str, message: str, priority: str = "default"):
+    if not NTFY_TOPIC:
+        print(f"[ntfy] Disabled (NTFY_TOPIC_OVERRIDE empty): '{title}'")
+        return
     try:
         req = urllib.request.Request(
             NTFY_URL,

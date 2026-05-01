@@ -86,7 +86,9 @@ Free tier: 500 requests/month per key. Production schedule uses ~474/month. Clos
 
 ## Cron schedule (Pi: `robert@192.168.0.28`, UTC)
 
-Cutover from WSL → Pi on 2026-05-01. Pi crontab uses `SHELL=/bin/bash` and the `cd ~/projects/bets && export $(cat .env) && .venv/bin/python3 ...` pattern (no inline API keys). WSL crontab still has the bets entries commented as a restoration path if the Pi goes offline.
+Cutover from WSL → Pi on 2026-05-01. Pi crontab uses `SHELL=/bin/bash` and the `cd ~/projects/bets && export $(cat .env) && .venv/bin/python3 ...` pattern (no inline API keys).
+
+**WSL also runs the same cron** (re-enabled later 2026-05-01) using `.env.dev` (separate dev API key) and `NTFY_TOPIC_OVERRIDE=""` (no notifications). It's a parallel test stream — gaps from laptop sleep are acceptable. WSL skips `research_scan.py` and `refresh_xg.py` (Pi-canonical, would conflict on git-tracked outputs). `NTFY_TOPIC` in `scan_odds.py` honours the env var.
 
 ```
 # Scanner
