@@ -296,18 +296,91 @@ The PR #17 implementation bot added an unrelated WARNING ntfy notification outsi
 
 Shipped 2026-05-01 alongside this doc update. Dev-only via `config.dev.json` + `LEAGUES_CONFIG=config.dev.json` in `.env.dev`. Pi unchanged.
 
+**First scan (manual, 20:49 UTC Fri 2026-05-01):** ran cleanly. La Liga loaded with 20 fixtures and 32 avg books. **160 paper-portfolio rows** added across variants (vs typical ~30 per scan on the prod leagues). One Kaunitz bet logged — Girona vs Mallorca AWAY at betvictor 1.2, edge 4.5%, 27 books MED. Bet pushed to prod ntfy by mistake (`.env.dev` was missing `NTFY_TOPIC_OVERRIDE=` line; cron itself sets it inline so cron is unaffected; `.env.dev` now patched locally).
+
+**Dispersion shape analysis ran offline against the archived blob (zero API cost):**
+- **78.3% of fixture×outcome rows are bimodal** — far above the 30% threshold. La Liga's dispersion is structured, not noise.
+- Sharp anchors confirmed: Pinnacle (89% centre rate), Marathonbet (88%), Matchbook (87%), Smarkets (78%).
+- `J_sharp_weighted` hardcoded weights need La Liga override: keep Pinnacle 3.0; reduce Betfair Exchange 2.5 → 1.5 (not centre-dominant on La Liga); add Marathonbet + Matchbook at 2.5 (currently default 1.0).
+- Soft UK books for edge-flagging: virginbet, livescorebet, paddypower, skybet, ladbrokes_uk, williamhill.
+- Anomaly: winamax_fr/de show extreme structural bias — always low on Draws, always high on Aways. Different pricing model entirely.
+
+→ **Run `scripts/analyse_dispersion.py --blob <path>` against Sat + Sun blobs to confirm cluster persistence across scans.** Persistent clusters = M.7 hypothesis validated; can move on M.6 weights.
+
 **Monday checks specific to M.4a:**
 - [ ] WSL Sat/Sun scans show La Liga in the per-scan summary (7 leagues vs Pi's 6).
 - [ ] `logs/paper/A_production.csv` and `logs/paper/J_sharp_weighted.csv` have La Liga rows; counts diverge between the two variants (proves the variants are filtering La Liga differently — informative even before CLV).
 - [ ] WSL dev key consumption in line with expected: ~7 leagues × 2 cr × 3 weekend scans = ~42 cr added vs the 6-league baseline.
 - [ ] No scan-log errors specific to La Liga (parse failures, FDCO mapping issues, etc.).
+- [ ] Run `scripts/analyse_dispersion.py --blob` on Sat 10:30 + Sun 12:30 La Liga blobs. Confirm shape distribution + sharp/soft books match Friday's findings.
 
 **Soft signals worth noting in the post-mortem write-up:**
 - Count of La Liga value-bet flags per variant on Sat/Sun, broken down by Kaunitz vs Model-filtered.
 - Spread of edge percentages on La Liga flags vs the 6 prod leagues' flags.
 - Whether `J_sharp_weighted` and `A_production` produce systematically different La Liga bet sets (overlap %), as a leading indicator before CLV lands.
 
-**Decision rule on M.4a continuation:** if La Liga produces obvious data-quality issues (parse errors, missing teams, mapping failures) → revert by removing La Liga from `config.dev.json`. If it runs cleanly → keep it through M.7 + M.4 to maximise the data window.
+**Decision rule on M.4a continuation:** if La Liga produces obvious data-quality issues (parse errors, missing teams, mapping failures) → revert by removing La Liga from `config.dev.json`. If it runs cleanly + cluster persistence holds → keep it through M.7 + M.4 to maximise the data window.
+
+### Reuse-archived-data principle (lesson from this session)
+
+When doing analysis on already-collected data, **always prefer Azure Blob `raw-api-snapshots` over a fresh API call**. Each Odds API call costs 2cr against a 500/mo budget; the blob archive (A.5.5, live on WSL) holds every Odds API response. The dispersion-shape analysis in this section was done at zero API cost by parsing the archived blob from the 20:49 scan. `scripts/analyse_dispersion.py --blob <path>` is the canonical pattern. Memory note: `feedback_reuse_archived_data.md`.
+
+### All-leagues dispersion analysis (2026-05-01) — captured for reference
+
+Ran `scripts/analyse_dispersion.py` against blobs for all 10 currently-archived leagues. Results in `docs/DISPERSION_SHAPES_2026-05.md`. Three findings worth surfacing here:
+
+1. **Bimodality is universal** (75–93% across every league). The original M.7 threshold was useless. Replaced with **cluster amplitude** as the differentiator (mean distance between low and high cluster medians).
+2. **Ligue 1 has the highest cluster amplitude (0.0518)** — even higher than La Liga (0.0441). Already in prod. Either there's unrealised edge or amplitude alone doesn't translate to extractable edge. Investigate against existing CLV data once it lands.
+3. **Sharp identity shifts per league.** Marathonbet is a near-universal sharp (8 of 10 leagues) but currently weighted 1.0 in `J_sharp_weighted`. Pinnacle's sharpness varies — top sharp on La Liga + Championship, mid-pack on EPL/Bundesliga/Serie A/Ligue 1. Hardcoded weights are league-blind and leave signal on the table.
+
+**Methodology limitation flagged.** "Sharp = high centre rate" is a proxy that can mislabel a real sharp as soft when many UK books cluster together. M.7 should add Pinnacle-anchored deviation (and eventually closing-line deviation, post-CLV) as a more robust metric. See `docs/DISPERSION_SHAPES_2026-05.md` § "Methodology limitation".
+
+### D.8 — Weekly post-mortem book-sharpness analysis (standing item, two scripts)
+
+Added 2026-05-01 as a recurring Monday post-mortem step. **Zero API cost** — runs entirely against archived blobs and on-disk FDCO CSVs.
+
+**Two-step standing procedure:**
+
+**Step 1 — Dispersion shape analysis (`scripts/analyse_dispersion.py`).** Centre rate per book per league, from archived Odds API blobs.
+- Catches all 36 books from the Odds API (incl. niche specialists FDCO doesn't cover).
+- Caveat: centre-rate is a proxy that can mislabel sharps when soft UK books cluster.
+
+**Step 2 — Book Brier vs results (`scripts/eval_books_vs_results.py`).** Gold-standard sharpness from realized outcomes, on FDCO data.
+- Catches only ~7 books FDCO covers (Bet365, Bwin, Pinnacle, BetVictor, William Hill, Interwetten, Betfair Exchange).
+- This is the truth signal — use it to **cross-validate Step 1**. If a book Step 1 flagged as sharp is in FDCO and shows poor Brier, distrust Step 1's verdict for that book. If FDCO doesn't cover the book, treat Step 1 as hypothesis only.
+
+**What to look for week-on-week:**
+- Brier rankings shift between consecutive weeks (small samples are noisy; trust 4-week trends over single weeks).
+- Centre-rate sharps that fail Brier validation → demote in `book_weights`.
+- Centre-rate sharps NOT in FDCO → flag as "unvalidated, watch with each weekly run."
+- Soft books drifting toward centre → could be tightening their lines.
+
+**If drift persists ≥ 2 weeks**, update `book_weights` in `config.json` / `config.dev.json`. Memory: `project_weekly_postmortem_cadence.md`.
+
+**Don't run with `--fetch`.** That'd burn 22cr/week on data we already have. The whole point is to avoid that.
+
+**Initial 2025-26 Brier findings** (already captured in `docs/DISPERSION_SHAPES_2026-05.md`):
+- Pinnacle is the universal sharp by Brier (top-2 on 6 leagues), validating canonical wisdom and **contradicting** the centre-rate analysis on EPL/Bundesliga/Serie A/Ligue 1.
+- Bet365 and Bwin are broadly sharp (top-3 on 3 leagues each); currently weighted 1.0 in `J_sharp_weighted` — should be 2.0 / 1.5.
+- Centre-rate is unreliable for ranking sharpness on densely-priced markets. Demoted to secondary signal for FDCO-covered books; remains primary for books FDCO doesn't cover (with weak-evidence label).
+
+### D.9 — Book stats pipeline (next-week direction)
+
+The dispersion + Brier scripts are point-in-time tools. To **continuously refine `book_weights` as data arrives**, three new phases are queued in the plan doc:
+
+| Phase | What | When |
+|---|---|---|
+| M.6.5 | `scripts/aggregate_book_stats.py` — weekly JSON snapshot combining centre-rate + Brier per book per league. Writes to `logs/book_stats/<YYYY-MM-DD>.json` (append-only history). | Next Tuesday |
+| M.6.6 | `scripts/derive_book_weights.py` — reads rolling history, derives recommended weights with confidence-weighted blending (Brier overrides centre-rate when available, time-decayed across 4 weekends). Outputs `config.book_weights.suggested.json` for **human review**. Never auto-deployed. | Next Wednesday |
+| M.6 | Scanner reads `book_weights` from config; `J_sharp_weighted` becomes config-driven; `J2_sharp_weighted_per_league` variant added. | Next Thursday |
+
+**Refinement loop after these land:**
+1. Mon AM — weekly post-mortem (D.8) runs Step 1 + Step 2 (analysis) and Step 3 (aggregator + deriver).
+2. User compares `config.book_weights.suggested.json` vs current `config.json`. Reviews drift in the log.
+3. If happy, copies suggested values into `config.json` (and/or `config.dev.json` for per-dev overrides).
+4. Scanner picks up new weights on next scan.
+
+**After 4-6 weeks** of snapshots, the deriver has enough history that recommendations stabilise. The pattern is **build initial weights from current evidence; refine continuously as more arrives**. No book stays mis-weighted for long, no weight is locked in based on one weekend's data.
 
 ---
 
