@@ -121,8 +121,8 @@ Cutover from WSL → Pi on 2026-05-01. Pi crontab uses `SHELL=/bin/bash` and the
 0  9  * * 1,4   Mon+Thu 9:00     — tennis (capped at 2 tournaments)
 0  17 * * 1-5   Mon-Fri 17:00    — NBA before evening tip-offs
 
-# Closing line + drift snapshots
-*/5 7-23 * * *  Every 5 min      — T-60, T-15, T-1 drift + CLV at close
+# CLV backfill from football-data.co.uk free Pinnacle closing odds
+0  8  * * 1     Mon 08:00        — backfill pinnacle_close_prob + clv_pct on past-kickoff bets
 
 # Housekeeping
 0  8  1,15 * *  Bi-weekly 8am    — sports discovery check
@@ -141,7 +141,8 @@ Cutover from WSL → Pi on 2026-05-01. Pi crontab uses `SHELL=/bin/bash` and the
 ```
 scripts/scan_odds.py        Main scanner
 scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.json
-scripts/closing_line.py     Closing-line + drift snapshot (runs every 5 min)
+scripts/closing_line.py     Closing-line + drift snapshot (paused; kept for revert)
+scripts/backfill_clv_from_fdco.py  Mon 08:00 CLV backfill from football-data.co.uk
 scripts/check_sports.py     Sports discovery (bi-weekly)
 scripts/model_signals.py    CatBoost signal cache generator
 app.py                      Flask dashboard
@@ -154,7 +155,7 @@ logs/closing_line.log       Closing-line script output
 logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (240 tests across 19 files; run with `pytest`)
+tests/                      pytest suite (257 tests across 20 files; run with `pytest`)
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
 src/storage/schema_sqlite.sql  SQLite mirror of the schema for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner (--dsn for MSSQL, --sqlite for tests)
@@ -209,16 +210,23 @@ Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 
 ## CLV diagnostics (Phase 3)
 
-`scripts/closing_line.py` runs every 5 minutes and:
-- Captures Pinnacle odds at T-60, T-15, and T-1 before kick-off → `logs/drift.csv`
-- At kick-off (0–6 min window): saves Pinnacle closing devigged prob, computes `clv_pct = your_odds × pinnacle_close_prob − 1`
-- Backfills `bets.csv` with `pinnacle_close_prob` and `clv_pct` columns
-- Dashboard aggregates: avg CLV and % of bets where line drifted toward you
+CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, walks `bets.csv` + `logs/paper/*.csv`, and fills `pinnacle_close_prob` + `clv_pct` for any past-kickoff h2h or totals-2.5 row that's still empty. Idempotent: never overwrites a populated `pinnacle_close_prob`.
+
+Source-swap rationale (2026-05-01): the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
+
+**Trade-offs vs the previous closing_line.py path:**
+- No drift (T-60/T-15/T-1 snapshots disabled). `logs/drift.csv` is frozen.
+- BTTS bets get no CLV (FDCO doesn't carry BTTS). The system has 0 BTTS bets anyway.
+- Totals only on the 2.5 line (FDCO's only published total).
+- ≥1-day delay vs at-close capture — fine for the weekly review, useless for live tracking.
+- Top-6 leagues only: EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2. NBA + tennis still have no CLV.
+
+`scripts/closing_line.py` is paused (cron entry removed) but kept in the tree for fast revert if FDCO becomes unreliable. Dashboard aggregates remain unchanged: avg CLV and CLV-positive %.
 
 **CLV is the gate**: if avg CLV stays negative over ~50 bets, the system has no real edge and further build-out (Phases 5–10) is pointless.
 
 **CLV scope limitations:**
-- **Tennis bets produce no CLV/drift.** `closing_line.py` skips tennis because sport labels (API `title` field) are dynamic and not in the fixed `LABEL_TO_KEY` map. Will be fixed in Phase 6 when `sport_key` is stored in `bets.csv`.
+- **Tennis + NBA + BTTS bets produce no CLV.** FDCO is football-only (six leagues above) and doesn't carry BTTS.
 - **Totals and BTTS bets always show `model_signal=?`.** The CatBoost model only produces signals for h2h on EPL, Bundesliga, Serie A, and Ligue 1. The 2–3% model-filtered notification path therefore only ever fires on h2h bets in those four leagues — never on totals, BTTS, Championship, Bundesliga 2, NBA, or tennis.
 
 ## Statistical model (built, not yet in production)

@@ -1,3 +1,5 @@
+# Currently paused: CLV is backfilled from football-data.co.uk via scripts/backfill_clv_from_fdco.py.
+# See project_clv_source_swap_2026_05 memory for revert criteria.
 """
 Closing-line snapshot and drift logger.
 
