@@ -50,6 +50,12 @@ from src.storage._keys import (
     scan_date_of,
 )
 
+# Reverse lookup so DB-side sport_key joins back to the human label the
+# dashboard / CSV format expects ("EPL", "Bundesliga", etc.). Tennis labels
+# are dynamic and stored as the label itself in sport_key, so the reverse
+# falls through unchanged.
+KEY_TO_LABEL: dict[str, str] = {v: k for k, v in LABEL_TO_KEY.items()}
+
 # ---- field schemas (mirror the existing inline writers verbatim) ----------
 
 BETS_FIELDS = [
@@ -514,3 +520,205 @@ class BetRepo:
                     _i(row.get("n_books")),
                     fid, side, market, line_pk, bk, t_minus,
                 ))
+
+    # --- read API (A.5: dashboard reads DB-first with CSV fallback) -------
+
+    def db_status(self) -> str:
+        """One of 'ok' (configured + reachable), 'down' (configured but
+        connect failed), 'disabled' (no env flags). The dashboard uses
+        this to decide whether to render the fallback banner."""
+        if self._dsn is None:
+            return "disabled"
+        if self._db_failed:
+            return "down"
+        if self._connect() is None:
+            return "down"
+        return "ok"
+
+    @staticmethod
+    def _format_kickoff(dt) -> str:
+        if dt is None:
+            return ""
+        if isinstance(dt, str):
+            # SQLite returns datetimes as ISO strings ("YYYY-MM-DD HH:MM:SS").
+            # CSV format used elsewhere is "%Y-%m-%d %H:%M" — strip seconds.
+            parsed = _parse_dt(dt)
+            if parsed is None:
+                return dt
+            dt = parsed
+        return dt.strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
+    def _format_scanned_at(dt) -> str:
+        if dt is None:
+            return ""
+        if isinstance(dt, str):
+            parsed = _parse_dt(dt)
+            if parsed is None:
+                return dt
+            dt = parsed
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+    @staticmethod
+    def _stringify(value) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    def get_bets(self) -> list[dict] | None:
+        """Return all production bets as CSV-style row dicts, ordered by
+        scanned_at ascending. Returns None if DB not enabled OR the DB
+        read failed — caller should fall back to the CSV reader."""
+        if not self.db_enabled:
+            return None
+        if self._connect() is None:
+            return None
+        try:
+            cur = self._cur
+            cur.execute(
+                "SELECT b.scanned_at, f.sport_key, b.market, b.line, "
+                "       f.home, f.away, f.kickoff_utc, b.side, bk.name, "
+                "       b.odds, b.impl_raw, b.impl_effective, b.edge, "
+                "       b.edge_gross, b.effective_odds, b.commission_rate, "
+                "       b.consensus, b.pinnacle_cons, b.n_books, b.confidence, "
+                "       b.model_signal, b.dispersion, b.outlier_z, "
+                "       b.devig_method, b.weight_scheme, b.stake, "
+                "       b.actual_stake, b.result, b.pnl, "
+                "       b.pinnacle_close_prob, b.clv_pct "
+                "FROM bets b "
+                "JOIN fixtures f ON f.id = b.fixture_id "
+                "JOIN books bk ON bk.id = b.book_id "
+                "ORDER BY b.scanned_at"
+            )
+            out: list[dict] = []
+            for r in cur.fetchall():
+                (scanned_at, sport_key, market, line, home, away, kickoff,
+                 side, book, odds, impl_raw, impl_effective, edge, edge_gross,
+                 effective_odds, commission_rate, consensus, pinnacle_cons,
+                 n_books, confidence, model_signal, dispersion, outlier_z,
+                 devig_method, weight_scheme, stake, actual_stake, result, pnl,
+                 pinnacle_close_prob, clv_pct) = r
+                out.append({
+                    "_source": "db",
+                    "scanned_at": self._format_scanned_at(scanned_at),
+                    "sport": KEY_TO_LABEL.get(sport_key, sport_key),
+                    "market": market or "h2h",
+                    "line": self._stringify(line) if line is not None else "",
+                    "home": home,
+                    "away": away,
+                    "kickoff": self._format_kickoff(kickoff),
+                    "side": side,
+                    "book": book,
+                    "odds": self._stringify(odds),
+                    "impl_raw": self._stringify(impl_raw),
+                    "impl_effective": self._stringify(impl_effective),
+                    "edge": self._stringify(edge),
+                    "edge_gross": self._stringify(edge_gross),
+                    "effective_odds": self._stringify(effective_odds),
+                    "commission_rate": self._stringify(commission_rate),
+                    "consensus": self._stringify(consensus),
+                    "pinnacle_cons": self._stringify(pinnacle_cons),
+                    "n_books": self._stringify(n_books),
+                    "confidence": confidence or "",
+                    "model_signal": model_signal or "?",
+                    "dispersion": self._stringify(dispersion),
+                    "outlier_z": self._stringify(outlier_z),
+                    "devig_method": devig_method or "shin",
+                    "weight_scheme": weight_scheme or "uniform",
+                    "stake": self._stringify(stake),
+                    "actual_stake": self._stringify(actual_stake),
+                    # Schema stores 'pending' as default; the dashboard's
+                    # convention is empty-string for unsettled.
+                    "result": "" if (result or "") == "pending" else (result or ""),
+                    "pnl": self._stringify(pnl),
+                    "pinnacle_close_prob": self._stringify(pinnacle_close_prob),
+                    "clv_pct": self._stringify(clv_pct),
+                })
+            return out
+        except Exception as e:
+            print(f"[repo] WARN: get_bets failed; falling back to CSV: {e}",
+                  file=sys.stderr)
+            self._db_failed = True
+            return None
+
+    def get_drift(self) -> dict[tuple, list[dict]] | None:
+        """Return drift snapshots keyed by (home, away, kickoff, side,
+        market, line) — same shape app.load_drift() produces. Returns
+        None on DB-disabled or failure."""
+        if not self.db_enabled:
+            return None
+        if self._connect() is None:
+            return None
+        try:
+            cur = self._cur
+            cur.execute(
+                "SELECT f.home, f.away, f.kickoff_utc, d.side, d.market, "
+                "       d.line, bk.name, d.t_minus_min, d.your_book_odds, "
+                "       d.pinnacle_odds, d.n_books, d.captured_at "
+                "FROM drift d "
+                "JOIN fixtures f ON f.id = d.fixture_id "
+                "JOIN books bk ON bk.id = d.book_id "
+                "ORDER BY d.captured_at"
+            )
+            by_bet: dict[tuple, list[dict]] = {}
+            for r in cur.fetchall():
+                (home, away, kickoff, side, market, line, book, t_minus,
+                 your_book_odds, pinnacle_odds, n_books, captured_at) = r
+                line_str = "" if line in (0, 0.0, None) else self._stringify(line)
+                row = {
+                    "captured_at": self._format_scanned_at(captured_at),
+                    "home": home, "away": away,
+                    "kickoff": self._format_kickoff(kickoff),
+                    "side": side, "market": market, "line": line_str,
+                    "book": book,
+                    "t_minus_min": self._stringify(t_minus),
+                    "your_book_odds": self._stringify(your_book_odds),
+                    "pinnacle_odds": self._stringify(pinnacle_odds),
+                    "n_books": self._stringify(n_books),
+                }
+                key = (home, away, self._format_kickoff(kickoff), side,
+                       market or "h2h", line_str)
+                by_bet.setdefault(key, []).append(row)
+            for rows in by_bet.values():
+                rows.sort(key=lambda r: int(r["t_minus_min"] or 0), reverse=True)
+            return by_bet
+        except Exception as e:
+            print(f"[repo] WARN: get_drift failed; falling back to CSV: {e}",
+                  file=sys.stderr)
+            self._db_failed = True
+            return None
+
+    def update_bet_settle(self, scan_date: str, kickoff: str, home: str,
+                          away: str, market: str, line: str, side: str,
+                          book: str, *, result: str, actual_stake: float | str | None,
+                          pnl: float | str | None, odds: float | str | None = None) -> bool:
+        """Update an existing bet's settle data in the DB.
+
+        The bet UUID is recomputed from the natural key — same as the
+        write path. Returns True if the UPDATE succeeded (regardless of
+        rows affected — a missing row is not an error here, it just means
+        the bet exists in CSV but not yet in DB, e.g. legacy data).
+        """
+        if not self.db_enabled:
+            return False
+        bid = bet_uuid(scan_date, kickoff, home, away, market or "h2h",
+                       normalise_line(line), side, book)
+        with self._db_section() as cur:
+            if cur is None:
+                return False
+            settled_at = datetime.utcnow()
+            if odds is not None and _f(odds) is not None:
+                cur.execute(
+                    "UPDATE bets SET result = ?, actual_stake = ?, pnl = ?, "
+                    "odds = ?, settled_at = ? WHERE id = ?",
+                    (result or "pending", _f(actual_stake), _f(pnl),
+                     _f(odds), settled_at, bid),
+                )
+            else:
+                cur.execute(
+                    "UPDATE bets SET result = ?, actual_stake = ?, pnl = ?, "
+                    "settled_at = ? WHERE id = ?",
+                    (result or "pending", _f(actual_stake), _f(pnl),
+                     settled_at, bid),
+                )
+        return True

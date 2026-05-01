@@ -76,8 +76,8 @@ def test_bets_has_expected_columns():
         "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
         "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
         "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-        "devig_method", "weight_scheme", "stake", "result", "settled_at",
-        "pnl", "pinnacle_close_prob", "clv_pct", "created_at",
+        "devig_method", "weight_scheme", "stake", "actual_stake", "result",
+        "settled_at", "pnl", "pinnacle_close_prob", "clv_pct", "created_at",
     }
     missing = expected - cols
     assert not missing, f"bets table missing columns: {missing}"

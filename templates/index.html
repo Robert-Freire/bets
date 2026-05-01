@@ -128,6 +128,13 @@
   <span>{{ (pending|length) }} pending &nbsp;·&nbsp; {{ (done|length) }} settled</span>
 </div>
 
+{% if db_status == 'down' %}
+<div style="background:#fff4e5;border:1px solid #f5c170;color:#7a4a00;padding:8px 12px;margin:0 0 12px 0;border-radius:4px;font-size:13px;">
+  <strong>Using cached CSV data — DB unreachable.</strong>
+  Settle actions are written to CSV; the next dashboard load will reconcile once the DB is back.
+</div>
+{% endif %}
+
 <!-- Stats -->
 <div class="stats">
   <div class="stat">

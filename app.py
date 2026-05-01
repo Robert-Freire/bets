@@ -2,15 +2,28 @@
 Betting dashboard — view suggested bets, log actual stakes and results.
 Run with: python3 app.py
 Then open: http://localhost:5000
+
+A.5: data flow is DB-first via BetRepo when BETS_DB_WRITE=1 + DSN env are
+set, with CSV as automatic fallback. The view renders identically; a
+banner appears only when DB is configured but unreachable.
 """
 
 import csv
 import fcntl
 import os
 import re
+import sys
 from datetime import date
 from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, jsonify
+
+# Allow `from src...` imports regardless of CWD.
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from src.storage.repo import BetRepo
+from src.storage._keys import scan_date_of
 
 app = Flask(__name__)
 
@@ -18,6 +31,13 @@ BETS_CSV           = Path(__file__).parent / "logs" / "bets.csv"
 BETS_LEGACY_CSV    = Path(__file__).parent / "logs" / "bets_legacy.csv"
 DRIFT_CSV          = Path(__file__).parent / "logs" / "drift.csv"
 RESEARCH_FEED_MD   = Path(__file__).parent / "docs" / "RESEARCH_FEED.md"
+
+
+def _repo() -> BetRepo:
+    """Construct a per-request BetRepo. Cheap when DB disabled (no
+    network); when enabled, the connection is only opened on first DB
+    method call."""
+    return BetRepo()
 
 _RUN_RE = re.compile(
     r"^## Run (\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}\s+UTC)?\s+\(mode:\s*(\w+)\)\s+—\s*(\d+)\s+findings",
@@ -66,12 +86,30 @@ def _read_csv_file(path: Path, source: str) -> list[dict]:
     return rows
 
 
-def load_bets() -> list[dict]:
+def load_bets(repo: BetRepo | None = None) -> list[dict]:
+    """Return all bets (legacy + new) as dicts, in display order.
+
+    Legacy CSV is always read directly — those rows pre-date A.3 and
+    were never imported. New bets come from the DB when available
+    (dual-write keeps DB and CSV in sync; DB is preferred so settle
+    updates routed via repo.update_bet_settle land here too). On DB
+    failure or with the env unset, falls back to the CSV.
+    """
     bets = []
     if BETS_LEGACY_CSV.exists():
         bets.extend(_read_csv_file(BETS_LEGACY_CSV, "legacy"))
-    if BETS_CSV.exists():
-        bets.extend(_read_csv_file(BETS_CSV, "new"))
+
+    db_rows = None
+    if repo is not None:
+        db_rows = repo.get_bets()
+    if db_rows is None:
+        if BETS_CSV.exists():
+            bets.extend(_read_csv_file(BETS_CSV, "new"))
+    else:
+        for row in db_rows:
+            _normalise_row(row, row.get("_source", "db"))
+        bets.extend(db_rows)
+
     for i, row in enumerate(bets):
         row["id"] = i
     return bets
@@ -123,8 +161,13 @@ def calc_pnl(result: str, actual_stake: str, odds: str) -> str:
     return ""
 
 
-def load_drift() -> dict[tuple, list[dict]]:
-    """Load drift.csv keyed by (home, away, kickoff, side, market, line) → sorted drift rows."""
+def load_drift(repo: BetRepo | None = None) -> dict[tuple, list[dict]]:
+    """Load drift snapshots keyed by (home, away, kickoff, side, market,
+    line). Prefers the DB when available; falls back to drift.csv."""
+    if repo is not None:
+        db = repo.get_drift()
+        if db is not None:
+            return db
     if not DRIFT_CSV.exists():
         return {}
     by_bet: dict[tuple, list[dict]] = {}
@@ -248,8 +291,10 @@ def summary_stats(bets: list[dict], drift: dict | None = None) -> dict:
 
 @app.route("/")
 def index():
-    bets = load_bets()
-    drift = load_drift()
+    repo = _repo()
+    db_status = repo.db_status()
+    bets = load_bets(repo)
+    drift = load_drift(repo)
     bets_rev = list(reversed(bets))
     pending = [b for b in bets_rev if not b.get("result")]
     done = [b for b in bets_rev if b.get("result")]
@@ -261,13 +306,38 @@ def index():
         b["_drift_dir"] = _drift_direction(drift.get(key, []))
 
     research = latest_research_findings()
-    return render_template("index.html", pending=pending, done=done, stats=stats, research=research)
+    repo.close()
+    return render_template(
+        "index.html",
+        pending=pending, done=done, stats=stats, research=research,
+        db_status=db_status,
+    )
+
+
+@app.route("/health")
+def health():
+    """Lightweight liveness probe.
+
+    `db` is one of 'ok' (configured + reachable), 'down' (configured
+    but connect or query failed), or 'disabled' (env not set — CSV-only
+    mode by design). `csv` is 'ok' if the bets CSV file exists, else
+    'missing'. Used by external monitoring AND the dashboard itself
+    (the banner reads `db_status`).
+    """
+    repo = _repo()
+    db = repo.db_status()
+    repo.close()
+    csv_state = "ok" if BETS_CSV.exists() or BETS_LEGACY_CSV.exists() else "missing"
+    code = 200 if db != "down" else 503
+    return jsonify({"db": db, "csv": csv_state}), code
 
 
 @app.route("/update/<int:bet_id>", methods=["POST"])
 def update(bet_id: int):
-    bets = load_bets()
+    repo = _repo()
+    bets = load_bets(repo)
     if bet_id >= len(bets):
+        repo.close()
         return jsonify({"error": "not found"}), 404
 
     result = request.form.get("result", "").strip().upper()
@@ -280,7 +350,26 @@ def update(bet_id: int):
         bets[bet_id]["odds"] = odds
     bets[bet_id]["pnl"] = calc_pnl(result, actual_stake, bets[bet_id].get("odds", ""))
 
+    # CSV stays canonical until A.8 cutover. Settle data also lands in
+    # the DB when dual-write is on, so DB-first reads pick it up too.
     save_bets(bets)
+    if repo.db_enabled and bets[bet_id].get("_source") != "legacy":
+        b = bets[bet_id]
+        repo.update_bet_settle(
+            scan_date=scan_date_of(b.get("scanned_at", "")),
+            kickoff=b.get("kickoff", ""),
+            home=b.get("home", ""),
+            away=b.get("away", ""),
+            market=b.get("market") or "h2h",
+            line=b.get("line", ""),
+            side=b.get("side", ""),
+            book=b.get("book", ""),
+            result=b.get("result") or "pending",
+            actual_stake=b.get("actual_stake") or None,
+            pnl=b.get("pnl") or None,
+            odds=b.get("odds") or None,
+        )
+    repo.close()
     return redirect(url_for("index"))
 
 
