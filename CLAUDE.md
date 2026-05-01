@@ -151,7 +151,7 @@ logs/closing_line.log       Closing-line script output
 logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (219 tests across 17 files; run with `pytest`)
+tests/                      pytest suite (240 tests across 19 files; run with `pytest`)
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
 src/storage/schema_sqlite.sql  SQLite mirror of the schema for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner (--dsn for MSSQL, --sqlite for tests)
@@ -245,7 +245,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Honest hol
 | 6 | Storage migration: SQL Server Express + UUIDs (was: SQLite — superseded by Azure direction below) | Pending |
 | 7 | Model overhaul: calibration, hold-out eval | Pending |
 | 8 | Betfair API auto-placement | Pending |
-| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.4 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer behind `BETS_DB_WRITE=1`). A.5–A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
+| 9 | Infrastructure: **9a Pi cron ✅ Done 2026-05-01** · 9b–9d Azure migration **dev-side first** (Reply VSE subscription, two RGs: `kaunitz-dev-rg` now / `kaunitz-prod-rg` deferred to A.10). **A.0–A.5 ✅ Done 2026-05-01** (RG + serverless SQL DB + Key Vault + 7-table schema + idempotent importer + BetRepo dual-writer + dashboard DB-first reads with CSV fallback + /health). A.6–A.9 pending. See `docs/PLAN_AZURE_2026-05.md`. |
 | 11 | Research scanner (11.0–11.9: source scan → Claude → `docs/RESEARCH_FEED.md` → dashboard tile → cron). Spec: `docs/RESEARCH_SCANNER.md` | ✅ Done |
 | R.0–R.3 | Stale doc fix + 7 new shadow variants (I/L/M/N/O/P/J) + SBK probe. Spec: `docs/PLAN_RESEARCH_2026-04.md` | ✅ Done |
 | R.5.5a | Walk-forward backtest scaffold (`src/betting/walk_forward.py`, `TimeSeriesSplit(5)` primitive) | ✅ Done |

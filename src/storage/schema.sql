@@ -63,6 +63,7 @@ CREATE TABLE bets (
     devig_method        nvarchar(16)     NULL,
     weight_scheme       nvarchar(32)     NULL,
     stake               decimal(10,2)    NULL,
+    actual_stake        decimal(10,2)    NULL,
     result              nvarchar(16)     NOT NULL DEFAULT N'pending',
     settled_at          datetime2(3)     NULL,
     pnl                 decimal(10,2)    NULL,
@@ -70,6 +71,11 @@ CREATE TABLE bets (
     clv_pct             decimal(10,6)    NULL,
     created_at          datetime2(3)     NOT NULL DEFAULT SYSUTCDATETIME()
 );
+
+-- A.5: settle handler writes actual_stake into the DB. Older deployments
+-- (created in A.2 before A.5) need this column added in place.
+IF COL_LENGTH(N'bets', N'actual_stake') IS NULL
+ALTER TABLE bets ADD actual_stake decimal(10,2) NULL;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_bets_scanned')
 CREATE INDEX ix_bets_scanned ON bets (scanned_at);
@@ -106,6 +112,7 @@ CREATE TABLE paper_bets (
     devig_method        nvarchar(16)     NULL,
     weight_scheme       nvarchar(32)     NULL,
     stake               decimal(10,2)    NULL,
+    actual_stake        decimal(10,2)    NULL,
     result              nvarchar(16)     NOT NULL DEFAULT N'pending',
     settled_at          datetime2(3)     NULL,
     pnl                 decimal(10,2)    NULL,
@@ -113,6 +120,10 @@ CREATE TABLE paper_bets (
     clv_pct             decimal(10,6)    NULL,
     created_at          datetime2(3)     NOT NULL DEFAULT SYSUTCDATETIME()
 );
+
+-- A.5: keep paper_bets symmetric with bets so the same SELECT works.
+IF COL_LENGTH(N'paper_bets', N'actual_stake') IS NULL
+ALTER TABLE paper_bets ADD actual_stake decimal(10,2) NULL;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_paper_bets_strategy_result')
 CREATE INDEX ix_paper_bets_strategy_result ON paper_bets (strategy_id, result);
