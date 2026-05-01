@@ -1,0 +1,13 @@
+{
+  "canary_league": "soccer_epl",
+  "leagues": [
+    {"key": "soccer_epl",                 "label": "EPL",          "min_books": 20},
+    {"key": "soccer_germany_bundesliga",  "label": "Bundesliga",   "min_books": 20},
+    {"key": "soccer_italy_serie_a",       "label": "Serie A",      "min_books": 20},
+    {"key": "soccer_efl_champ",           "label": "Championship", "min_books": 25},
+    {"key": "soccer_france_ligue_one",    "label": "Ligue 1",      "min_books": 20},
+    {"key": "soccer_germany_bundesliga2", "label": "Bundesliga 2", "min_books": 20},
+    {"key": "soccer_spain_la_liga",       "label": "La Liga",      "min_books": 20}
+  ],
+  "extra_markets": []
+}

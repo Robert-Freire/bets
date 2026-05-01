@@ -32,6 +32,8 @@ The two environments now diverge on more than just notifications. Don't apply Pi
 | API key | dev (separate 500/mo budget) | prod (separate 500/mo budget) |
 | Notifications | silenced | live to ntfy `robert-epl-bets-m4x9k` |
 | Football scans | 5/wk (Tue 07:30, Fri 19:30, Sat 10:30, Sat 16:30, Sun 12:30) | identical |
+| **League set** | **7 leagues — 6 prod + La Liga (M.4a, 2026-05-01)** | **6 leagues from `config.json`** |
+| **Config file read** | `config.dev.json` via `LEAGUES_CONFIG` in `.env.dev` | `config.json` (no env var) |
 | FDCO CLV backfill | Mon 08:00 | Mon 08:00 (independent run; same source → identical writes back to its own CSV) |
 | `bets.csv` backup | 03:00 daily, 14d retention | identical |
 | `check_sports.py` | 1st & 15th 08:00 | identical |
@@ -48,7 +50,7 @@ The two environments now diverge on more than just notifications. Don't apply Pi
 ## What we're testing this weekend
 
 1. **CLV pipeline produces non-zero data for the first time ever** — but **only after Mon 08:00 UTC FDCO backfill fires**. Prior to that, all `pinnacle_close_prob` cells stay empty even on settled bets. This is the new normal post-CLV-source-swap.
-2. **Dev/prod parity.** Both machines run the same scanner code; if WSL paper-bet counts diverge significantly from Pi (>20% per variant), something is wrong.
+2. **Dev/prod parity (scoped to shared leagues).** Both machines run the same scanner code on the 6 shared leagues (EPL, Bundesliga, Serie A, Championship, Ligue 1, Bundesliga 2). If WSL paper-bet counts on those 6 leagues diverge from Pi by >20% per variant, something is wrong. WSL's La Liga rows (added 2026-05-01 via M.4a) are dev-only by design and **must not** be included in the parity comparison — Pi has no La Liga data.
 3. **No quota collision.** Pi prod key + WSL dev key, separate 500/mo budgets.
 4. **A.4 dual-write parity (WSL only).** Every WSL CSV row should also land in Azure SQL. Mismatch = repo wedge.
 5. **A.5.5 blob archive coverage (WSL only).** Every WSL `api_get(...)` call should produce one gzipped blob. Gap = silent archive failure (and we should never have to wait for fresh data to retro-test data-quality rules).
@@ -287,6 +289,25 @@ Mostly an existing checklist item, but the M.0 totals-drop and M.4 AH-probe both
 ### D.6 — Bot scope-creep follow-up
 
 The PR #17 implementation bot added an unrelated WARNING ntfy notification outside the M.0/M.1/M.2 task list (it was the user's separate request — no harm, but a process miss). If we keep using a sub-agent for plan execution, tighten the bot-execution protocol in `docs/PLAN_RESEARCH_2026-04.md` (and reuse for future plans) to add an explicit "no drive-by changes; out-of-scope work goes to a follow-up PR" line.
+
+---
+
+### D.7 — La Liga early-add (M.4a) — assess after first weekend
+
+Shipped 2026-05-01 alongside this doc update. Dev-only via `config.dev.json` + `LEAGUES_CONFIG=config.dev.json` in `.env.dev`. Pi unchanged.
+
+**Monday checks specific to M.4a:**
+- [ ] WSL Sat/Sun scans show La Liga in the per-scan summary (7 leagues vs Pi's 6).
+- [ ] `logs/paper/A_production.csv` and `logs/paper/J_sharp_weighted.csv` have La Liga rows; counts diverge between the two variants (proves the variants are filtering La Liga differently — informative even before CLV).
+- [ ] WSL dev key consumption in line with expected: ~7 leagues × 2 cr × 3 weekend scans = ~42 cr added vs the 6-league baseline.
+- [ ] No scan-log errors specific to La Liga (parse failures, FDCO mapping issues, etc.).
+
+**Soft signals worth noting in the post-mortem write-up:**
+- Count of La Liga value-bet flags per variant on Sat/Sun, broken down by Kaunitz vs Model-filtered.
+- Spread of edge percentages on La Liga flags vs the 6 prod leagues' flags.
+- Whether `J_sharp_weighted` and `A_production` produce systematically different La Liga bet sets (overlap %), as a leading indicator before CLV lands.
+
+**Decision rule on M.4a continuation:** if La Liga produces obvious data-quality issues (parse errors, missing teams, mapping failures) → revert by removing La Liga from `config.dev.json`. If it runs cleanly → keep it through M.7 + M.4 to maximise the data window.
 
 ---
 

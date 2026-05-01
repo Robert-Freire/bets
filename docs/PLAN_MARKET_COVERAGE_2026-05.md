@@ -15,10 +15,11 @@ This doc is self-contained for asynchronous bot execution. Follow the same proto
 | M.0 | Drop `totals` market + remove dead BTTS try-block | ✅ done (PR #17, 2026-05-01) |
 | M.1 | League-coverage probe script + run | ✅ done (PR #17, 2026-05-01) |
 | M.2 | Move league list to `config.json`; env-overridable per host | ✅ done (PR #17, 2026-05-01) |
+| M.4a | La Liga early-add to dev (no AH, no per-league weights) | ✅ done (PR #18, 2026-05-01) |
 | M.3 | Add passing leagues to prod config | pending (depends on M.1, M.2; gated on Mon 2026-05-04 post-mortem) |
 | M.7 | Dispersion shape analysis per league | pending (depends on M.1) — **runs before M.6** |
 | M.6 | Configurable book weights via `config.json` | pending (depends on M.7) |
-| M.4 | Add `spreads` market + structured experiments to dev config | pending (depends on M.6, M.3) |
+| M.4 | Add `spreads` market + structured experiments to dev config | pending (depends on M.6, M.3, M.4a) |
 | M.5 | Doc + memory updates; delete this plan | pending (depends on M.4) |
 
 **Why M.7 before M.6.** Sharp-weighted consensus (`J_sharp_weighted`) only beats flat consensus (`A_production`) in leagues where book disagreement is **structured** — i.e., the same books consistently form a "sharp" cluster vs a "soft" cluster. M.7 measures whether that's true per league. Without that data, M.6's per-league weight overrides would be guesses. M.7 is also the diagnostic that tells us whether to add La Liga to dev as a sharp-weighted experiment or drop it permanently.
@@ -200,6 +201,53 @@ budget = n * 2 * markets_per_call * 5 * 4.345
 print(f'leagues={n}  markets={markets_per_call}  monthly={budget:.0f}')
 assert budget <= 450, f'over budget: {budget}'
 "
+```
+
+---
+
+## Phase M.4a — La Liga early-add to dev (shipped)
+
+**Goal.** Start collecting La Liga consensus data on dev key from the first eval weekend onward, without waiting for the full M.4 sandbox. Rationale: dev currently mirrors prod exactly (same `config.json`, same scans), so the dev key's headroom is being burned on duplicate fetches. Reallocating ~43 cr/mo to La Liga gets a one-week lead on M.7's analysis (real scan data instead of one-shot probe) and the first concrete signal on whether `J_sharp_weighted`'s existing hardcoded weights beat `A_production` on a high-dispersion league.
+
+**Scope (intentionally minimal).**
+- La Liga (`soccer_spain_la_liga`) added to dev league set only.
+- No AH market, no `Q_asian_handicap` variant, no per-league `extra_markets` overrides, no per-league `book_weights`. All of those wait for M.4 proper.
+- Pi crontab and `config.json` unchanged. Pi never sees La Liga in this phase.
+
+**Outputs (shipped in PR #18).**
+- `config.dev.json` — copy of `config.json` with `soccer_spain_la_liga` appended to the `leagues` array.
+- `.env.dev` (gitignored) — `LEAGUES_CONFIG=config.dev.json` line added.
+- `docs/FIRST_WEEKEND.md` — divergence-check rule scoped to shared leagues; La Liga dev-only noted in the schedule table.
+
+**Mechanism.** WSL's `.env.dev` is loaded by the cron via `export $(cat .env.dev)` before running `scripts/scan_odds.py`. The scanner's `_load_config` (M.2) honours `LEAGUES_CONFIG` and reads `config.dev.json` instead of the default. Pi has no `LEAGUES_CONFIG` set, so it falls through to `config.json` exactly as before — Pi-safety contract holds without code changes.
+
+**Cost.** La Liga = 2 cr × 5 scans/wk × 4.345 wk ≈ **43 cr/mo** added to dev key burn (~260 → ~303). Comfortable under the 500 ceiling.
+
+**What this enables for M.7.** When M.7 runs Tuesday, it can analyse the actual weekend's La Liga scan output (not just a one-shot probe) — captures fixture-level dispersion at the moments the production scanner sees it, including pre-KO line moves. Cluster-persistence scoring is more meaningful with real time-of-scan data.
+
+**What this enables for M.6.** The 16 paper variants run on La Liga immediately with their existing hardcoded configs. By Monday morning, `logs/paper/J_sharp_weighted.csv` and `logs/paper/A_production.csv` have parallel La Liga rows; even before CLV lands, the *count* and *odds spread* of bets between the two variants is informative.
+
+**Acceptance.**
+- [x] `config.dev.json` exists with La Liga + the 6 prod leagues.
+- [x] `.env.dev` sets `LEAGUES_CONFIG=config.dev.json`.
+- [x] Smoke test: `LEAGUES_CONFIG=config.dev.json ODDS_API_KEY=test python3 -c "import scripts.scan_odds as s; print([l['key'] for l in s._CONFIG['leagues']])"` includes `soccer_spain_la_liga`.
+- [x] Pi unchanged (no env var set; `config.json` not modified).
+- [x] FIRST_WEEKEND divergence check scoped to shared leagues.
+
+**Reviewer focus.**
+- Pi-safety: confirm the 7-league `config.dev.json` is **not** copied to Pi by any cron / sync mechanism. If a future automation rsyncs `/home/rfreire/projects/bets/` to Pi, this file becomes a hazard. Currently no such automation exists.
+- The first WSL Sat scan after this PR merges should show 7 leagues in the per-scan summary (EPL, Bundesliga, Serie A, Championship, Ligue 1, Bundesliga 2, **La Liga**). Pi's same scan should show 6.
+
+**Verification commands.**
+```bash
+# Dev config loads with La Liga
+LEAGUES_CONFIG=config.dev.json ODDS_API_KEY=test python3 -c "
+import scripts.scan_odds as s
+print('leagues:', [l['key'] for l in s._CONFIG['leagues']])
+"
+# After Sat 10:30 dev scan — verify La Liga rows appear
+grep -i "la liga" logs/scan.log | tail -5
+grep -i "la liga\|spain" logs/paper/A_production.csv logs/paper/J_sharp_weighted.csv | tail -10
 ```
 
 ---
