@@ -17,7 +17,7 @@ Phased migration from local CSV storage to a SQL-Server-Express-backed Flask das
 - Migrate WSL `logs/*.csv` data into Azure SQL
 - WSL `scan_odds.py` writes both CSV and Azure SQL (dual-write, env-flag gated)
 - Dashboard (`app.py`) reads from Azure SQL — sees **only WSL data** during this plan
-- Public Azure URL with Google OIDC auth
+- Public Azure URL with Google OIDC auth (allowlist: `robert.freire@gmail.com`)
 
 **What's OUT of scope (deferred to future plan):**
 - Pi `scan_odds.py` writing to Azure SQL — Pi stays on CSVs.
@@ -48,7 +48,7 @@ WSL (home network — dev cron, dev API key)
                                                     │
                                     Azure App Service (F1 free tier)
                                     app.py — Flask dashboard
-                                    Easy Auth (Google) — robert.freire@gmail.com only
+                                    Easy Auth (Google OIDC) — robert.freire@gmail.com only
                                     Shows: WSL-source data only (during this plan)
 
 
@@ -69,7 +69,7 @@ WSL is the sole writer to Azure SQL during this plan. Pi remains the canonical p
 | Where does the DB live? | **Azure SQL Database Free tier** (fallback: Basic ~£5/mo if Free quota exhausted) | Managed, automated backups, scales if needed, no patching. Self-hosted SQL Express on a VM saves £0 but adds ops burden. |
 | What flavour of SQL? | **Azure SQL DB** (T-SQL, MSSQL-flavoured) — *not* SQL Server Express on a VM | Same engine family as the original "SQL Server Express" intent; user gets the cloud benefits. Phase-6 doc copy still says "SQL Server Express" for continuity. |
 | Where does the web app live? | **Azure App Service F1 (free)** | Always-on Linux Python runtime; deploy via `az webapp up`. If F1 cold starts hurt UX, escalate to B1 (~£10/mo) in A.7. |
-| Auth on public dashboard? | **App Service Easy Auth with Google OIDC** (one allowed email: `robert.freire@gmail.com`) | One-click in portal; no auth code in app.py. Falls back to HTTP Basic Auth (1 LOC) if Easy Auth setup blocks. |
+| Auth on public dashboard? | **App Service Easy Auth with Google OIDC** (one allowed email: `robert.freire@gmail.com`). Decoupled from the Reply VSE subscription on purpose — the subscription owns the Azure resources, but the dashboard identity is the user's personal Google account. | One-click in portal; no auth code in app.py. Falls back to HTTP Basic Auth (1 LOC) if Easy Auth setup blocks. |
 | Pi → Azure SQL transport | **N/A in this plan** — Pi is not touched. Future Phase A.10 will add this (TCP 1433 outbound, TLS, SQL auth from Key Vault). | Avoid touching production-critical Pi cron during a multi-phase Azure stand-up. Onboard Pi only after dev side has soaked for ≥1 week. |
 | WSL → Azure SQL transport | TCP 1433 outbound, TLS required (Azure default), SQL auth (username/password from Azure Key Vault → env var on WSL) | TLS+SQL auth is the simplest path. WSL is on home network so firewall rule allows the WSL public IP. |
 | Pi onboarding scope | **Deferred to Phase A.10** (separate future sprint, post-soak). Pi keeps writing CSVs only during A.0–A.9. | Pi is production; protecting it from Azure-related disruption is the entire point of the dev-first scope above. |
@@ -110,21 +110,22 @@ WSL is the sole writer to Azure SQL during this plan. Pi remains the canonical p
 | Fallback if Free SQL quota tight | + ~£5/mo for Basic |
 | Fallback if F1 cold-starts hurt | + ~£10/mo for B1 |
 
-Azure free credit (~£150) covers any escalations for the first year.
+Reply Visual Studio Enterprise Subscription provides ~£150/month MSDN credit (recurring), which covers any of the escalations above with comfortable headroom.
 
 ---
 
 ## Phase A.0 — Provision Azure account + resource group
 
-**Goal.** Single Azure resource group `bets-rg` in UK South, owned by `robert.freire@gmail.com`'s Azure account. All future resources land here for one-click teardown.
+**Goal.** Single Azure resource group `kaunitz-rg` in UK South, under the Reply Visual Studio Enterprise Subscription (Azure account `r.freire@reply.eu`, tenant `reply.onmicrosoft.com`, subscription id `bab24bda-5316-4e9e-9565-056e5e57e64f`, ~£150/month MSDN credit). All future resources land here for one-click teardown.
+
+**Identity boundary** — *only the Azure subscription/admin uses the Reply identity.* Application-level identity (dashboard auth allowlist, OAuth client owner, contact email on alerts) is the user's personal `robert.freire@gmail.com`. Phases below should not conflate the two.
 
 **Tasks.**
-1. Sign up for Azure free account (£150 credit) at portal.azure.com if not already.
-2. `az login` from WSL.
-3. `az group create -n bets-rg -l uksouth`.
+1. Confirm `az account show` reports the Reply VSE subscription as default. (Done 2026-05-01.)
+2. `az group create -n kaunitz-rg -l uksouth`.
 
 **Acceptance.**
-- [ ] `az group show -n bets-rg` returns the group with `provisioningState: Succeeded`.
+- [ ] `az group show -n kaunitz-rg` returns the group with `provisioningState: Succeeded`.
 - [ ] Resource group visible at portal.azure.com under the user's subscription.
 
 **Reviewer focus.** None (provisioning only).
@@ -132,7 +133,7 @@ Azure free credit (~£150) covers any escalations for the first year.
 **Verification commands.**
 ```bash
 az account show --query "{name:name, user:user.name}" -o table  # confirm logged-in user
-az group list -o table | grep bets-rg                            # confirm group exists
+az group list -o table | grep kaunitz-rg                            # confirm group exists
 ```
 
 ---
@@ -142,16 +143,16 @@ az group list -o table | grep bets-rg                            # confirm group
 **Goal.** A working Azure SQL DB instance reachable from the Pi over TCP 1433+TLS.
 
 **Tasks.**
-1. `az sql server create -g bets-rg -n bets-sql-uksouth-<random> -l uksouth --admin-user betsadmin --admin-password <generated, store in Bitwarden>`.
-2. `az sql db create -g bets-rg -s bets-sql-uksouth-<random> -n bets --tier GeneralPurpose --family Gen5 --capacity 2 --compute-model Serverless --auto-pause-delay 60 --backup-storage-redundancy Local` (or `--use-free-limit` if the free-tier flag is available in current az CLI; check `az sql db create --help`).
+1. `az sql server create -g kaunitz-rg -n kaunitz-sql-uksouth-<random> -l uksouth --admin-user kaunitzadmin --admin-password <generated, store in Bitwarden>`.
+2. `az sql db create -g kaunitz-rg -s kaunitz-sql-uksouth-<random> -n kaunitz --tier GeneralPurpose --family Gen5 --capacity 2 --compute-model Serverless --auto-pause-delay 60 --backup-storage-redundancy Local` (or `--use-free-limit` if the free-tier flag is available in current az CLI; check `az sql db create --help`).
 3. Firewall: `az sql server firewall-rule create` to allow (a) Pi's public IP, (b) WSL's public IP, (c) Azure services (`0.0.0.0` rule with name `AllowAzureServices`).
 4. On Pi: install ODBC driver (`sudo apt install -y unixodbc-dev` + Microsoft repo for `msodbcsql18`).
-5. Create `bets-rg`-scoped Azure Key Vault `bets-kv-<random>`; store SQL admin password as secret `sql-admin-password`. (Phase A.4 will pull from Key Vault into Pi env.)
+5. Create `kaunitz-rg`-scoped Azure Key Vault `kaunitz-kv-<random>`; store SQL admin password as secret `sql-admin-password`. (Phase A.4 will pull from Key Vault into Pi env.)
 
 **Acceptance.**
 - [ ] From Pi: `python3 -c "import pyodbc; conn = pyodbc.connect(<conn_str>); print(conn.execute('SELECT 1').fetchone())"` returns `(1,)`.
 - [ ] Key Vault secret `sql-admin-password` exists and is fetchable via `az keyvault secret show`.
-- [ ] Bitwarden has a new entry `Azure SQL — bets DB` with admin user/password/connection string.
+- [ ] Bitwarden has a new entry `Azure SQL — kaunitz DB` with admin user/password/connection string.
 
 **Reviewer focus.**
 - Server name must include random suffix (DNS-globally-unique requirement).
@@ -160,8 +161,8 @@ az group list -o table | grep bets-rg                            # confirm group
 
 **Verification commands.**
 ```bash
-az sql db show -g bets-rg -s bets-sql-uksouth-<random> -n bets --query "{name:name, status:status, sku:currentSku}" -o json
-az sql server firewall-rule list -g bets-rg -s bets-sql-uksouth-<random> -o table
+az sql db show -g kaunitz-rg -s kaunitz-sql-uksouth-<random> -n kaunitz --query "{name:name, status:status, sku:currentSku}" -o json
+az sql server firewall-rule list -g kaunitz-rg -s kaunitz-sql-uksouth-<random> -o table
 ssh robert@192.168.0.28 'python3 -c "import pyodbc; print(pyodbc.drivers())"'  # expect msodbcsql18 in list
 ```
 
@@ -310,15 +311,15 @@ curl -s localhost:5000/ | grep -c "<tr"  # row count sanity check
 **Goal.** Public Azure URL serves the dashboard, reads from the same Azure SQL DB the Pi writes to.
 
 **Tasks.**
-1. `az appservice plan create -g bets-rg -n bets-plan --sku F1 --is-linux`.
-2. `az webapp create -g bets-rg -p bets-plan -n bets-dashboard-<random> --runtime "PYTHON:3.11"`.
+1. `az appservice plan create -g kaunitz-rg -n kaunitz-plan --sku F1 --is-linux`.
+2. `az webapp create -g kaunitz-rg -p kaunitz-plan -n kaunitz-dashboard-<random> --runtime "PYTHON:3.11"`.
 3. Configure app settings: `AZURE_SQL_DSN` (referencing Key Vault secret), `AZURE_MODE=true`.
-4. Deploy: `az webapp up -n bets-dashboard-<random> -g bets-rg --runtime "PYTHON:3.11"`.
+4. Deploy: `az webapp up -n kaunitz-dashboard-<random> -g kaunitz-rg --runtime "PYTHON:3.11"`.
 5. Confirm Application Settings → Identity → System-assigned managed identity ON; grant it `get` on the Key Vault secret.
 6. Smoke-test the public URL; check cold-start latency. If F1 cold starts > 10s, escalate decision to B1 in A.7.
 
 **Acceptance.**
-- [ ] `curl https://bets-dashboard-<random>.azurewebsites.net/health` returns `{"db":"ok"}`.
+- [ ] `curl https://kaunitz-dashboard-<random>.azurewebsites.net/health` returns `{"db":"ok"}`.
 - [ ] Dashboard renders bet history from DB (matches Pi-side data).
 - [ ] App Service log stream shows no startup errors.
 
@@ -329,26 +330,26 @@ curl -s localhost:5000/ | grep -c "<tr"  # row count sanity check
 
 **Verification commands.**
 ```bash
-az webapp show -g bets-rg -n bets-dashboard-<random> --query "{state:state, defaultHostName:defaultHostName}" -o json
-curl -s https://bets-dashboard-<random>.azurewebsites.net/health
-az webapp log tail -g bets-rg -n bets-dashboard-<random>  # interactive — confirm no errors
+az webapp show -g kaunitz-rg -n kaunitz-dashboard-<random> --query "{state:state, defaultHostName:defaultHostName}" -o json
+curl -s https://kaunitz-dashboard-<random>.azurewebsites.net/health
+az webapp log tail -g kaunitz-rg -n kaunitz-dashboard-<random>  # interactive — confirm no errors
 ```
 
 ---
 
 ## Phase A.7 — Easy Auth (Google OIDC) on dashboard
 
-**Goal.** Public URL requires Google sign-in; only `robert.freire@gmail.com` is authorized.
+**Goal.** Public URL requires Google sign-in; only `robert.freire@gmail.com` is authorized. (The Azure resources sit in the Reply VSE subscription, but the *application* identity layer is intentionally decoupled — see Phase A.0 identity boundary note.)
 
 **Tasks.**
 1. Portal: App Service → Authentication → Add identity provider → Google.
-2. Set up Google OAuth client at console.cloud.google.com (OAuth 2.0 Client ID, Web app, redirect URI `https://bets-dashboard-<random>.azurewebsites.net/.auth/login/google/callback`).
-3. Configure App Service: "Require authentication" + "Allowed identities" → restrict to user's email.
-4. **Decision branch (document in PR body):** if Easy Auth setup hits a snag (Google verification, SP issues), fall back to HTTP Basic Auth: 1 LOC in `app.py` checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Bitwarden + App Settings.
+2. Set up Google OAuth client at console.cloud.google.com (OAuth 2.0 Client ID, Web app, redirect URI `https://kaunitz-dashboard-<random>.azurewebsites.net/.auth/login/google/callback`). Owner of this OAuth client is the user's personal Google account, not the Reply identity.
+3. Configure App Service: "Require authentication" + "Allowed identities" → restrict to `robert.freire@gmail.com`.
+4. **Decision branch (document in PR body):** if Easy Auth setup hits a snag (Google verification, SP issues, Reply tenant blocking the redirect), fall back to HTTP Basic Auth — 1 LOC in `app.py` checking `request.authorization.username == 'robert' and request.authorization.password == os.environ['BASIC_AUTH_PASS']`. Store `BASIC_AUTH_PASS` in Bitwarden + App Settings.
 
 **Acceptance.**
-- [ ] `curl -i https://bets-dashboard-<random>.azurewebsites.net/` returns 302 to Google login (or 401 with Basic Auth fallback).
-- [ ] Browser test: sign in as authorized email → dashboard renders. Sign in as different account → 403.
+- [ ] `curl -i https://kaunitz-dashboard-<random>.azurewebsites.net/` returns 302 to Google login (or 401 with Basic Auth fallback).
+- [ ] Browser test: sign in as `robert.freire@gmail.com` → dashboard renders. Sign in as different account → 403.
 - [ ] Pi → App Service link still works (Pi calls public URL; should be allowed via internal allowlist, OR the dashboard doesn't need this).
 
 **Reviewer focus.**
@@ -358,8 +359,8 @@ az webapp log tail -g bets-rg -n bets-dashboard-<random>  # interactive — conf
 
 **Verification commands.**
 ```bash
-curl -i https://bets-dashboard-<random>.azurewebsites.net/ | head -1  # expect 302 or 401
-curl -s https://bets-dashboard-<random>.azurewebsites.net/health     # should still return 200
+curl -i https://kaunitz-dashboard-<random>.azurewebsites.net/ | head -1  # expect 302 or 401
+curl -s https://kaunitz-dashboard-<random>.azurewebsites.net/health     # should still return 200
 ```
 
 ---
@@ -390,7 +391,7 @@ curl -s https://bets-dashboard-<random>.azurewebsites.net/health     # should st
 ```bash
 ssh robert@192.168.0.28 'cd ~/projects/bets && export $(cat .env) && .venv/bin/python3 scripts/scan_odds.py --sports football && stat -c "%y %n" logs/bets.csv'
 # mtime should match the archive copy, NOT the current scan time.
-az sql db show-deleted -g bets-rg -s bets-sql-uksouth-<random> 2>/dev/null  # confirm restore-from-deleted available
+az sql db show-deleted -g kaunitz-rg -s kaunitz-sql-uksouth-<random> 2>/dev/null  # confirm restore-from-deleted available
 ```
 
 ---
