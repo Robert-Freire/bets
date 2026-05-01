@@ -151,7 +151,7 @@ logs/closing_line.log       Closing-line script output
 logs/team_xg.json           Per-team avg scoring xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state (12h per bet key)
-tests/                      pytest suite (230 tests across 18 files; run with `pytest`)
+tests/                      pytest suite (240 tests across 19 files; run with `pytest`)
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
 src/storage/schema_sqlite.sql  SQLite mirror of the schema for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner (--dsn for MSSQL, --sqlite for tests)
