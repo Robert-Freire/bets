@@ -199,14 +199,16 @@ def save_bets(bets: list[dict]):
         _save_to_file(BETS_CSV, new_rows)
 
 
-def calc_pnl(result: str, actual_stake: str, odds: str) -> str:
+def calc_pnl(result: str, actual_stake: str, odds: str, commission_rate: str = "0") -> str:
     if not result or not actual_stake:
         return ""
     try:
         stake = float(actual_stake)
         o = float(odds)
+        comm = float(commission_rate or 0)
         if result == "W":
-            return str(round(stake * (o - 1), 2))
+            gross = stake * (o - 1)
+            return str(round(gross * (1 - comm), 2))
         elif result == "L":
             return str(round(-stake, 2))
         elif result == "V":
@@ -403,7 +405,7 @@ def update(bet_id: int):
     bets[bet_id]["actual_stake"] = actual_stake
     if odds:
         bets[bet_id]["odds"] = odds
-    bets[bet_id]["pnl"] = calc_pnl(result, actual_stake, bets[bet_id].get("odds", ""))
+    bets[bet_id]["pnl"] = calc_pnl(result, actual_stake, bets[bet_id].get("odds", ""), bets[bet_id].get("commission_rate", "0"))
 
     save_bets(bets)
     if repo.db_enabled and bets[bet_id].get("_source") != "legacy":
