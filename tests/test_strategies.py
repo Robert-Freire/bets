@@ -275,12 +275,12 @@ def test_impl_raw_equals_inverse_odds():
             )
 
 
-def test_edge_filter_uses_gross_edge():
-    """Every flagged bet must have edge_gross >= strategy.min_edge.
+def test_edge_filter_uses_net_edge():
+    """Every flagged bet must have edge (cons − effective_implied_prob) >= strategy.min_edge.
 
-    In production, the edge filter is: cons - Shin-devigged fair >= min_edge (gross).
-    strategies.py must use the same gross edge for the flag decision, not the net edge
-    (which uses 1/odds instead of Shin-devigged fair and would be spuriously higher).
+    The filter must use the true value metric, not the Shin-devigged gross edge
+    (cons − book_fair_devigged), which inflates apparent edge by 2–4× and causes
+    bets with negative true value to pass the gate. See issue #22.
     """
     from tests.conftest import synthetic_event
 
@@ -291,16 +291,15 @@ def test_edge_filter_uses_gross_edge():
     ev = synthetic_event(h2h_prices=books)
 
     no_filter = StrategyConfig(
-        name="_test_gross_edge",
+        name="_test_net_edge",
         label="", description="",
         min_edge=0.03, drop_outlier_book=False,
     )
     bets = evaluate_strategy([ev], "soccer_epl", no_filter)
 
-    # If any bets are flagged, each must satisfy edge_gross >= min_edge
     for b in bets:
-        assert b["edge_gross"] >= no_filter.min_edge, (
-            f"{b['book']} {b['side']}: edge_gross {b['edge_gross']:.4f} < min_edge {no_filter.min_edge}"
+        assert b["edge"] >= no_filter.min_edge, (
+            f"{b['book']} {b['side']}: edge {b['edge']:.4f} < min_edge {no_filter.min_edge}"
         )
 
 

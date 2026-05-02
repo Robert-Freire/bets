@@ -125,8 +125,8 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
 
     edge_values = []
     for r in rows:
-        # Prefer edge_gross (Kaunitz devigged metric, consistent with production filter)
-        v = r.get("edge_gross") or r.get("edge")
+        # Prefer edge (true value: cons − effective_implied_prob); fall back to edge_gross for pre-fix rows
+        v = r.get("edge") or r.get("edge_gross")
         if v in ("", None):
             continue
         try:
