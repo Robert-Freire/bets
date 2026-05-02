@@ -293,9 +293,15 @@ def extract_events(envelope: dict) -> list:
         try:
             result = json.loads(body_raw)
             return result if isinstance(result, list) else []
-        except Exception:
+        except Exception as e:
+            print(f"[snapshots] WARN: extract_events failed to parse body_raw: {e}",
+                  file=sys.stderr)
             return []
-    return body_raw if isinstance(body_raw, list) else []
+    if not isinstance(body_raw, list):
+        print(f"[snapshots] WARN: extract_events: unexpected body_raw type "
+              f"{type(body_raw).__name__}", file=sys.stderr)
+        return []
+    return body_raw
 
 
 # Module-level singleton: scan_odds.py imports and uses one instance.

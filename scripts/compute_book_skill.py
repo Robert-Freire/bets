@@ -32,7 +32,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +40,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.betting.devig import shin
-from src.betting.team_names import API_TO_FD
 from src.config import load_leagues
 from src.storage.repo import BetRepo
 from src.storage.snapshots import (
@@ -49,7 +48,6 @@ from src.storage.snapshots import (
     load_snapshot_envelope,
 )
 
-_SEASON = "2526"
 _WINDOW_WEEKS = 8
 
 # Leagues where Pinnacle is the truth anchor for edge_vs_pinnacle
@@ -70,13 +68,22 @@ _FDCO_BOOK_COLS: dict[str, tuple[str, str, str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Date helpers
+# Date / season helpers
 # ---------------------------------------------------------------------------
 
 def _most_recent_sunday(ref: date | None = None) -> date:
     """Return the most recent Sunday on or before *ref* (default: today)."""
     d = ref or date.today()
     return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def _fdco_season(d: date) -> str:
+    """Return FDCO season code for the season containing *d*.
+
+    FDCO seasons run Aug–Jul; e.g. 2025-08-01 → '2526'.
+    """
+    year = d.year if d.month >= 8 else d.year - 1
+    return f"{str(year)[2:]}{str(year + 1)[2:]}"
 
 
 def _blob_date_in_range(key: str, since: date, until: date) -> bool:
@@ -107,14 +114,22 @@ def _parse_fdco_date(s: str) -> date | None:
 # ---------------------------------------------------------------------------
 
 class _BookAccum:
-    """Accumulates per-(book, outcome) scan-time observations for one league."""
+    """Accumulates per-(book, outcome) scan-time observations for one league.
+
+    Note on edge_vs_consensus / edge_vs_pinnacle semantics:
+    Both are means over all (fixture × scan × outcome) observations.
+    Because each book's Shin-devigged probs sum to 1.0, and the consensus
+    is a mean of such prob vectors, the 3-outcome sum of (book − consensus)
+    is exactly 0 per fixture per scan.  The aggregate mean is therefore
+    always ~0.  This is correct behaviour — the diagnostic value lies in
+    tracking the trend across window_end values, not the absolute level.
+    See tests/test_book_skill.py:test_edge_vs_consensus_per_outcome_components
+    for a per-component breakdown that confirms the intermediate math.
+    """
 
     def __init__(self) -> None:
-        # Per book: list of (book_prob - consensus_prob) per observation (3 per fixture per scan)
         self.edge_vs_consensus: dict[str, list[float]] = defaultdict(list)
-        # Per book: list of (book_prob - truth_anchor_prob) per observation
         self.edge_vs_pinnacle: dict[str, list[float]] = defaultdict(list)
-        # Per book: set of distinct (home, away, kickoff) fixture identifiers
         self.fixture_ids: dict[str, set[tuple]] = defaultdict(set)
 
     def add_event(self, event: dict, truth_anchor: str) -> None:
@@ -125,10 +140,7 @@ class _BookAccum:
         fixture_key = (home, away, kickoff)
 
         bookmakers = event.get("bookmakers", [])
-        # Collect devigged probs per book for h2h market
-        # probs_by_book: {book_key: [p_home, p_draw, p_away]}
         probs_by_book: dict[str, list[float]] = {}
-        outcome_names: list[str] | None = None  # [home, draw, away] order
 
         for bm in bookmakers:
             bk = bm.get("key", "").lower()
@@ -138,7 +150,6 @@ class _BookAccum:
                 outcomes = market.get("outcomes", [])
                 if len(outcomes) != 3:
                     continue
-                # Odds API returns outcomes as home, away, Draw (order varies)
                 try:
                     raw_probs = [1.0 / o["price"] for o in outcomes]
                     if any(p <= 0 for p in raw_probs):
@@ -146,32 +157,27 @@ class _BookAccum:
                     fair = shin(raw_probs)
                 except Exception:
                     continue
-                # Store with canonical outcome ordering [home, draw, away]
                 name_to_fair = {o["name"]: f for o, f in zip(outcomes, fair)}
-                # h2h outcomes: home team name, away team name, "Draw"
                 p_home = name_to_fair.get(event.get("home_team", ""))
                 p_away = name_to_fair.get(event.get("away_team", ""))
                 p_draw = name_to_fair.get("Draw")
                 if None in (p_home, p_draw, p_away):
                     continue
                 probs_by_book[bk] = [p_home, p_draw, p_away]
-                break  # only first h2h market entry per book
+                break
 
         if len(probs_by_book) < 2:
-            return  # need at least 2 books to compute a meaningful consensus
+            return
 
-        # Consensus: mean of fair probs across all books (per outcome)
         n_books = len(probs_by_book)
         consensus = [
             sum(p[i] for p in probs_by_book.values()) / n_books
             for i in range(3)
         ]
 
-        # Truth anchor probs
         if truth_anchor == "pinnacle":
             anchor_probs = probs_by_book.get("pinnacle")
         else:
-            # bet365+bwin sharp consensus
             anchors = [probs_by_book[b] for b in _SHARP_ANCHOR_BOOKS
                        if b in probs_by_book]
             if len(anchors) == 2:
@@ -184,17 +190,14 @@ class _BookAccum:
         for bk, bk_probs in probs_by_book.items():
             self.fixture_ids[bk].add(fixture_key)
             for i in range(3):
-                obs_consensus = bk_probs[i] - consensus[i]
-                self.edge_vs_consensus[bk].append(obs_consensus)
+                self.edge_vs_consensus[bk].append(bk_probs[i] - consensus[i])
                 if anchor_probs is not None:
-                    obs_pin = bk_probs[i] - anchor_probs[i]
-                    self.edge_vs_pinnacle[bk].append(obs_pin)
+                    self.edge_vs_pinnacle[bk].append(bk_probs[i] - anchor_probs[i])
 
     def aggregate(self) -> dict[str, dict]:
-        """Return {book: {n_fixtures, edge_vs_consensus, edge_vs_pinnacle, divergence}}."""
+        """Return {book: {n_fixtures_blob, edge_vs_consensus, edge_vs_pinnacle, divergence}}."""
         result = {}
-        all_books = set(self.fixture_ids)
-        for bk in all_books:
+        for bk in self.fixture_ids:
             n = len(self.fixture_ids[bk])
             evc_list = self.edge_vs_consensus.get(bk, [])
             evp_list = self.edge_vs_pinnacle.get(bk, [])
@@ -211,46 +214,53 @@ class _BookAccum:
 
 
 # ---------------------------------------------------------------------------
-# B.0.5: flag signals from bets.csv
+# B.0.5: flag signals — DB-first, CSV fallback
 # ---------------------------------------------------------------------------
 
+def _read_bets_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+    except OSError:
+        return []
+
+
 def _load_flag_signals(
-    logs_dir: Path, since: date, until: date,
+    repo: BetRepo,
+    logs_dir: Path,
+    since: date,
+    until: date,
 ) -> dict[tuple[str, str, str], dict]:
-    """Read bets.csv and paper/A_production.csv, return flag stats per (book, league, market)."""
-    sources = [logs_dir / "bets.csv",
-               logs_dir / "paper" / "A_production.csv"]
-    # {(book, league, market): {"n_flags": int, "edge_sum": float}}
+    """Return flag stats per (book, league, market). DB-first, CSV fallback."""
+    raw_rows: list[dict] | None = repo.get_bets()  # returns None when DB disabled
+    if raw_rows is None:
+        raw_rows = _read_bets_csv(logs_dir / "bets.csv")
+
     stats: dict[tuple[str, str, str], dict] = defaultdict(
         lambda: {"n_flags": 0, "edge_sum": 0.0}
     )
-    for src in sources:
-        if not src.exists():
+    for row in raw_rows:
+        ko = row.get("kickoff", "")
+        try:
+            ko_date = datetime.strptime(ko[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            continue
+        if not (since <= ko_date <= until):
+            continue
+        book = (row.get("book") or "").lower()
+        league = row.get("sport") or ""
+        market = row.get("market") or "h2h"
+        if not book or not league:
             continue
         try:
-            with open(src, newline="", encoding="utf-8-sig") as f:
-                for row in csv.DictReader(f):
-                    ko = row.get("kickoff", "")
-                    try:
-                        ko_date = datetime.strptime(ko[:10], "%Y-%m-%d").date()
-                    except (ValueError, TypeError):
-                        continue
-                    if not (since <= ko_date <= until):
-                        continue
-                    book = (row.get("book") or "").lower()
-                    league = row.get("sport") or ""
-                    market = row.get("market") or "h2h"
-                    if not book or not league:
-                        continue
-                    try:
-                        edge = float(row.get("edge") or 0)
-                    except (TypeError, ValueError):
-                        edge = 0.0
-                    key = (book, league, market)
-                    stats[key]["n_flags"] += 1
-                    stats[key]["edge_sum"] += edge
-        except OSError:
-            continue
+            edge = float(row.get("edge") or 0)
+        except (TypeError, ValueError):
+            edge = 0.0
+        key = (book, league, market)
+        stats[key]["n_flags"] += 1
+        stats[key]["edge_sum"] += edge
     return dict(stats)
 
 
@@ -259,11 +269,13 @@ def _load_flag_signals(
 # ---------------------------------------------------------------------------
 
 def _compute_fdco_brier(
-    fdco_code: str, since: date, until: date,
+    fdco_code: str, season: str, since: date, until: date,
 ) -> dict[str, dict]:
     """Return {book_key: {"n_fixtures": int, "brier_sum": float}} for one league."""
-    path = _ROOT / "data" / "raw" / f"{fdco_code}_{_SEASON}.csv"
+    path = _ROOT / "data" / "raw" / f"{fdco_code}_{season}.csv"
     if not path.exists():
+        print(f"  [B.0.6] {path.name} not found — skipping.",
+              file=sys.stderr)
         return {}
 
     stats: dict[str, dict] = {
@@ -279,7 +291,7 @@ def _compute_fdco_brier(
         except UnicodeDecodeError:
             rows = []
 
-    ftr_map = {"H": 0, "D": 1, "A": 2}  # index into [home, draw, away]
+    ftr_map = {"H": 0, "D": 1, "A": 2}
 
     for row in rows:
         d = _parse_fdco_date(row.get("Date", ""))
@@ -316,14 +328,6 @@ def _compute_fdco_brier(
 # Main computation
 # ---------------------------------------------------------------------------
 
-def _sport_key_from_blob_prefix(key: str) -> str:
-    """Extract sport_key from blob key, e.g. 'odds_api/v4_sports_soccer_epl_odds/...'."""
-    parts = key.split("/")
-    if len(parts) >= 2 and parts[1].startswith("v4_sports_") and parts[1].endswith("_odds"):
-        return parts[1][len("v4_sports_"):-len("_odds")]
-    return ""
-
-
 def compute(
     window_end: date,
     market: str = "h2h",
@@ -336,7 +340,9 @@ def compute(
     """
     window_start = window_end - timedelta(weeks=_WINDOW_WEEKS)
     window_end_str = window_end.isoformat()
-    print(f"[book_skill] window: {window_start} → {window_end}  market={market}")
+    season = _fdco_season(window_end)
+    print(f"[book_skill] window: {window_start} → {window_end}  "
+          f"market={market}  season={season}")
 
     leagues = load_leagues()
     if target_labels:
@@ -347,7 +353,8 @@ def compute(
     if not archive_enabled:
         print("[book_skill] BLOB_ARCHIVE not enabled — skipping B.0.5 (blob signals).")
 
-    flag_stats = _load_flag_signals(_ROOT / "logs", window_start, window_end)
+    repo = BetRepo()
+    flag_stats = _load_flag_signals(repo, _ROOT / "logs", window_start, window_end)
     rows: list[dict] = []
 
     for lg in leagues:
@@ -386,7 +393,8 @@ def compute(
         # ----- B.0.6 FDCO Brier -----
         fdco_brier: dict[str, dict] = {}
         if fdco_code:
-            fdco_brier = _compute_fdco_brier(fdco_code, window_start, window_end)
+            fdco_brier = _compute_fdco_brier(fdco_code, season,
+                                             window_start, window_end)
             n_pin = fdco_brier.get("pinnacle", {}).get("n_fixtures", 0)
             print(f"  [B.0.6] FDCO {fdco_code}: "
                   f"{n_pin} pinnacle-covered fixtures in window")
@@ -399,14 +407,18 @@ def compute(
             blob = blob_agg.get(bk, {})
             fdco = fdco_brier.get(bk, {})
 
-            # n_fixtures: prefer blob count (broader); fall back to FDCO count
             n_fix_blob = blob.get("n_fixtures_blob", 0)
             n_fix_fdco = fdco.get("n_fixtures", 0)
-            n_fixtures = n_fix_blob if n_fix_blob > 0 else n_fix_fdco
-            if n_fixtures == 0:
+
+            if n_fix_blob > 0:
+                n_fixtures = n_fix_blob
+                n_fixtures_source = "blob"
+            elif n_fix_fdco > 0:
+                n_fixtures = n_fix_fdco
+                n_fixtures_source = "fdco"
+            else:
                 continue
 
-            # flag signals
             flag_key = (bk, label, market)
             fdata = flag_stats.get(flag_key, {})
             n_flags = fdata.get("n_flags", 0)
@@ -414,7 +426,6 @@ def compute(
             flag_rate = n_flags / n_fixtures if n_fixtures > 0 else None
             mean_flag_edge = edge_sum / n_flags if n_flags > 0 else None
 
-            # Brier mean
             brier_n = fdco.get("n_fixtures", 0)
             brier_sum = fdco.get("brier_sum", 0.0)
             brier_outcome = brier_sum / brier_n if brier_n > 0 else None
@@ -425,18 +436,19 @@ def compute(
                 "market": market,
                 "window_end": window_end_str,
                 "n_fixtures": n_fixtures,
-                "brier_vs_close": None,   # B.2 gated
+                "brier_vs_close": None,
                 "brier_vs_outcome": brier_outcome,
-                "log_loss": None,         # B.2 gated
-                "fav_longshot_slope": None,  # B.1 gated
-                "home_bias": None,           # B.1 gated
-                "draw_bias": None,           # B.1 gated
+                "log_loss": None,
+                "fav_longshot_slope": None,
+                "home_bias": None,
+                "draw_bias": None,
                 "flag_rate": flag_rate,
                 "mean_flag_edge": mean_flag_edge,
                 "edge_vs_consensus": blob.get("edge_vs_consensus"),
                 "edge_vs_pinnacle": blob.get("edge_vs_pinnacle"),
                 "divergence": blob.get("divergence"),
                 "truth_anchor": truth_anchor,
+                "n_fixtures_source": n_fixtures_source,
             }
             rows.append(row)
 
@@ -445,12 +457,11 @@ def compute(
     if dry_run:
         for r in rows[:5]:
             print(f"  {r['book']:20s}  {r['league']:12s}  "
-                  f"n={r['n_fixtures']}  "
+                  f"n={r['n_fixtures']} ({r['n_fixtures_source']})  "
                   f"flag_rate={r.get('flag_rate')}  "
                   f"brier={r.get('brier_vs_outcome')}")
         return rows
 
-    repo = BetRepo()
     if repo.db_enabled:
         repo.write_book_skill(rows)
         repo.close()

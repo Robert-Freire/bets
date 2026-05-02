@@ -696,7 +696,10 @@ class BetRepo:
         "fav_longshot_slope", "home_bias", "draw_bias",
         "flag_rate", "mean_flag_edge",
         "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
-        "truth_anchor",
+        "truth_anchor", "n_fixtures_source",
+    )
+    _BOOK_SKILL_STR_COLS = frozenset(
+        {"book", "league", "market", "window_end", "truth_anchor", "n_fixtures_source"}
     )
 
     def write_book_skill(self, rows: list[dict]) -> None:
@@ -722,11 +725,10 @@ class BetRepo:
                     "WHERE book = ? AND league = ? AND market = ? AND window_end = ?",
                     (book, league, market, window_end),
                 )
-                _STR_COLS = {"book", "league", "market", "window_end", "truth_anchor"}
                 vals: list = []
                 for c in self._BOOK_SKILL_COLS:
                     v = row.get(c)
-                    if c in _STR_COLS:
+                    if c in self._BOOK_SKILL_STR_COLS:
                         vals.append(v)
                     elif c == "n_fixtures":
                         vals.append(_i(v))

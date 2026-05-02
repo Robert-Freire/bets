@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS book_skill (
     edge_vs_pinnacle   REAL,
     divergence         REAL,
     truth_anchor       TEXT,
+    n_fixtures_source  TEXT,
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     PRIMARY KEY (book, league, market, window_end)
 );

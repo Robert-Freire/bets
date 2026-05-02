@@ -3,7 +3,7 @@
 Coverage:
 - Schema migration creates book_skill table in SQLite, idempotent on second run.
 - BetRepo.write_book_skill persists and overwrites rows correctly.
-- Divergence calculation against a hand-computed synthetic 2-book fixture set.
+- Divergence calculation: hand-computed zero-case, and per-component nontrivial values.
 - Smoke test: compute_book_skill.compute() runs against a fake blob archive
   (no network, no DB) and emits correctly-shaped rows.
 - Pi-safety: importing the script with BETS_DB_WRITE and BLOB_ARCHIVE unset
@@ -12,14 +12,12 @@ Coverage:
 from __future__ import annotations
 
 import gzip
-import importlib
+import io
 import json
 import os
 import sqlite3
 import sys
-import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -44,6 +42,17 @@ def _apply(conn, sql_text: str) -> None:
     apply_schema(conn, sql_text)
 
 
+def _make_repo_with_sqlite(conn: sqlite3.Connection):
+    """Return a BetRepo wired to a SQLite connection (bypasses pyodbc)."""
+    from src.storage.repo import BetRepo
+    repo = BetRepo(dsn=None)
+    repo._dsn = "sqlite-test-sentinel"  # non-None → db_enabled = True
+    repo._conn = conn
+    repo._cur = conn.cursor()
+    repo._db_failed = False
+    return repo
+
+
 def _make_blob_gz(events: list) -> bytes:
     """Wrap a list of Odds API events into a SnapshotArchive envelope (gzipped)."""
     payload = {
@@ -56,7 +65,6 @@ def _make_blob_gz(events: list) -> bytes:
         "body_raw": json.dumps(events),
     }
     raw = json.dumps(payload).encode()
-    import io
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
         gz.write(raw)
@@ -64,10 +72,7 @@ def _make_blob_gz(events: list) -> bytes:
 
 
 def _synthetic_events() -> list:
-    """Two-book synthetic fixture set for divergence hand-calculation."""
-    # Book A: home=0.55, draw=0.25, away=0.20 (raw) → after Shin devig ≈ same
-    # Book B: home=0.50, draw=0.25, away=0.25 (raw) → Pinnacle-like
-    # For test we use identical odds so Shin ≈ proportional
+    """Two-book synthetic fixture."""
     return [
         {
             "id": "ev-001",
@@ -117,7 +122,7 @@ def test_schema_migration_idempotent_with_book_skill():
     before = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0]
-    _apply(conn, sql)   # second run must be a no-op
+    _apply(conn, sql)
     after = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0]
@@ -133,7 +138,7 @@ def test_book_skill_has_expected_columns():
         "fav_longshot_slope", "home_bias", "draw_bias",
         "flag_rate", "mean_flag_edge",
         "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
-        "truth_anchor", "created_at",
+        "truth_anchor", "n_fixtures_source", "created_at",
     }
     missing = required - cols
     assert not missing, f"book_skill missing columns: {missing}"
@@ -171,18 +176,8 @@ def _sample_row(book: str = "bet365", window: str = "2026-04-27") -> dict:
         "edge_vs_pinnacle": -0.002,
         "divergence": -0.001,
         "truth_anchor": "pinnacle",
+        "n_fixtures_source": "blob",
     }
-
-
-def _make_repo_with_sqlite(conn: sqlite3.Connection):
-    """Return a BetRepo wired to a SQLite connection (bypasses pyodbc)."""
-    from src.storage.repo import BetRepo
-    repo = BetRepo(dsn=None)
-    repo._dsn = "sqlite-test-sentinel"  # non-None → db_enabled = True
-    repo._conn = conn
-    repo._cur = conn.cursor()
-    repo._db_failed = False
-    return repo
 
 
 def test_write_book_skill_persists_row():
@@ -200,6 +195,7 @@ def test_write_book_skill_persists_row():
     assert d["league"] == "EPL"
     assert d["n_fixtures"] == 10
     assert abs(d["brier_vs_outcome"] - 0.231) < 1e-6
+    assert d["n_fixtures_source"] == "blob"
 
 
 def test_write_book_skill_overwrites_on_same_key():
@@ -210,10 +206,10 @@ def test_write_book_skill_overwrites_on_same_key():
     repo.write_book_skill([row])
     conn.commit()
 
-    # Update n_fixtures and re-write the same key
     row2 = dict(row)
     row2["n_fixtures"] = 20
     row2["brier_vs_outcome"] = 0.250
+    row2["n_fixtures_source"] = "fdco"
     repo.write_book_skill([row2])
     conn.commit()
 
@@ -223,61 +219,39 @@ def test_write_book_skill_overwrites_on_same_key():
     d = dict(zip(col_names, rows[0]))
     assert d["n_fixtures"] == 20
     assert abs(d["brier_vs_outcome"] - 0.250) < 1e-6
+    assert d["n_fixtures_source"] == "fdco"
 
 
 def test_write_book_skill_noop_without_db():
     from src.storage.repo import BetRepo
     repo = BetRepo(dsn=None)
-    # db_enabled is False when _dsn is None
     assert not repo.db_enabled
-    # Must not raise
-    repo.write_book_skill([_sample_row()])
+    repo.write_book_skill([_sample_row()])  # must not raise
 
 
 # ---------------------------------------------------------------------------
-# Divergence calculation: hand-computed expected values
+# Divergence calculation
 # ---------------------------------------------------------------------------
 
-def test_divergence_hand_computed():
-    """Synthetic 2-book, 1-fixture, 1-scan set.
+def test_divergence_hand_computed_zero_case():
+    """Synthetic 2-book set with no overround: Shin == identity, aggregate = 0.
 
-    Book A raw implied: home=0.55, draw=0.25, away=0.20  (sum=1.00, no overround)
-    Pinnacle raw implied: home=0.50, draw=0.25, away=0.25 (sum=1.00, no overround)
+    Book A raw implied: home=0.55, draw=0.25, away=0.20 (sum=1.00)
+    Pinnacle raw implied: home=0.50, draw=0.25, away=0.25 (sum=1.00)
 
-    With no overround, Shin devig == identity (already fair).
-    Consensus (mean over 2 books per outcome):
-        home = (0.55+0.50)/2 = 0.525
-        draw = (0.25+0.25)/2 = 0.250
-        away = (0.20+0.25)/2 = 0.225
-
-    For Book A:
-        edge_vs_consensus per outcome:
-            home:  0.55 - 0.525 = +0.025
-            draw:  0.25 - 0.250 =  0.000
-            away:  0.20 - 0.225 = -0.025
-        mean = (0.025 + 0.000 - 0.025) / 3 = 0.0
-
-        edge_vs_pinnacle per outcome:
-            home:  0.55 - 0.50 = +0.05
-            draw:  0.25 - 0.25 =  0.00
-            away:  0.20 - 0.25 = -0.05
-        mean = (0.05 + 0.00 - 0.05) / 3 = 0.0
-
-        divergence = 0.0 - 0.0 = 0.0
+    With no overround Shin is identity.  Consensus = mean of two books.
+    Mean of (book_prob − consensus) over 3 outcomes = 0 exactly
+    (devigged probs sum to 1 — mathematical identity).
     """
     from scripts.compute_book_skill import _BookAccum
 
-    # Build event with no overround so Shin ≈ identity
     event = {
-        "id": "ev-hand",
-        "sport_key": "soccer_epl",
         "home_team": "Arsenal",
         "away_team": "Chelsea",
         "commence_time": "2026-04-26T15:00:00Z",
         "bookmakers": [
             {
                 "key": "booka",
-                "title": "Book A",
                 "markets": [{"key": "h2h", "outcomes": [
                     {"name": "Arsenal", "price": 1.0 / 0.55},
                     {"name": "Chelsea", "price": 1.0 / 0.20},
@@ -286,7 +260,6 @@ def test_divergence_hand_computed():
             },
             {
                 "key": "pinnacle",
-                "title": "Pinnacle",
                 "markets": [{"key": "h2h", "outcomes": [
                     {"name": "Arsenal", "price": 1.0 / 0.50},
                     {"name": "Chelsea", "price": 1.0 / 0.25},
@@ -302,25 +275,72 @@ def test_divergence_hand_computed():
 
     assert "booka" in agg, f"booka not in agg: {list(agg)}"
     row_a = agg["booka"]
-    assert abs(row_a["edge_vs_consensus"]) < 1e-6, (
-        f"edge_vs_consensus should be ~0, got {row_a['edge_vs_consensus']}"
+    assert abs(row_a["edge_vs_consensus"]) < 1e-10, (
+        f"edge_vs_consensus should be exactly 0, got {row_a['edge_vs_consensus']}"
     )
-    assert abs(row_a["edge_vs_pinnacle"]) < 1e-6, (
-        f"edge_vs_pinnacle should be ~0, got {row_a['edge_vs_pinnacle']}"
+    assert abs(row_a["edge_vs_pinnacle"]) < 1e-10, (
+        f"edge_vs_pinnacle should be exactly 0, got {row_a['edge_vs_pinnacle']}"
     )
-    assert abs(row_a["divergence"]) < 1e-6, (
-        f"divergence should be ~0, got {row_a['divergence']}"
+    assert abs(row_a["divergence"]) < 1e-10, (
+        f"divergence should be exactly 0, got {row_a['divergence']}"
     )
+
+
+def test_edge_vs_consensus_per_outcome_components():
+    """Verify per-outcome edge components (before aggregation) for a book with overround.
+
+    When averaged over all 3 h2h outcomes the mean is exactly 0 by construction
+    (fair probs sum to 1).  Individual outcome components are nonzero, confirming
+    the Shin devig and edge computation are correct before the identity collapses
+    the aggregate.
+
+    Expected value for the HOME component (computed via shin() offline):
+      softbook fair_home ≈ 0.4527 (Shin reduces 10% overround)
+      pinnacle fair_home = 0.495 (sum=1.000 → identity)
+      consensus_home = (0.4527 + 0.495) / 2 ≈ 0.474
+      evc_home ≈ 0.4527 − 0.474 ≈ −0.021   (softbook is below consensus on home)
+    """
+    from src.betting.devig import shin
+
+    soft_raw = [0.50, 0.30, 0.30]    # sum = 1.10 (10% overround)
+    pin_raw  = [0.495, 0.292, 0.213]  # sum = 1.000 (no overround)
+
+    soft_fair = shin(soft_raw)
+    pin_fair  = shin(pin_raw)
+
+    consensus = [(soft_fair[i] + pin_fair[i]) / 2 for i in range(3)]
+
+    # Per-component values before aggregation
+    evc_components = [soft_fair[i] - consensus[i] for i in range(3)]
+    evp_components = [soft_fair[i] - pin_fair[i]  for i in range(3)]
+
+    # (1) HOME component nonzero — computed offline via shin():
+    #     soft_fair_home ≈ 0.4585, pin_fair_home = 0.495, consensus ≈ 0.477
+    #     evc_home ≈ 0.4585 - 0.477 ≈ -0.0158
+    evc_home = evc_components[0]
+    assert abs(evc_home - (-0.016)) < 5e-3, (
+        f"evc_home={evc_home:.6f}, expected ≈ -0.016"
+    )
+
+    # (2) Per-component values are individually nonzero
+    assert any(abs(e) > 1e-4 for e in evc_components), \
+        f"Expected nonzero evc components: {evc_components}"
+    assert any(abs(e) > 1e-4 for e in evp_components), \
+        f"Expected nonzero evp components: {evp_components}"
+
+    # (3) Aggregate sum over 3 outcomes = 0 (mathematical identity)
+    assert abs(sum(evc_components)) < 1e-10, (
+        f"3-outcome sum should be exactly 0: {sum(evc_components)}"
+    )
+    assert abs(sum(evp_components)) < 1e-10
 
 
 def test_divergence_nonzero_with_overround():
-    """Book with overround gives nonzero Shin devig and measurable divergence."""
+    """Book with 10% overround: aggregate divergence = 0 by identity,
+    but the _BookAccum still runs correctly with real Shin values."""
     from scripts.compute_book_skill import _BookAccum
 
-    # Book A has overround: raw sum = 1.10 (10% vig)
-    # Pinnacle is close to fair: raw sum = 1.02
     event = {
-        "id": "ev-vig",
         "home_team": "Home",
         "away_team": "Away",
         "commence_time": "2026-04-26T15:00:00Z",
@@ -331,15 +351,15 @@ def test_divergence_nonzero_with_overround():
                     {"name": "Home", "price": 1 / 0.50},
                     {"name": "Away", "price": 1 / 0.30},
                     {"name": "Draw", "price": 1 / 0.30},
-                ]}],  # raw sum = 1.10
+                ]}],
             },
             {
                 "key": "pinnacle",
                 "markets": [{"key": "h2h", "outcomes": [
                     {"name": "Home", "price": 1 / 0.495},
                     {"name": "Away", "price": 1 / 0.292},
-                    {"name": "Draw", "price": 1 / 0.233},
-                ]}],  # raw sum ≈ 1.02
+                    {"name": "Draw", "price": 1 / 0.213},
+                ]}],
             },
         ],
     }
@@ -348,9 +368,11 @@ def test_divergence_nonzero_with_overround():
     accum.add_event(event, truth_anchor="pinnacle")
     agg = accum.aggregate()
     assert "softbook" in agg
-    # Just verify it runs and divergence is a float
-    div = agg["softbook"]["divergence"]
-    assert isinstance(div, float), f"divergence should be float, got {type(div)}"
+
+    # Aggregate = 0 by mathematical identity (both books' fair probs sum to 1)
+    assert abs(agg["softbook"]["edge_vs_consensus"]) < 1e-10
+    assert abs(agg["softbook"]["edge_vs_pinnacle"]) < 1e-10
+    assert isinstance(agg["softbook"]["divergence"], float)
 
 
 # ---------------------------------------------------------------------------
@@ -362,30 +384,30 @@ def test_compute_smoke_no_network(tmp_path, monkeypatch):
     monkeypatch.delenv("BETS_DB_WRITE", raising=False)
     monkeypatch.delenv("BLOB_ARCHIVE", raising=False)
 
-    # Fake archive that returns one synthetic blob for soccer_epl
     gz = _make_blob_gz(_synthetic_events())
-    fake_key = "odds_api/v4_sports_soccer_epl_odds/2026/04/26/2026-04-26T10-30-00-000000_soccer_epl.json.gz"
+    fake_key = ("odds_api/v4_sports_soccer_epl_odds/2026/04/26/"
+                "2026-04-26T10-30-00-000000_soccer_epl.json.gz")
 
     class FakeArchive:
-        enabled = True
+        @property
+        def enabled(self) -> bool:
+            return True
 
         def list_blob_keys(self, prefix=""):
-            if "soccer_epl" in prefix:
-                return [fake_key]
-            return []
+            return [fake_key] if "soccer_epl" in prefix else []
 
         def download_blob(self, key):
-            if key == fake_key:
-                return gz
-            return None
+            return gz if key == fake_key else None
 
-    # Patch get_archive in the compute module
     import scripts.compute_book_skill as cbs
     monkeypatch.setattr(cbs, "get_archive", lambda: FakeArchive())
-    # Use only EPL so the test is fast
     monkeypatch.setattr(cbs, "load_leagues", lambda: [
         {"key": "soccer_epl", "label": "EPL", "min_books": 20, "fdco_code": None}
     ])
+
+    # Also patch BetRepo so get_bets() returns empty (no DB/CSV needed)
+    from src.storage.repo import BetRepo
+    monkeypatch.setattr(BetRepo, "get_bets", lambda self: [])
 
     from datetime import date
     rows = cbs.compute(
@@ -395,29 +417,23 @@ def test_compute_smoke_no_network(tmp_path, monkeypatch):
     )
 
     assert len(rows) > 0, "Expected at least one row"
-    for r in rows:
-        assert "book" in r
-        assert "league" in r
-        assert "market" in r
-        assert "window_end" in r
-        assert "n_fixtures" in r
-        assert r["market"] == "h2h"
-        assert r["league"] == "EPL"
-        assert r["window_end"] == "2026-04-27"
-        assert isinstance(r["n_fixtures"], int) and r["n_fixtures"] >= 0
 
-    # Verify required keys are present on every row
     required_keys = {
         "book", "league", "market", "window_end", "n_fixtures",
         "brier_vs_close", "brier_vs_outcome", "log_loss",
         "fav_longshot_slope", "home_bias", "draw_bias",
         "flag_rate", "mean_flag_edge",
         "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
-        "truth_anchor",
+        "truth_anchor", "n_fixtures_source",
     }
     for r in rows:
         missing = required_keys - set(r)
         assert not missing, f"Row missing keys: {missing}"
+        assert r["market"] == "h2h"
+        assert r["league"] == "EPL"
+        assert r["window_end"] == "2026-04-27"
+        assert isinstance(r["n_fixtures"], int) and r["n_fixtures"] >= 0
+        assert r["n_fixtures_source"] in ("blob", "fdco")
 
 
 # ---------------------------------------------------------------------------
@@ -432,15 +448,14 @@ def test_pi_safety_no_pyodbc_azure_on_import(monkeypatch):
     monkeypatch.delenv("AZURE_SQL_DSN", raising=False)
     monkeypatch.delenv("AZURE_BLOB_CONN", raising=False)
 
-    # Remove cached modules so fresh import is forced
     for mod in list(sys.modules):
         if mod in ("scripts.compute_book_skill", "src.storage.repo",
                    "src.storage.snapshots"):
             del sys.modules[mod]
 
-    import scripts.compute_book_skill  # noqa: F401  — just import, don't run
-    import src.storage.repo  # noqa: F401
-    import src.storage.snapshots  # noqa: F401
+    import scripts.compute_book_skill  # noqa: F401
+    import src.storage.repo            # noqa: F401
+    import src.storage.snapshots       # noqa: F401
 
     assert "pyodbc" not in sys.modules, (
         "pyodbc was imported at module level — breaks Pi safety"

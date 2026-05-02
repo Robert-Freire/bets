@@ -194,6 +194,9 @@ CREATE TABLE book_skill (
     divergence         decimal(10,8) NULL,
     -- truth_anchor: 'pinnacle' for EPL/BL/SA/L1; 'bet365+bwin' for Champ/BL2
     truth_anchor       nvarchar(32)  NULL,
+    -- n_fixtures_source: 'blob' when derived from scan-time archive,
+    --                    'fdco' when derived from FDCO settled fixtures only
+    n_fixtures_source  nvarchar(8)   NULL,
     created_at         datetime2(3)  NOT NULL DEFAULT SYSUTCDATETIME(),
     PRIMARY KEY (book, league, market, window_end)
 );
