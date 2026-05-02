@@ -1,0 +1,59 @@
+name: Build and Deploy to Dev
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # required for OIDC token
+  contents: read
+
+env:
+  ACR_REGISTRY: kaunitzdevacrrfk1.azurecr.io
+  IMAGE_NAME: dashboard
+  RESOURCE_GROUP: kaunitz-dev-rg
+  CONTAINER_APP: kaunitz-dev-dashboard-rfk1
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push image to ACR
+        run: |
+          IMAGE_TAG="${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          az acr build \
+            --registry kaunitzdevacrrfk1 \
+            --image "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            --image "${{ env.IMAGE_NAME }}:latest" \
+            .
+
+      - name: Deploy new revision to Container App
+        run: |
+          az containerapp update \
+            --name ${{ env.CONTAINER_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image "${{ env.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+      - name: Verify health endpoint
+        run: |
+          FQDN=$(az containerapp show \
+            --name ${{ env.CONTAINER_APP }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          echo "Dashboard: https://$FQDN"
+          # Give Container Apps ~30s to roll the new revision
+          sleep 30
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$FQDN/health")
+          echo "Health check HTTP $STATUS"
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ]
