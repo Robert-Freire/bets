@@ -254,7 +254,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Phase 8 (Betfair API auto-placement) | pending |
 | Phase 9a (Pi cron cutover) | ✅ done 2026-05-01 |
 | Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |
-| B.0 + B.0.5 + B.0.6 (book_skill table + consensus-divergence signals + FDCO Brier) | ✅ done 2026-05-02 |
+| B.0 + B.0.5 + B.0.6 + B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
 | B.1 (bias backfill), B.2 (Brier-vs-close), B.3 (cron), B.4* (downstream variants) | pending |
 | Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | pending (≥1 wk soak from 2026-05-01) |
 | Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |

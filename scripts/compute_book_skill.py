@@ -11,6 +11,9 @@ B.0.7 — Methodology hardening: LOO consensus (replaces self-contaminated
          full consensus), paired Brier vs Pinnacle close, bootstrap CIs,
          dual de-vig (shin + multiplicative).  Two rows emitted per
          (book, league, market, window_end) — one per devig_method.
+         Each blob and each FDCO CSV is read exactly once per league;
+         events/rows are passed to both devig accumulators in the same
+         iteration.
 
 Writes to book_skill table in Azure SQL (requires BETS_DB_WRITE=1).
 Without BETS_DB_WRITE, computed rows are printed but not stored.
@@ -56,20 +59,17 @@ from src.storage.snapshots import (
 _WINDOW_WEEKS = 8
 _BOOTSTRAP_RESAMPLES = 1000
 
-# Map devig_method label → function
+# Ordered dict: insertion order is the iteration order; 'shin' first so log
+# lines print naturally, but correctness does NOT depend on order.
 _DEVIG_FNS: dict[str, Callable] = {
-    "shin":         shin,
+    "shin":           shin,
     "multiplicative": proportional,
 }
 
-# Leagues where Pinnacle is the truth anchor for edge_vs_pinnacle
 _PINNACLE_ANCHOR_LEAGUES = {"EPL", "Bundesliga", "Serie A", "Ligue 1"}
-# For Championship + Bundesliga 2 use Bet365+Bwin sharp consensus
 _SHARP_ANCHOR_BOOKS = ("bet365", "bwin")
 _SHARP_ANCHOR_LABEL = "bet365+bwin"
 
-# FDCO closing-odds column triplets (H, D, A) per bookmaker API key.
-# Columns reflect the 2025/26 FDCO format.  WH dropped from current format.
 _FDCO_BOOK_COLS: dict[str, tuple[str, str, str]] = {
     "pinnacle":      ("PSCH",   "PSCD",   "PSCA"),
     "bet365":        ("B365CH", "B365CD", "B365CA"),
@@ -122,21 +122,26 @@ def _parse_fdco_date(s: str) -> date | None:
 def _bootstrap_ci(
     values: list[float],
     n_resamples: int = _BOOTSTRAP_RESAMPLES,
+    seed: int | None = None,
 ) -> tuple[float | None, float | None]:
-    """Fixture-level bootstrap CI (2.5 / 97.5 percentiles of resample means).
+    """Fixture-level bootstrap CI (2.5 / 97.5 percentile of resample means).
 
-    Returns (None, None) if fewer than 2 observations.
+    Pass *seed* (e.g. derived from window_end) for reproducible CIs within
+    a given run.  Returns (None, None) if fewer than 2 observations.
     """
     n = len(values)
     if n < 2:
         return None, None
     try:
         import numpy as np
+        rng = np.random.default_rng(seed)
         arr = np.array(values, dtype=float)
-        idx = np.random.randint(0, n, size=(n_resamples, n))
+        idx = rng.integers(0, n, size=(n_resamples, n))
         means = arr[idx].mean(axis=1)
         return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
     except ImportError:
+        if seed is not None:
+            random.seed(seed)
         means = sorted(
             sum(random.choices(values, k=n)) / n
             for _ in range(n_resamples)
@@ -153,12 +158,12 @@ def _bootstrap_ci(
 class _BookAccum:
     """Accumulates scan-time per-book observations for one league + devig method.
 
-    LOO consensus note:
-    Each book is excluded from its own benchmark mean before differencing
-    (Leave-One-Out), removing the self-contamination bias present in the
-    full consensus.  The 3-outcome aggregate mean is still ~0 by mathematical
-    identity (all fair-prob vectors sum to 1), but the per-outcome components
-    are unbiased and the trend across window_end values is meaningful.
+    LOO consensus: each book is excluded from its own benchmark mean before
+    differencing (Leave-One-Out), removing the self-contamination bias present
+    in the full consensus.  The 3-outcome aggregate mean is still ~0 by
+    mathematical identity (all fair-prob vectors sum to 1), but the
+    per-outcome components are unbiased and the trend across window_end
+    values is diagnostic.
     """
 
     def __init__(self, devig_fn: Callable = shin) -> None:
@@ -201,7 +206,6 @@ class _BookAccum:
         if len(probs_by_book) < 2:
             return
 
-        # Truth anchor probs
         if truth_anchor == "pinnacle":
             anchor_probs = probs_by_book.get("pinnacle")
         else:
@@ -216,15 +220,12 @@ class _BookAccum:
 
         for bk, bk_probs in probs_by_book.items():
             self.fixture_ids[bk].add(fixture_key)
-
-            # LOO consensus: exclude this book from the mean
             other = [p for k, p in probs_by_book.items() if k != bk]
             if other:
                 n_other = len(other)
                 loo = [sum(p[i] for p in other) / n_other for i in range(3)]
                 for i in range(3):
                     self.edge_vs_consensus_loo[bk].append(bk_probs[i] - loo[i])
-
             if anchor_probs is not None:
                 for i in range(3):
                     self.edge_vs_pinnacle[bk].append(bk_probs[i] - anchor_probs[i])
@@ -299,47 +300,38 @@ def _load_flag_signals(
 
 
 # ---------------------------------------------------------------------------
-# B.0.6 / B.0.7: Brier, paired Brier, log loss, bootstrap CIs from FDCO
+# B.0.6 / B.0.7: FDCO CSV loader + per-devig Brier/paired/log-loss computer
 # ---------------------------------------------------------------------------
 
-def _compute_fdco_brier(
-    fdco_code: str,
-    season: str,
-    since: date,
-    until: date,
-    devig_fn: Callable = shin,
-) -> dict[str, dict]:
-    """Return per-book Brier/paired-Brier/log-loss accumulators.
-
-    For each fixture, compute:
-      - brier_i(book)    — Brier score vs actual outcome
-      - brier_i(pin)     — Pinnacle's Brier score for same fixture
-      - paired_delta_i   — brier_i(book) - brier_i(pin)
-      - log_loss_i       — −log(fair[outcome])
-
-    Then mean + bootstrap CI across fixtures.
-    """
+def _load_fdco_rows(fdco_code: str, season: str) -> list[dict]:
+    """Load FDCO CSV rows once. Returns [] if file missing."""
     path = _ROOT / "data" / "raw" / f"{fdco_code}_{season}.csv"
     if not path.exists():
-        print(f"  [B.0.6] {path.name} not found — skipping.", file=sys.stderr)
-        return {}
-
+        print(f"  [B.0.6] {path.name} not found — skipping Brier.",
+              file=sys.stderr)
+        return []
     for enc in ("utf-8-sig", "latin1"):
         try:
             with open(path, newline="", encoding=enc) as f:
-                rows = list(csv.DictReader(f))
-            break
+                return list(csv.DictReader(f))
         except UnicodeDecodeError:
-            rows = []
+            pass
+    return []
 
-    # Accumulators: per book
+
+def _brier_from_rows(
+    rows: list[dict],
+    since: date,
+    until: date,
+    devig_fn: Callable,
+) -> dict[str, dict]:
+    """Compute per-book Brier / paired-Brier / log-loss from pre-loaded rows."""
     brier_vals: dict[str, list[float]] = defaultdict(list)
     paired_deltas: dict[str, list[float]] = defaultdict(list)
     log_loss_vals: dict[str, list[float]] = defaultdict(list)
     n_fixtures: dict[str, int] = defaultdict(int)
 
     ftr_map = {"H": 0, "D": 1, "A": 2}
-
     pin_cols = _FDCO_BOOK_COLS["pinnacle"]
 
     for row in rows:
@@ -353,7 +345,6 @@ def _compute_fdco_brier(
         actual = [0.0, 0.0, 0.0]
         actual[outcome_idx] = 1.0
 
-        # Pinnacle reference for paired Brier
         brier_pin: float | None = None
         try:
             ph = float(row.get(pin_cols[0], "") or 0)
@@ -389,7 +380,7 @@ def _compute_fdco_brier(
             p_outcome = max(fair[outcome_idx], 1e-15)
             log_loss_vals[bk].append(-math.log(p_outcome))
 
-    result = {}
+    result: dict[str, dict] = {}
     for bk in _FDCO_BOOK_COLS:
         bv = brier_vals[bk]
         pd_list = paired_deltas[bk]
@@ -423,7 +414,7 @@ def compute(
     """Compute book_skill rows for the 8-week window ending *window_end*.
 
     Emits two rows per (book, league, market, window_end): one per devig_method.
-    Returns the list of row dicts (written to DB unless dry_run=True).
+    Each blob and each FDCO CSV is read/decompressed exactly once per league.
     """
     window_start = window_end - timedelta(weeks=_WINDOW_WEEKS)
     window_end_str = window_end.isoformat()
@@ -441,7 +432,6 @@ def compute(
         print("[book_skill] BLOB_ARCHIVE not enabled — skipping B.0.5 (blob signals).")
 
     repo = BetRepo()
-    # Flag signals are devig-method-independent (scan-time flags, always Shin)
     flag_stats = _load_flag_signals(repo, _ROOT / "logs", window_start, window_end)
     rows: list[dict] = []
 
@@ -455,46 +445,54 @@ def compute(
 
         print(f"\n[book_skill] League: {label} ({sport_key})")
 
-        for devig_method, devig_fn in _DEVIG_FNS.items():
-
-            # ----- B.0.5 blob signals -----
-            accum = _BookAccum(devig_fn=devig_fn)
-            if archive_enabled:
-                prefix = f"odds_api/v4_sports_{sport_key}_odds/"
-                if devig_method == "shin":  # list blobs only once
-                    all_keys = archive.list_blob_keys(prefix=prefix)
-                    keys_in_range = [k for k in all_keys
-                                     if _blob_date_in_range(k, window_start, window_end)]
-                    print(f"  [B.0.5] {len(keys_in_range)} blobs in window "
-                          f"(total: {len(all_keys)})")
-                for key in keys_in_range:
-                    gz = archive.download_blob(key)
-                    if gz is None:
-                        continue
-                    envelope = load_snapshot_envelope(gz)
-                    if envelope is None:
-                        continue
-                    events = extract_events(envelope)
-                    for ev in events:
-                        if market == "h2h":
+        # ----- B.0.5: list blobs once, feed events to ALL accumulators -----
+        accums: dict[str, _BookAccum] = {
+            m: _BookAccum(devig_fn=fn) for m, fn in _DEVIG_FNS.items()
+        }
+        if archive_enabled:
+            prefix = f"odds_api/v4_sports_{sport_key}_odds/"
+            all_keys = archive.list_blob_keys(prefix=prefix)
+            keys_in_range = [k for k in all_keys
+                             if _blob_date_in_range(k, window_start, window_end)]
+            print(f"  [B.0.5] {len(keys_in_range)} blobs in window "
+                  f"(total under prefix: {len(all_keys)})")
+            for key in keys_in_range:
+                gz = archive.download_blob(key)
+                if gz is None:
+                    continue
+                envelope = load_snapshot_envelope(gz)
+                if envelope is None:
+                    continue
+                events = extract_events(envelope)
+                for ev in events:
+                    if market == "h2h":
+                        for accum in accums.values():
                             accum.add_event(ev, truth_anchor)
 
-            blob_agg = accum.aggregate()
+        blob_agg_by_method = {m: accums[m].aggregate() for m in _DEVIG_FNS}
 
-            # ----- B.0.6 FDCO Brier -----
-            fdco_brier: dict[str, dict] = {}
-            if fdco_code:
-                fdco_brier = _compute_fdco_brier(
-                    fdco_code, season, window_start, window_end, devig_fn
+        # ----- B.0.6: load FDCO CSV once, compute under all methods -----
+        fdco_rows = _load_fdco_rows(fdco_code, season) if fdco_code else []
+        fdco_brier_by_method: dict[str, dict[str, dict]] = {}
+        if fdco_rows:
+            for m, fn in _DEVIG_FNS.items():
+                fdco_brier_by_method[m] = _brier_from_rows(
+                    fdco_rows, window_start, window_end, fn
                 )
-                if devig_method == "shin":
-                    n_pin = fdco_brier.get("pinnacle", {}).get("n_fixtures", 0)
-                    print(f"  [B.0.6] FDCO {fdco_code}: "
-                          f"{n_pin} pinnacle-covered fixtures in window")
-            elif devig_method == "shin":
-                print(f"  [B.0.6] No FDCO code for {label} — skipping Brier.")
+            n_pin = fdco_brier_by_method["shin"].get("pinnacle", {}).get("n_fixtures", 0)
+            print(f"  [B.0.6] FDCO {fdco_code}: "
+                  f"{n_pin} pinnacle-covered fixtures in window")
+        else:
+            for m in _DEVIG_FNS:
+                fdco_brier_by_method[m] = {}
+            if fdco_code:
+                print(f"  [B.0.6] No FDCO data for {label}.")
 
-            # ----- Merge into rows -----
+        # ----- Build rows: one per (book, devig_method) -----
+        for devig_method in _DEVIG_FNS:
+            blob_agg = blob_agg_by_method[devig_method]
+            fdco_brier = fdco_brier_by_method[devig_method]
+
             all_books = set(blob_agg) | set(fdco_brier)
             for bk in all_books:
                 blob = blob_agg.get(bk, {})
@@ -553,9 +551,10 @@ def compute(
                 }
                 rows.append(row)
 
+    n_methods = len(_DEVIG_FNS)
+    n_books = len(rows) // n_methods if n_methods else 0
     print(f"\n[book_skill] {len(rows)} rows computed "
-          f"({len(rows) // max(len(_DEVIG_FNS), 1)} books × "
-          f"{len(_DEVIG_FNS)} devig methods).")
+          f"(~{n_books} books × {n_methods} devig methods).")
 
     if dry_run:
         for r in rows[:6]:

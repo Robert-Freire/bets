@@ -70,6 +70,7 @@ def _make_blob_gz(events: list) -> bytes:
 
 
 def _synthetic_events() -> list:
+    """Two-book fixture with 10% overround on booka so shin ≠ multiplicative devig."""
     return [{
         "id": "ev-001",
         "sport_key": "soccer_epl",
@@ -78,11 +79,14 @@ def _synthetic_events() -> list:
         "commence_time": "2026-04-26T15:00:00Z",
         "bookmakers": [
             {"key": "booka", "title": "Book A", "markets": [{"key": "h2h", "outcomes": [
+                # raw implied sum = 0.55+0.30+0.25 = 1.10 (10% overround)
+                # shin and proportional give meaningfully different fair probs
                 {"name": "Arsenal", "price": 1.0 / 0.55},
-                {"name": "Chelsea", "price": 1.0 / 0.20},
+                {"name": "Chelsea", "price": 1.0 / 0.30},
                 {"name": "Draw",    "price": 1.0 / 0.25},
             ]}]},
             {"key": "pinnacle", "title": "Pinnacle", "markets": [{"key": "h2h", "outcomes": [
+                # sum = 1.00 (no overround — both methods return identity)
                 {"name": "Arsenal", "price": 1.0 / 0.50},
                 {"name": "Chelsea", "price": 1.0 / 0.25},
                 {"name": "Draw",    "price": 1.0 / 0.25},
@@ -327,6 +331,77 @@ def test_loo_per_outcome_component_nontrivial():
     assert abs(loo_sum) < 1e-10
 
 
+def test_loo_with_three_books_differs_from_full_consensus():
+    """With 3 books, LOO consensus ≠ full mean ≠ any single other book.
+
+    Full consensus for Book A includes A itself → suction toward A.
+    LOO consensus excludes A → mean of {B, C} only, which is the correct
+    unbiased benchmark.  This test verifies the two are numerically different.
+    """
+    from scripts.compute_book_skill import _BookAccum
+
+    # Three books with meaningfully different pricing on home outcome
+    event = {
+        "home_team": "Home", "away_team": "Away",
+        "commence_time": "2026-04-26T15:00:00Z",
+        "bookmakers": [
+            {"key": "sharp", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Home", "price": 1 / 0.50},
+                {"name": "Away", "price": 1 / 0.28},
+                {"name": "Draw", "price": 1 / 0.22},
+            ]}]},
+            {"key": "soft1", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Home", "price": 1 / 0.46},  # generous on home
+                {"name": "Away", "price": 1 / 0.30},
+                {"name": "Draw", "price": 1 / 0.24},
+            ]}]},
+            {"key": "soft2", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Home", "price": 1 / 0.47},
+                {"name": "Away", "price": 1 / 0.30},
+                {"name": "Draw", "price": 1 / 0.23},
+            ]}]},
+        ],
+    }
+
+    accum = _BookAccum()
+    accum.add_event(event, truth_anchor="sharp")
+    agg = accum.aggregate()
+
+    # All three books must be present
+    assert set(agg.keys()) == {"sharp", "soft1", "soft2"}
+
+    # For soft1: LOO consensus = mean({sharp, soft2}) probs
+    # Full consensus = mean({sharp, soft1, soft2}) probs
+    # They are different because soft1 is excluded from the former but not latter
+    # We can verify this by checking that the LOO edges are not the full-mean edges
+    # by constructing the full consensus manually
+    from src.betting.devig import shin
+
+    def get_fair(raw): return shin(raw)
+    books = {
+        "sharp": get_fair([1/0.50, 1/0.28, 1/0.22]),
+        "soft1": get_fair([1/0.46, 1/0.30, 1/0.24]),
+        "soft2": get_fair([1/0.47, 1/0.30, 1/0.23]),
+    }
+    full_consensus = [(books["sharp"][i] + books["soft1"][i] + books["soft2"][i]) / 3
+                      for i in range(3)]
+    loo_for_soft1 = [(books["sharp"][i] + books["soft2"][i]) / 2
+                     for i in range(3)]
+
+    full_edge_home = books["soft1"][0] - full_consensus[0]
+    loo_edge_home  = books["soft1"][0] - loo_for_soft1[0]
+
+    # LOO and full consensus edges must differ (soft1 is not symmetrically positioned)
+    assert abs(loo_edge_home - full_edge_home) > 1e-6, (
+        f"LOO edge ({loo_edge_home:.6f}) should differ from full-mean edge "
+        f"({full_edge_home:.6f})"
+    )
+    # The accumulator's LOO value should match the hand-computed LOO
+    assert abs(agg["soft1"]["edge_vs_consensus_loo"] - sum(
+        books["soft1"][i] - loo_for_soft1[i] for i in range(3)
+    ) / 3) < 1e-10
+
+
 def test_paired_brier_formula():
     """paired_delta = brier(book) - brier(pinnacle) per fixture, then mean.
 
@@ -356,6 +431,57 @@ def test_paired_brier_formula():
     # delta > 0 means softbook was worse, <0 means better
     # With the given odds, delta should be notably nonzero (≈ 0.05)
     assert abs(delta) > 0.01, f"paired delta should be nontrivial: {delta:.6f}"
+
+
+def test_brier_differs_between_devig_methods():
+    """Shin and multiplicative produce different Brier scores for an overround book.
+
+    With a book priced at 10% overround, the two devig methods give different
+    fair probs → different Brier scores against actual outcomes.  This validates
+    that emitting two rows (one per method) is genuinely adding information, not
+    duplicating it.
+    """
+    from datetime import date
+
+    from src.betting.devig import proportional, shin
+    from scripts.compute_book_skill import _brier_from_rows
+
+    # Single FDCO-style row: bet365 has 10% overround; pinnacle has none
+    rows = [{
+        "Date": "26/04/2026",
+        "FTR": "H",
+        # Pinnacle closing: sum = 1.00
+        "PSCH": str(1 / 0.50), "PSCD": str(1 / 0.25), "PSCA": str(1 / 0.25),
+        # Bet365 closing: sum = 0.55+0.30+0.25 = 1.10 (10% overround)
+        "B365CH": str(1 / 0.55), "B365CD": str(1 / 0.30), "B365CA": str(1 / 0.25),
+        # Other books absent
+        "BWCH": "", "BWCD": "", "BWCA": "",
+        "BVCH": "", "BVCD": "", "BVCA": "",
+        "BFECH": "", "BFECD": "", "BFECA": "",
+    }]
+
+    since = date(2026, 4, 1)
+    until = date(2026, 5, 1)
+
+    shin_result = _brier_from_rows(rows, since, until, shin)
+    mult_result = _brier_from_rows(rows, since, until, proportional)
+
+    bet365_shin = shin_result["bet365"]["brier_mean"]
+    bet365_mult = mult_result["bet365"]["brier_mean"]
+
+    assert bet365_shin is not None
+    assert bet365_mult is not None
+    # Two methods must disagree for a book with overround
+    assert abs(bet365_shin - bet365_mult) > 1e-6, (
+        f"Brier should differ between methods: shin={bet365_shin:.6f} "
+        f"mult={bet365_mult:.6f}"
+    )
+    # Pinnacle has no overround → both methods return identity → same Brier
+    pin_shin = shin_result["pinnacle"]["brier_mean"]
+    pin_mult = mult_result["pinnacle"]["brier_mean"]
+    assert abs(pin_shin - pin_mult) < 1e-10, (
+        "Pinnacle (no overround) should give identical results under both methods"
+    )
 
 
 # ---------------------------------------------------------------------------

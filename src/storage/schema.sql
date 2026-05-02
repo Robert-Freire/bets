@@ -173,7 +173,9 @@ CREATE TABLE drift (
 -- safe (delete + re-insert).
 --
 -- Migration guard: if the pre-B.0.7 schema exists (no devig_method column),
--- drop and recreate.  Safe because the table is always empty at review time.
+-- drop and recreate.  Safe because the table had no production rows when B.0.7
+-- shipped.  REMOVE THIS GUARD once B.0.7 is confirmed deployed everywhere —
+-- leaving it in permanently would mask a future accidental drop scenario.
 IF OBJECT_ID(N'book_skill', N'U') IS NOT NULL
     AND COL_LENGTH(N'book_skill', N'devig_method') IS NULL
     DROP TABLE book_skill;
