@@ -59,42 +59,21 @@ The two environments now diverge on more than just notifications. Don't apply Pi
 
 ---
 
-## Schedule overview (live, both machines unless flagged)
+## Schedule (cron-only differences from CLAUDE.md)
 
-| UTC | BST | What | Days | Pi | WSL |
-|---|---|---|---|---|---|
-| 07:30 | 08:30 | Football scan | Tue | ✅ | ✅ |
-| 19:30 | 20:30 | Football scan (Fri lineup hints) | Fri | ✅ | ✅ |
-| 10:30 | 11:30 | Football scan (pre-12:30 KO) | Sat | ✅ | ✅ |
-| 16:30 | 17:30 | Football scan (between 15:00 and 17:30 KOs) | Sat | ✅ | ✅ |
-| 12:30 | 13:30 | Football scan (pre-Sun afternoon) | Sun | ✅ | ✅ |
-| 03:00 | 04:00 | `bets.csv` snapshot to `bets.csv.bak.<date>` (14d retention on the **snapshots**; live file never touched) | every day | ✅ | ✅ |
-| 08:00 | 09:00 | FDCO CLV backfill (writes `pinnacle_close_prob` + `clv_pct` to bets/paper rows) | Mon | ✅ | ✅ |
-| 08:00 | 09:00 | `check_sports.py` (sports discovery) | 1st & 15th | ✅ | ✅ |
-| 06:00 | 07:00 | xG refresh (Understat) | Mon | ✅ | ❌ |
-| 10:00 | 11:00 | Research scanner — curated | Mon | ✅ | ❌ |
-| 10:00 | 11:00 | Research scanner — open-search | 1st of month | ✅ | ❌ |
+Full cron schedule lives in CLAUDE.md → "Cron schedule (UTC)". WSL/Pi rows differ on these only:
 
-**Removed from the original plan (per 2026-05-01 trim + CLV source swap):**
-- Closing-line + drift snapshot every 5 min — `closing_line.py` paused; CLV backfilled from FDCO on Monday instead.
-- NBA scans (Mon–Fri 17:00).
-- Tennis scans (Mon, Thu 09:00).
-- Mon + Fri 07:30 football scans (kept Tue 07:30 only — fresh weekly lines after weekend).
+| UTC | What | Days | Pi | WSL |
+|---|---|---|---|---|
+| 06:00 | xG refresh (Understat) | Mon | ✅ | ❌ |
+| 10:00 | Research scanner — curated | Mon | ✅ | ❌ |
+| 10:00 | Research scanner — open-search | 1st of month | ✅ | ❌ |
 
----
+WSL skips these to avoid conflicts on git-tracked outputs (`logs/team_xg.json`, `docs/RESEARCH_FEED.md`).
 
-## CLV source change — what to expect this weekend
+CLV details: see CLAUDE.md → "CLV diagnostics". First populated `pinnacle_close_prob` cells appear ~08:30 UTC Mon after FDCO backfill — don't pre-judge "no edge" from Sunday's empty CLV column.
 
-`closing_line.py` is **paused** (not deleted; revert path documented in memory `project_clv_source_swap_2026_05`). CLV now comes from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5) via `scripts/backfill_clv_from_fdco.py` on Mondays at 08:00 UTC.
-
-**Practical implications for this weekend's eval:**
-- **No live drift tracking.** `logs/drift.csv` is frozen as of 2026-05-01. T-60 / T-15 / T-1 capture is gone.
-- **CLV won't be visible Sat/Sun.** First populated `pinnacle_close_prob` cells appear ~08:30 UTC Monday after the FDCO backfill cron fires. Don't pre-judge "no edge" from Sunday's empty CLV column.
-- **CLV scope = active config leagues (FDCO-covered).** WSL/dev: top-7 (6 prod + La Liga via SP1). Pi/prod: top-6 (EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2). Anything outside (NBA, tennis — none scanned this weekend; BTTS — 0 bets historically) gets no CLV ever.
-- **Totals: 2.5 line only.** FDCO doesn't publish other totals. Already aligned with our market mix.
-- **+1 day delay vs at-close.** Fine for weekly review, useless for live monitoring. We accepted this tradeoff to stay under the 500/mo Odds API budget.
-
-**Manual smoke for the FDCO backfill** (if you want to fire it before Monday cron, e.g. on Sunday evening):
+**Manual FDCO smoke (Sun eve, before Mon cron):**
 
 ```bash
 # WSL — dry run, no mutation
@@ -209,18 +188,6 @@ ssh robert@192.168.0.28 'crontab -l | grep -cE "scan_odds|backfill_clv"'        
 
 ---
 
-## Known limitations (don't interpret as bugs)
-
-- **CLV is delayed by 1 day** — populated by Mon 08:00 FDCO backfill, not at-close. Don't expect Sat/Sun CLV.
-- **`logs/drift.csv` is frozen** — closing-line script paused; T-60/T-15/T-1 captures will not grow this weekend. Existing rows are historical only.
-- **No CLV outside config-active football leagues** — NBA + tennis already not scanned this weekend; BTTS bets historically 0. WSL gets La Liga CLV (SP1 now in backfill); Pi does not (config.json has 6 leagues).
-- **WSL gaps when laptop sleeps** — acceptable; Pi covers production reliability.
-- **Pre-R.11 paper rows have empty `strategy_config_hash`** — own "pre-R.11 / WSL-test" eval window. `compare_strategies.py` default filters them out; pass `--all-history` to include.
-- **Pi data not visible in the Azure dashboard yet** — A.10 (Pi onboarding) handles that; runs in its own future sprint.
-- **Azure SQL serverless auto-pause = 60 min** — first dashboard hit after idle takes ~5–15 s while the DB resumes. Expected.
-
----
-
 ## Post-weekend cleanup checklist
 
 - [ ] **Monday morning:** write up post-mortem in **Live evaluation log** above with CLV stats per variant (after FDCO backfill fires at 08:00 UTC).
@@ -244,9 +211,34 @@ PR #17 (`market-coverage-m0-m2-2026-05`) merged to main 2026-05-01 with M.0–M.
 - Pi scan log shows any 401 / quota / paper-schema-loop / new-error pattern over the weekend → diagnose first; do not pull a config-loader change onto a wedged Pi.
 - Post-mortem flags any divergence > 20% in WSL vs Pi paper-bet counts per variant → treat the same way; understand divergence first.
 
-**Action if pulling:**
+**Pre-pull: migrate Pi's CSV history into Azure SQL.** `cc3c2c3` (2026-05-02) untracks `logs/bets.csv` + `logs/paper/*.csv`. The commit is non-destructive on pull — `git rm --cached` only removes from the index, working-tree files stay — but Pi has never dual-written (A.4 is WSL-only), so Pi's accumulated CSV history is currently orphaned from the new authoritative store. Close that gap *before* the pull so any future cutover (A.8/A.9) starts from a complete SQL state.
+
+```bash
+# 1. Belt-and-braces backup of Pi's live CSVs (independent of git)
+ssh robert@192.168.0.28 'cd ~/projects/bets && mkdir -p logs/preuntrack && cp logs/bets.csv logs/preuntrack/ && cp logs/paper/*.csv logs/preuntrack/ && ls -la logs/preuntrack/'
+
+# 2. Stage Pi's Azure SQL credentials in a TEMP env file (do NOT add BETS_DB_WRITE to Pi's .env yet — that's A.10).
+#    Migration runs as a one-shot from the WSL .env.dev DSN; avoids touching Pi's permanent config.
+scp .env.dev robert@192.168.0.28:/tmp/.env.migrate
+ssh robert@192.168.0.28 'cd ~/projects/bets && export $(grep -E "AZURE_SQL|BETS_DB" /tmp/.env.migrate) && .venv/bin/python3 scripts/migrate_csv_to_db.py --dry-run 2>&1 | tail -30'
+# Inspect the dry-run output: row counts per CSV, expected inserts, dedup hits.
+
+# 3. Real run (idempotent — deterministic UUID5 keys, safe to re-run)
+ssh robert@192.168.0.28 'cd ~/projects/bets && export $(grep -E "AZURE_SQL|BETS_DB" /tmp/.env.migrate) && .venv/bin/python3 scripts/migrate_csv_to_db.py 2>&1 | tail -30'
+
+# 4. Wipe the temp env file (contains the SQL admin password)
+ssh robert@192.168.0.28 'shred -u /tmp/.env.migrate'
+
+# 5. Verify SQL row counts now reflect Pi + WSL combined
+DSN=$(az keyvault secret show --vault-name kaunitz-dev-kv-rfk1 --name sql-dsn --query value -o tsv)
+DSN="$DSN" python3 -c "import pyodbc, os; c=pyodbc.connect(os.environ['DSN']); cur=c.cursor(); cur.execute('SELECT COUNT(*) FROM bets'); print('DB bets:', cur.fetchone()[0]); cur.execute('SELECT COUNT(*) FROM paper_bets'); print('DB paper:', cur.fetchone()[0])"
+```
+
+**Action if pulling (after migration succeeds):**
 ```bash
 ssh robert@192.168.0.28 'cd ~/projects/bets && git fetch && git log --oneline HEAD..origin/main && git pull && .venv/bin/pytest -q'
+# Confirm Pi's local CSVs survived the pull (git rm --cached should not touch the working tree)
+ssh robert@192.168.0.28 'wc -l ~/projects/bets/logs/bets.csv ~/projects/bets/logs/paper/*.csv'
 # Verify markets=h2h is what Pi will request next
 ssh robert@192.168.0.28 'grep -n "markets" ~/projects/bets/scripts/scan_odds.py | head -5'
 # Confirm config.json leagues array loads
@@ -381,93 +373,3 @@ The dispersion + Brier scripts are point-in-time tools. To **continuously refine
 4. Scanner picks up new weights on next scan.
 
 **After 4-6 weeks** of snapshots, the deriver has enough history that recommendations stabilise. The pattern is **build initial weights from current evidence; refine continuously as more arrives**. No book stays mis-weighted for long, no weight is locked in based on one weekend's data.
-
----
-
-## Strategic direction for next week (decided 2026-05-01)
-
-Beyond the immediate D.1–D.6 decisions, the conversation that produced this section also clarified the *shape* of the next week. Capturing it here so the post-mortem doesn't reconstruct context.
-
-### Core insight: dispersion is opportunity, *if* the disagreement is structured
-
-Previously the dispersion filter (`MAX_DISPERSION = 0.04`) was treated as a binary "trust this market or skip it." That framing rejects La Liga (p95 = 0.083). But high dispersion can mean three different things:
-
-| Shape | Books look like | Implication |
-|---|---|---|
-| Unimodal-tight | Bell curve, narrow | Flat consensus is fine |
-| **Bimodal** | **Two distinct peaks** | **Sharp-weighted consensus wins big — the soft cluster is visibly wrong** |
-| No-structure | Wide flat distribution | Avoid; no method recovers signal |
-
-La Liga's 0.083 dispersion could be any of these and we don't currently know which. **If it's bimodal with a persistent sharp/soft split, La Liga becomes the league where sharp-weighting has its biggest *relative* advantage** — exactly because the flat-consensus method (which currently filters it out) is the wrong tool for it.
-
-The 16-paper-variant infrastructure already encodes the sharp-weighted hypothesis: `D_pinnacle_only`, `J_sharp_weighted`, `E_exchanges_only`, `H_no_pinnacle`. They've been running in shadow but lack CLV data to validate. The dispersion-shape diagnostic gives us an *a priori* prediction of which leagues these variants should outperform on, before we have settled bets.
-
-### Weekly cadence (Mon → Sun)
-
-Driven by the strategic insight above. M.7 (the diagnostic) lands first; M.6 (the mechanism for per-league weight overrides) reads M.7's output; M.4 (dev sandbox) ties them together with the AH probe.
-
-| Day | PR / Action | What |
-|---|---|---|
-| **Mon 2026-05-04** | Post-mortem + PR #17 → Pi (D.1) | Confirm weekend was clean; pull PR #17 onto Pi. |
-| **Mon afternoon** | M.3 PR | Add La Liga 2 + Eredivisie + Primeira + Ligue 2 to prod `config.json` (D.2). Keep prod boring. |
-| **Tue** | M.7 PR | `scripts/analyse_dispersion.py` + `docs/DISPERSION_SHAPES_2026-05.md`. Run on all 11 leagues. ~22 cr cost. **Output dictates the shape verdict per league** — drives everything downstream. |
-| **Wed** | M.6 PR | `book_weights` schema in `config.json`. Refactor `J_sharp_weighted` to read from config. Add `J2_sharp_weighted_per_league` (same code, different config). Backwards-compatible: absent block → flat consensus. |
-| **Thu** | M.4 PR | `config.dev.json` with `extra_markets=["spreads"]` on top-4 leagues, La Liga added to dev set with M.7-derived weights, `Q_asian_handicap` variant, WSL cron 5 → 3 scans/wk. Per-league `extra_markets` override extends M.2 schema. |
-| **Fri** | Soak | Don't touch. Let dev cron run Fri evening. |
-| **Sat–Sun** | First experimental weekend | All four variants (`A`, `J`, `J2`, `D`) run on La Liga + AH on top-4 in parallel. |
-
-This sequence lets prod stay frozen on the M.0 + M.3 baseline while dev becomes a structured laboratory. The four variants' CLV on La Liga answers two questions at once: (a) is sharp-weighting the right method for high-dispersion leagues, (b) does La Liga belong in prod under any method.
-
-### What "configurable book weights" means concretely
-
-Today's `J_sharp_weighted` has hardcoded weights inside `src/betting/strategies.py`. M.6 moves them to `config.json` with this resolution order:
-
-1. `book_weights.by_league[league][book]` if present
-2. else `book_weights.by_market[market][book]` if present
-3. else `book_weights.default[book]` if present
-4. else `book_weights.default["*"]`
-5. else `1.0` (flat-consensus fallback)
-
-This makes Pi (`config.json`) and WSL (`config.dev.json`) able to run the same `J_sharp_weighted` code with different weighting policies. M.4's dev experiment uses the per-league overrides; Pi keeps the simpler global weights until evidence forces a flip in M.5.
-
-### Dispersion shape — what M.7 produces
-
-For each fixture × outcome with ≥10 books:
-- Classify each book into `low_cluster` / `centre` / `high_cluster` using median ± 1.5·MAD.
-- Determine shape (unimodal-tight / unimodal-fat / bimodal / no-structure).
-
-For each league:
-- Distribution of shapes (% of fixtures × outcomes).
-- Per-book cluster-membership tally across all fixtures.
-- **Cluster persistence score** (Spearman correlation): are the same books always in the "low" cluster?
-
-Decision rule from the persistence score:
-- ≥ 0.6 → structural sharp/soft split → **add with sharp-weighting** (prod or dev based on other criteria)
-- 0.3–0.6 → some structure, marginal → **dev only**
-- < 0.3 → noise → **drop the league**
-
-### What this changes about La Liga specifically
-
-La Liga today is excluded from prod for p95 dispersion 0.083. The right test is **not** "is dispersion below 0.04" but **does La Liga's dispersion form a stable sharp/soft cluster, and does sharp-weighted consensus produce positive CLV on it.**
-
-M.7 answers question 1 with no further bets needed. M.4 starts answering question 2 by running La Liga in dev with `J2_sharp_weighted_per_league` for 4–6 weekends. M.5 makes the graduation call.
-
-If M.7 says "no structure" for La Liga, M.4 drops it from dev and the question is settled negatively. If M.7 says "structured," La Liga becomes the canonical use case for the sharp-weighted variants.
-
-### Out of scope for next week
-
-- **Per-league per-book sharpness from historical CLV.** Needs ≥ 50 settled bets per book per league. Won't have that data for months.
-- **Hierarchical / Bayesian shape models.** M.7 starts simple (Spearman); upgrade only if the simple metric is too noisy.
-- **Production AH-CLV pipeline.** R.10 territory; blocked on the dev probe producing initial CLV signal.
-- **Paid Odds API tier.** Unchanged trigger: ≥50 settled bets with positive average CLV on at least one paper variant.
-
-### The hierarchy of "out of scope" if this week slips
-
-If only some phases land, prioritise in this order:
-1. **D.1 (Pi pull)** — must happen unless something is genuinely broken.
-2. **M.3 (prod leagues)** — small, low-risk, immediate budget realisation.
-3. **M.7 (dispersion shape)** — diagnostic; cheap; informs everything downstream.
-4. **M.6 (configurable weights)** — refactor; backwards-compatible; can land independently.
-5. **M.4 (dev sandbox)** — biggest piece; can slip a week without losing the thread.
-
-If D.1 and M.3 land but the rest slips, that's still a successful week — prod is in a better place and dev can wait.
