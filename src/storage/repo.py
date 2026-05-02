@@ -691,15 +691,20 @@ class BetRepo:
     # --- book_skill (B.0) -----------------------------------------------------
 
     _BOOK_SKILL_COLS = (
-        "book", "league", "market", "window_end", "n_fixtures",
-        "brier_vs_close", "brier_vs_outcome", "log_loss",
+        "book", "league", "market", "window_end", "devig_method", "n_fixtures",
+        "n_fixtures_source",
+        "brier_vs_close",
+        "brier_vs_outcome", "brier_vs_outcome_ci_low", "brier_vs_outcome_ci_high",
+        "brier_paired_vs_pinnacle", "brier_paired_ci_low", "brier_paired_ci_high",
+        "log_loss", "log_loss_ci_low", "log_loss_ci_high",
         "fav_longshot_slope", "home_bias", "draw_bias",
         "flag_rate", "mean_flag_edge",
-        "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
-        "truth_anchor", "n_fixtures_source",
+        "edge_vs_consensus_loo", "edge_vs_pinnacle", "divergence",
+        "truth_anchor",
     )
     _BOOK_SKILL_STR_COLS = frozenset(
-        {"book", "league", "market", "window_end", "truth_anchor", "n_fixtures_source"}
+        {"book", "league", "market", "window_end", "devig_method",
+         "truth_anchor", "n_fixtures_source"}
     )
 
     def write_book_skill(self, rows: list[dict]) -> None:
@@ -720,10 +725,12 @@ class BetRepo:
                 league = row.get("league") or ""
                 market = row.get("market") or "h2h"
                 window_end = row.get("window_end") or ""
+                devig_method = row.get("devig_method") or "shin"
                 cur.execute(
                     "DELETE FROM book_skill "
-                    "WHERE book = ? AND league = ? AND market = ? AND window_end = ?",
-                    (book, league, market, window_end),
+                    "WHERE book = ? AND league = ? AND market = ? "
+                    "AND window_end = ? AND devig_method = ?",
+                    (book, league, market, window_end, devig_method),
                 )
                 vals: list = []
                 for c in self._BOOK_SKILL_COLS:

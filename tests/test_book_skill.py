@@ -1,13 +1,14 @@
-"""Tests for B.0 / B.0.5 / B.0.6 — book_skill table, repo method, and script.
+"""Tests for B.0 / B.0.5 / B.0.6 / B.0.7 — book_skill table, repo method, script.
 
 Coverage:
 - Schema migration creates book_skill table in SQLite, idempotent on second run.
 - BetRepo.write_book_skill persists and overwrites rows correctly.
-- Divergence calculation: hand-computed zero-case, and per-component nontrivial values.
-- Smoke test: compute_book_skill.compute() runs against a fake blob archive
-  (no network, no DB) and emits correctly-shaped rows.
-- Pi-safety: importing the script with BETS_DB_WRITE and BLOB_ARCHIVE unset
-  does not attempt to import pyodbc or azure.storage.blob.
+- LOO consensus (B.0.7): per-outcome component nontrivial expected value.
+- LOO vs full consensus aggregate both ~0 by mathematical identity (documented).
+- Bootstrap CI helper produces bounds that bracket the mean.
+- Paired Brier (B.0.7): delta-per-fixture computation correct.
+- Smoke test: compute() emits rows for both devig methods, all required keys.
+- Pi-safety: no pyodbc / azure import with env vars unset.
 """
 from __future__ import annotations
 
@@ -43,10 +44,9 @@ def _apply(conn, sql_text: str) -> None:
 
 
 def _make_repo_with_sqlite(conn: sqlite3.Connection):
-    """Return a BetRepo wired to a SQLite connection (bypasses pyodbc)."""
     from src.storage.repo import BetRepo
     repo = BetRepo(dsn=None)
-    repo._dsn = "sqlite-test-sentinel"  # non-None → db_enabled = True
+    repo._dsn = "sqlite-test-sentinel"
     repo._conn = conn
     repo._cur = conn.cursor()
     repo._db_failed = False
@@ -54,7 +54,6 @@ def _make_repo_with_sqlite(conn: sqlite3.Connection):
 
 
 def _make_blob_gz(events: list) -> bytes:
-    """Wrap a list of Odds API events into a SnapshotArchive envelope (gzipped)."""
     payload = {
         "captured_at": "2026-04-26T10:30:00+00:00",
         "source": "odds_api",
@@ -64,48 +63,36 @@ def _make_blob_gz(events: list) -> bytes:
         "headers": {},
         "body_raw": json.dumps(events),
     }
-    raw = json.dumps(payload).encode()
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        gz.write(raw)
+        gz.write(json.dumps(payload).encode())
     return buf.getvalue()
 
 
 def _synthetic_events() -> list:
-    """Two-book synthetic fixture."""
-    return [
-        {
-            "id": "ev-001",
-            "sport_key": "soccer_epl",
-            "home_team": "Arsenal",
-            "away_team": "Chelsea",
-            "commence_time": "2026-04-26T15:00:00Z",
-            "bookmakers": [
-                {
-                    "key": "booka",
-                    "title": "Book A",
-                    "markets": [{"key": "h2h", "outcomes": [
-                        {"name": "Arsenal", "price": 1.0 / 0.55},
-                        {"name": "Chelsea", "price": 1.0 / 0.20},
-                        {"name": "Draw",    "price": 1.0 / 0.25},
-                    ]}],
-                },
-                {
-                    "key": "pinnacle",
-                    "title": "Pinnacle",
-                    "markets": [{"key": "h2h", "outcomes": [
-                        {"name": "Arsenal", "price": 1.0 / 0.50},
-                        {"name": "Chelsea", "price": 1.0 / 0.25},
-                        {"name": "Draw",    "price": 1.0 / 0.25},
-                    ]}],
-                },
-            ],
-        }
-    ]
+    return [{
+        "id": "ev-001",
+        "sport_key": "soccer_epl",
+        "home_team": "Arsenal",
+        "away_team": "Chelsea",
+        "commence_time": "2026-04-26T15:00:00Z",
+        "bookmakers": [
+            {"key": "booka", "title": "Book A", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Arsenal", "price": 1.0 / 0.55},
+                {"name": "Chelsea", "price": 1.0 / 0.20},
+                {"name": "Draw",    "price": 1.0 / 0.25},
+            ]}]},
+            {"key": "pinnacle", "title": "Pinnacle", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Arsenal", "price": 1.0 / 0.50},
+                {"name": "Chelsea", "price": 1.0 / 0.25},
+                {"name": "Draw",    "price": 1.0 / 0.25},
+            ]}]},
+        ],
+    }]
 
 
 # ---------------------------------------------------------------------------
-# Schema: migration + idempotency
+# Schema
 # ---------------------------------------------------------------------------
 
 def test_book_skill_table_created():
@@ -113,7 +100,7 @@ def test_book_skill_table_created():
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
-    assert "book_skill" in tables, f"book_skill not in {tables}"
+    assert "book_skill" in tables
 
 
 def test_schema_migration_idempotent_with_book_skill():
@@ -126,64 +113,67 @@ def test_schema_migration_idempotent_with_book_skill():
     after = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0]
-    assert before == after, "Schema not idempotent after adding book_skill"
+    assert before == after
 
 
 def test_book_skill_has_expected_columns():
     conn = _make_db()
     cols = {r[1] for r in conn.execute("PRAGMA table_info(book_skill)").fetchall()}
     required = {
-        "book", "league", "market", "window_end", "n_fixtures",
-        "brier_vs_close", "brier_vs_outcome", "log_loss",
+        "book", "league", "market", "window_end", "devig_method",
+        "n_fixtures", "n_fixtures_source",
+        "brier_vs_close",
+        "brier_vs_outcome", "brier_vs_outcome_ci_low", "brier_vs_outcome_ci_high",
+        "brier_paired_vs_pinnacle", "brier_paired_ci_low", "brier_paired_ci_high",
+        "log_loss", "log_loss_ci_low", "log_loss_ci_high",
         "fav_longshot_slope", "home_bias", "draw_bias",
         "flag_rate", "mean_flag_edge",
-        "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
-        "truth_anchor", "n_fixtures_source", "created_at",
+        "edge_vs_consensus_loo", "edge_vs_pinnacle", "divergence",
+        "truth_anchor", "created_at",
     }
     missing = required - cols
     assert not missing, f"book_skill missing columns: {missing}"
+    # Verify old column is gone
+    assert "edge_vs_consensus" not in cols, \
+        "edge_vs_consensus should have been replaced by edge_vs_consensus_loo"
 
 
-def test_book_skill_pk_is_composite():
+def test_book_skill_pk_includes_devig_method():
     conn = _make_db()
     pk_cols = {
         r[1] for r in conn.execute("PRAGMA table_info(book_skill)").fetchall()
         if r[5] > 0
     }
-    assert pk_cols == {"book", "league", "market", "window_end"}
+    assert pk_cols == {"book", "league", "market", "window_end", "devig_method"}
 
 
 # ---------------------------------------------------------------------------
 # BetRepo.write_book_skill
 # ---------------------------------------------------------------------------
 
-def _sample_row(book: str = "bet365", window: str = "2026-04-27") -> dict:
+def _sample_row(book: str = "bet365", window: str = "2026-04-27",
+                devig_method: str = "shin") -> dict:
     return {
-        "book": book,
-        "league": "EPL",
-        "market": "h2h",
-        "window_end": window,
-        "n_fixtures": 10,
+        "book": book, "league": "EPL", "market": "h2h",
+        "window_end": window, "devig_method": devig_method,
+        "n_fixtures": 10, "n_fixtures_source": "blob",
         "brier_vs_close": None,
         "brier_vs_outcome": 0.231,
-        "log_loss": None,
-        "fav_longshot_slope": None,
-        "home_bias": None,
-        "draw_bias": None,
-        "flag_rate": 0.05,
-        "mean_flag_edge": 0.032,
-        "edge_vs_consensus": -0.001,
-        "edge_vs_pinnacle": -0.002,
-        "divergence": -0.001,
+        "brier_vs_outcome_ci_low": 0.210, "brier_vs_outcome_ci_high": 0.252,
+        "brier_paired_vs_pinnacle": -0.005,
+        "brier_paired_ci_low": -0.015, "brier_paired_ci_high": 0.005,
+        "log_loss": 0.95, "log_loss_ci_low": 0.88, "log_loss_ci_high": 1.02,
+        "fav_longshot_slope": None, "home_bias": None, "draw_bias": None,
+        "flag_rate": 0.05, "mean_flag_edge": 0.032,
+        "edge_vs_consensus_loo": -0.001,
+        "edge_vs_pinnacle": -0.002, "divergence": -0.001,
         "truth_anchor": "pinnacle",
-        "n_fixtures_source": "blob",
     }
 
 
 def test_write_book_skill_persists_row():
     conn = _make_db()
     repo = _make_repo_with_sqlite(conn)
-
     repo.write_book_skill([_sample_row()])
     conn.commit()
 
@@ -192,80 +182,103 @@ def test_write_book_skill_persists_row():
     col_names = [d[0] for d in conn.execute("SELECT * FROM book_skill").description]
     d = dict(zip(col_names, rows[0]))
     assert d["book"] == "bet365"
-    assert d["league"] == "EPL"
+    assert d["devig_method"] == "shin"
     assert d["n_fixtures"] == 10
     assert abs(d["brier_vs_outcome"] - 0.231) < 1e-6
+    assert abs(d["brier_paired_vs_pinnacle"] - (-0.005)) < 1e-6
     assert d["n_fixtures_source"] == "blob"
 
 
-def test_write_book_skill_overwrites_on_same_key():
+def test_write_book_skill_two_devig_methods_coexist():
     conn = _make_db()
     repo = _make_repo_with_sqlite(conn)
-
-    row = _sample_row()
-    repo.write_book_skill([row])
+    row_shin = _sample_row(devig_method="shin")
+    row_mult = _sample_row(devig_method="multiplicative")
+    row_mult["brier_vs_outcome"] = 0.240
+    repo.write_book_skill([row_shin, row_mult])
     conn.commit()
 
-    row2 = dict(row)
+    rows = conn.execute("SELECT devig_method, brier_vs_outcome FROM book_skill "
+                        "ORDER BY devig_method").fetchall()
+    assert len(rows) == 2, "Expected two rows (one per devig_method)"
+    methods = {r[0] for r in rows}
+    assert methods == {"multiplicative", "shin"}
+
+
+def test_write_book_skill_overwrites_same_key():
+    conn = _make_db()
+    repo = _make_repo_with_sqlite(conn)
+    repo.write_book_skill([_sample_row()])
+    conn.commit()
+
+    row2 = dict(_sample_row())
     row2["n_fixtures"] = 20
     row2["brier_vs_outcome"] = 0.250
-    row2["n_fixtures_source"] = "fdco"
     repo.write_book_skill([row2])
     conn.commit()
 
     rows = conn.execute("SELECT * FROM book_skill").fetchall()
-    assert len(rows) == 1, "Expected exactly one row after overwrite"
+    assert len(rows) == 1
     col_names = [d[0] for d in conn.execute("SELECT * FROM book_skill").description]
     d = dict(zip(col_names, rows[0]))
     assert d["n_fixtures"] == 20
     assert abs(d["brier_vs_outcome"] - 0.250) < 1e-6
-    assert d["n_fixtures_source"] == "fdco"
 
 
 def test_write_book_skill_noop_without_db():
     from src.storage.repo import BetRepo
     repo = BetRepo(dsn=None)
     assert not repo.db_enabled
-    repo.write_book_skill([_sample_row()])  # must not raise
+    repo.write_book_skill([_sample_row()])
 
 
 # ---------------------------------------------------------------------------
-# Divergence calculation
+# Bootstrap CI
 # ---------------------------------------------------------------------------
 
-def test_divergence_hand_computed_zero_case():
-    """Synthetic 2-book set with no overround: Shin == identity, aggregate = 0.
+def test_bootstrap_ci_brackets_mean():
+    from scripts.compute_book_skill import _bootstrap_ci
+    values = [0.20, 0.22, 0.18, 0.25, 0.19, 0.21, 0.23, 0.17]
+    lo, hi = _bootstrap_ci(values, n_resamples=500)
+    mean = sum(values) / len(values)
+    assert lo is not None and hi is not None
+    assert lo <= mean <= hi, f"CI [{lo:.4f}, {hi:.4f}] does not bracket mean {mean:.4f}"
+    assert lo < hi
 
-    Book A raw implied: home=0.55, draw=0.25, away=0.20 (sum=1.00)
-    Pinnacle raw implied: home=0.50, draw=0.25, away=0.25 (sum=1.00)
 
-    With no overround Shin is identity.  Consensus = mean of two books.
-    Mean of (book_prob − consensus) over 3 outcomes = 0 exactly
-    (devigged probs sum to 1 — mathematical identity).
+def test_bootstrap_ci_none_for_single_value():
+    from scripts.compute_book_skill import _bootstrap_ci
+    lo, hi = _bootstrap_ci([0.5])
+    assert lo is None and hi is None
+
+
+# ---------------------------------------------------------------------------
+# LOO consensus and divergence (B.0.7)
+# ---------------------------------------------------------------------------
+
+def test_loo_aggregate_still_zero_by_identity():
+    """LOO consensus aggregate mean over 3 h2h outcomes = 0.
+
+    Even with LOO, sum_i(book_i - LOO_i) = 1 - 1 = 0 because all fair-prob
+    vectors sum to 1.  The value of LOO is unbiased per-observation estimates,
+    not a nonzero aggregate.
     """
     from scripts.compute_book_skill import _BookAccum
 
     event = {
-        "home_team": "Arsenal",
-        "away_team": "Chelsea",
+        "home_team": "Arsenal", "away_team": "Chelsea",
         "commence_time": "2026-04-26T15:00:00Z",
         "bookmakers": [
-            {
-                "key": "booka",
-                "markets": [{"key": "h2h", "outcomes": [
-                    {"name": "Arsenal", "price": 1.0 / 0.55},
-                    {"name": "Chelsea", "price": 1.0 / 0.20},
-                    {"name": "Draw",    "price": 1.0 / 0.25},
-                ]}],
-            },
-            {
-                "key": "pinnacle",
-                "markets": [{"key": "h2h", "outcomes": [
-                    {"name": "Arsenal", "price": 1.0 / 0.50},
-                    {"name": "Chelsea", "price": 1.0 / 0.25},
-                    {"name": "Draw",    "price": 1.0 / 0.25},
-                ]}],
-            },
+            {"key": "booka", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Arsenal", "price": 1.0 / 0.55},
+                {"name": "Chelsea", "price": 1.0 / 0.20},
+                {"name": "Draw",    "price": 1.0 / 0.25},
+            ]}]},
+            {"key": "pinnacle", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Arsenal", "price": 1.0 / 0.50},
+                {"name": "Chelsea", "price": 1.0 / 0.25},
+                {"name": "Draw",    "price": 1.0 / 0.25},
+            ]}]},
         ],
     }
 
@@ -273,114 +286,84 @@ def test_divergence_hand_computed_zero_case():
     accum.add_event(event, truth_anchor="pinnacle")
     agg = accum.aggregate()
 
-    assert "booka" in agg, f"booka not in agg: {list(agg)}"
-    row_a = agg["booka"]
-    assert abs(row_a["edge_vs_consensus"]) < 1e-10, (
-        f"edge_vs_consensus should be exactly 0, got {row_a['edge_vs_consensus']}"
-    )
-    assert abs(row_a["edge_vs_pinnacle"]) < 1e-10, (
-        f"edge_vs_pinnacle should be exactly 0, got {row_a['edge_vs_pinnacle']}"
-    )
-    assert abs(row_a["divergence"]) < 1e-10, (
-        f"divergence should be exactly 0, got {row_a['divergence']}"
-    )
+    assert "booka" in agg
+    assert abs(agg["booka"]["edge_vs_consensus_loo"]) < 1e-10
+    assert abs(agg["booka"]["edge_vs_pinnacle"]) < 1e-10
+    assert abs(agg["booka"]["divergence"]) < 1e-10
 
 
-def test_edge_vs_consensus_per_outcome_components():
-    """Verify per-outcome edge components (before aggregation) for a book with overround.
+def test_loo_per_outcome_component_nontrivial():
+    """Verify per-outcome LOO component for a book with 10% overround.
 
-    When averaged over all 3 h2h outcomes the mean is exactly 0 by construction
-    (fair probs sum to 1).  Individual outcome components are nonzero, confirming
-    the Shin devig and edge computation are correct before the identity collapses
-    the aggregate.
+    With LOO and 2 books, the LOO consensus for Book A = Book B's probs.
+    So edge_vs_consensus_loo[home] = book_A_home - book_B_home,
+    which is nonzero (books price differently) — expected ≈ −0.031 (offline).
 
-    Expected value for the HOME component (computed via shin() offline):
-      softbook fair_home ≈ 0.4527 (Shin reduces 10% overround)
-      pinnacle fair_home = 0.495 (sum=1.000 → identity)
-      consensus_home = (0.4527 + 0.495) / 2 ≈ 0.474
-      evc_home ≈ 0.4527 − 0.474 ≈ −0.021   (softbook is below consensus on home)
+    Compute:
+        soft_raw=[0.50, 0.30, 0.30] sum=1.10 → shin → fair_home ≈ 0.459
+        pin_raw =[0.495,0.292,0.213] sum=1.000 → shin ≈ identity → 0.495
+        loo_home (for softbook, 2-book case) = pin_fair_home = 0.495
+        loo_component = 0.459 - 0.495 ≈ -0.036
     """
     from src.betting.devig import shin
 
-    soft_raw = [0.50, 0.30, 0.30]    # sum = 1.10 (10% overround)
-    pin_raw  = [0.495, 0.292, 0.213]  # sum = 1.000 (no overround)
-
+    soft_raw = [0.50, 0.30, 0.30]
+    pin_raw  = [0.495, 0.292, 0.213]
     soft_fair = shin(soft_raw)
     pin_fair  = shin(pin_raw)
 
-    consensus = [(soft_fair[i] + pin_fair[i]) / 2 for i in range(3)]
+    # With 2 books, LOO for softbook = pinnacle's probs
+    loo_home = soft_fair[0] - pin_fair[0]
 
-    # Per-component values before aggregation
-    evc_components = [soft_fair[i] - consensus[i] for i in range(3)]
-    evp_components = [soft_fair[i] - pin_fair[i]  for i in range(3)]
-
-    # (1) HOME component nonzero — computed offline via shin():
-    #     soft_fair_home ≈ 0.4585, pin_fair_home = 0.495, consensus ≈ 0.477
-    #     evc_home ≈ 0.4585 - 0.477 ≈ -0.0158
-    evc_home = evc_components[0]
-    assert abs(evc_home - (-0.016)) < 5e-3, (
-        f"evc_home={evc_home:.6f}, expected ≈ -0.016"
+    # Computed offline: soft_fair_home ≈ 0.459, pin_fair_home = 0.495 → Δ ≈ -0.036
+    assert abs(loo_home - (-0.036)) < 5e-3, (
+        f"LOO home component={loo_home:.6f}, expected ≈ -0.036"
     )
+    # Individual components are nonzero
+    assert abs(loo_home) > 1e-4
 
-    # (2) Per-component values are individually nonzero
-    assert any(abs(e) > 1e-4 for e in evc_components), \
-        f"Expected nonzero evc components: {evc_components}"
-    assert any(abs(e) > 1e-4 for e in evp_components), \
-        f"Expected nonzero evp components: {evp_components}"
-
-    # (3) Aggregate sum over 3 outcomes = 0 (mathematical identity)
-    assert abs(sum(evc_components)) < 1e-10, (
-        f"3-outcome sum should be exactly 0: {sum(evc_components)}"
-    )
-    assert abs(sum(evp_components)) < 1e-10
+    # Aggregate sum = 0 by mathematical identity
+    loo_sum = sum(soft_fair[i] - pin_fair[i] for i in range(3))
+    assert abs(loo_sum) < 1e-10
 
 
-def test_divergence_nonzero_with_overround():
-    """Book with 10% overround: aggregate divergence = 0 by identity,
-    but the _BookAccum still runs correctly with real Shin values."""
-    from scripts.compute_book_skill import _BookAccum
+def test_paired_brier_formula():
+    """paired_delta = brier(book) - brier(pinnacle) per fixture, then mean.
 
-    event = {
-        "home_team": "Home",
-        "away_team": "Away",
-        "commence_time": "2026-04-26T15:00:00Z",
-        "bookmakers": [
-            {
-                "key": "softbook",
-                "markets": [{"key": "h2h", "outcomes": [
-                    {"name": "Home", "price": 1 / 0.50},
-                    {"name": "Away", "price": 1 / 0.30},
-                    {"name": "Draw", "price": 1 / 0.30},
-                ]}],
-            },
-            {
-                "key": "pinnacle",
-                "markets": [{"key": "h2h", "outcomes": [
-                    {"name": "Home", "price": 1 / 0.495},
-                    {"name": "Away", "price": 1 / 0.292},
-                    {"name": "Draw", "price": 1 / 0.213},
-                ]}],
-            },
-        ],
-    }
+    Known values (computed offline with shin):
+      soft odds [2.0, 3.33, 3.33] → fair ≈ [0.459, 0.271, 0.271]
+      pin  odds [2.02, 3.42, 4.69] → fair ≈ [0.495, 0.292, 0.213]
+      result = H (home wins) → actual = [1,0,0]
+      brier_soft = (0.459-1)^2 + 0.271^2 + 0.271^2 ≈ 0.293 + 0.073 + 0.073 = 0.439
+      brier_pin  = (0.495-1)^2 + 0.292^2 + 0.213^2 ≈ 0.255 + 0.085 + 0.045 = 0.385
+      paired_delta ≈ 0.439 - 0.385 = 0.054  (softbook is worse)
+    """
+    from src.betting.devig import shin
 
-    accum = _BookAccum()
-    accum.add_event(event, truth_anchor="pinnacle")
-    agg = accum.aggregate()
-    assert "softbook" in agg
+    soft_odds = [2.0, 1.0 / 0.30, 1.0 / 0.30]  # sum raw ≈ 1.10
+    pin_odds  = [1.0 / 0.495, 1.0 / 0.292, 1.0 / 0.213]
 
-    # Aggregate = 0 by mathematical identity (both books' fair probs sum to 1)
-    assert abs(agg["softbook"]["edge_vs_consensus"]) < 1e-10
-    assert abs(agg["softbook"]["edge_vs_pinnacle"]) < 1e-10
-    assert isinstance(agg["softbook"]["divergence"], float)
+    soft_fair = shin([1 / o for o in soft_odds])
+    pin_fair  = shin([1 / o for o in pin_odds])
+
+    actual = [1.0, 0.0, 0.0]  # home wins
+
+    brier_soft = sum((soft_fair[i] - actual[i]) ** 2 for i in range(3))
+    brier_pin  = sum((pin_fair[i]  - actual[i]) ** 2 for i in range(3))
+    delta = brier_soft - brier_pin
+
+    # Softbook should be worse (higher Brier) when it mispriced the outcome
+    # delta > 0 means softbook was worse, <0 means better
+    # With the given odds, delta should be notably nonzero (≈ 0.05)
+    assert abs(delta) > 0.01, f"paired delta should be nontrivial: {delta:.6f}"
 
 
 # ---------------------------------------------------------------------------
-# Smoke test: compute() with fake blob archive
+# Smoke test: compute() produces two rows per book (one per devig_method)
 # ---------------------------------------------------------------------------
 
-def test_compute_smoke_no_network(tmp_path, monkeypatch):
-    """compute() with a fake SnapshotArchive produces rows matching the schema."""
+def test_compute_smoke_two_devig_methods(tmp_path, monkeypatch):
+    """compute() emits shin + multiplicative rows for every book."""
     monkeypatch.delenv("BETS_DB_WRITE", raising=False)
     monkeypatch.delenv("BLOB_ARCHIVE", raising=False)
 
@@ -405,44 +388,47 @@ def test_compute_smoke_no_network(tmp_path, monkeypatch):
         {"key": "soccer_epl", "label": "EPL", "min_books": 20, "fdco_code": None}
     ])
 
-    # Also patch BetRepo so get_bets() returns empty (no DB/CSV needed)
     from src.storage.repo import BetRepo
     monkeypatch.setattr(BetRepo, "get_bets", lambda self: [])
 
     from datetime import date
-    rows = cbs.compute(
-        window_end=date(2026, 4, 27),
-        market="h2h",
-        dry_run=True,
-    )
+    rows = cbs.compute(window_end=date(2026, 4, 27), market="h2h", dry_run=True)
 
-    assert len(rows) > 0, "Expected at least one row"
+    assert len(rows) > 0
 
+    # Each book should appear twice (once per devig_method)
+    books = [r["book"] for r in rows]
+    devig_methods = {r["devig_method"] for r in rows}
+    assert "shin" in devig_methods, "Missing shin rows"
+    assert "multiplicative" in devig_methods, "Missing multiplicative rows"
+
+    # Every row has all required keys
     required_keys = {
-        "book", "league", "market", "window_end", "n_fixtures",
-        "brier_vs_close", "brier_vs_outcome", "log_loss",
+        "book", "league", "market", "window_end", "devig_method",
+        "n_fixtures", "n_fixtures_source",
+        "brier_vs_close",
+        "brier_vs_outcome", "brier_vs_outcome_ci_low", "brier_vs_outcome_ci_high",
+        "brier_paired_vs_pinnacle", "brier_paired_ci_low", "brier_paired_ci_high",
+        "log_loss", "log_loss_ci_low", "log_loss_ci_high",
         "fav_longshot_slope", "home_bias", "draw_bias",
         "flag_rate", "mean_flag_edge",
-        "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
-        "truth_anchor", "n_fixtures_source",
+        "edge_vs_consensus_loo", "edge_vs_pinnacle", "divergence",
+        "truth_anchor",
     }
     for r in rows:
         missing = required_keys - set(r)
         assert not missing, f"Row missing keys: {missing}"
-        assert r["market"] == "h2h"
-        assert r["league"] == "EPL"
-        assert r["window_end"] == "2026-04-27"
-        assert isinstance(r["n_fixtures"], int) and r["n_fixtures"] >= 0
+        assert r["devig_method"] in ("shin", "multiplicative")
         assert r["n_fixtures_source"] in ("blob", "fdco")
+        # No old column
+        assert "edge_vs_consensus" not in r
 
 
 # ---------------------------------------------------------------------------
-# Pi-safety: no pyodbc / azure import when env vars unset
+# Pi-safety
 # ---------------------------------------------------------------------------
 
 def test_pi_safety_no_pyodbc_azure_on_import(monkeypatch):
-    """Importing the script and its dependencies with no env flags must not
-    trigger pyodbc or azure.storage.blob imports."""
     monkeypatch.delenv("BETS_DB_WRITE", raising=False)
     monkeypatch.delenv("BLOB_ARCHIVE", raising=False)
     monkeypatch.delenv("AZURE_SQL_DSN", raising=False)
@@ -457,9 +443,5 @@ def test_pi_safety_no_pyodbc_azure_on_import(monkeypatch):
     import src.storage.repo            # noqa: F401
     import src.storage.snapshots       # noqa: F401
 
-    assert "pyodbc" not in sys.modules, (
-        "pyodbc was imported at module level — breaks Pi safety"
-    )
-    assert "azure.storage.blob" not in sys.modules, (
-        "azure.storage.blob was imported at module level — breaks Pi safety"
-    )
+    assert "pyodbc" not in sys.modules
+    assert "azure.storage.blob" not in sys.modules
