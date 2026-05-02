@@ -514,11 +514,11 @@ def _high_xg_team_data(home: str, away: str, q25: float = 1.2) -> dict:
     }
 
 
-def _k_event(draw_odds: float = 3.40) -> dict:
+def _k_event(draw_odds: float = 3.55) -> dict:
     """Event with 20 UK books + betfair at the given draw odds.
 
-    Base books have short draw odds (high consensus draw prob ~0.33) so that
-    betfair's draw at ≥3.20 shows a genuine ≥3% edge vs consensus.
+    Base books have short draw odds (consensus draw prob ~0.323). After Betfair's
+    5% commission, draw_odds≥3.55 is needed for a genuine ≥3% true edge (cons − eff_implied).
     """
     base = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:19]
     books = {b: (2.70, 2.85, 2.80) for b in base}  # short draw → high consensus draw prob
@@ -536,7 +536,7 @@ def test_variant_K_draw_bias_config():
 
 
 def test_variant_K_only_produces_draw_bets():
-    ev = _k_event(draw_odds=3.40)
+    ev = _k_event(draw_odds=3.55)
     xg = _low_xg_team_data("Arsenal", "Chelsea")
     bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
     assert bets, "K_draw_bias should produce at least one bet on low-xG in-band fixture"

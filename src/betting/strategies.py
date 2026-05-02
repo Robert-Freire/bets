@@ -414,7 +414,7 @@ def _flag_bets(
                 if (cons[side] - strategy.kaunitz_alpha) * odds - 1 <= 0:
                     continue
             else:
-                if edge_gross < strategy.min_edge:
+                if edge < strategy.min_edge:
                     continue
 
             impl_raw = round(1.0 / odds, 4)
@@ -496,8 +496,6 @@ def _flag_bets(
 
             fair_side = b["fair"].get(side, 1.0 / odds)
             edge_gross = cons[side] - fair_side
-            # Commission shrinks effective payout → raises effective implied prob → reduces edge.
-            # Filter on gross edge (Shin-devigged, consistent with production find_value_bets).
             eff_implied = _effective_implied_prob(odds, b["book"])
             edge = cons[side] - eff_implied
 
@@ -505,7 +503,7 @@ def _flag_bets(
                 if (cons[side] - strategy.kaunitz_alpha) * odds - 1 <= 0:
                     continue
             else:
-                if edge_gross < strategy.min_edge:
+                if edge < strategy.min_edge:
                     continue
 
             # Outlier-book check
