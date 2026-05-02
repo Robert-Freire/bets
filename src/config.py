@@ -1,4 +1,4 @@
-"""Shared league config loader — single source of truth for active scanner leagues.
+"""Shared config loader — single source of truth for leagues and book attributes.
 
 Priority: LEAGUES_CONFIG env var → config.json → hardcoded fallback.
 All scripts should import from here instead of duplicating the load logic.
@@ -10,6 +10,29 @@ import os
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+_HARDCODED_BOOKS = [
+    {"key": "betfair_ex_uk",  "label": "Betfair Exchange (UK MBR)",  "type": "exchange",    "license": "UK",     "commission_rate": 0.05},
+    {"key": "smarkets",       "label": "Smarkets",                   "type": "exchange",    "license": "UK",     "commission_rate": 0.02},
+    {"key": "matchbook",      "label": "Matchbook",                  "type": "exchange",    "license": "UK",     "commission_rate": 0.02},
+    {"key": "pinnacle",       "label": "Pinnacle",                   "type": "sportsbook",  "license": "non-UK", "commission_rate": 0.0},
+    {"key": "betfair_sb_uk",  "label": "Betfair Sportsbook",         "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "betfred_uk",     "label": "Betfred",                    "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "williamhill",    "label": "William Hill",               "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "coral",          "label": "Coral",                      "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "ladbrokes_uk",   "label": "Ladbrokes",                  "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "skybet",         "label": "Sky Bet",                    "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "paddypower",     "label": "Paddy Power",                "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "boylesports",    "label": "BoyleSports",                "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "betvictor",      "label": "BetVictor",                  "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "betway",         "label": "Betway",                     "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "leovegas",       "label": "LeoVegas",                   "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "casumo",         "label": "Casumo",                     "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "virginbet",      "label": "Virgin Bet",                 "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "livescorebet",   "label": "LiveScore Bet",              "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "sport888",       "label": "888Sport",                   "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+    {"key": "grosvenor",      "label": "Grosvenor",                  "type": "sportsbook",  "license": "UK",     "commission_rate": 0.0},
+]
 
 _HARDCODED_FOOTBALL = [
     {"key": "soccer_epl",                 "label": "EPL",          "min_books": 20},
@@ -71,6 +94,17 @@ def load_leagues() -> list[dict]:
     return result
 
 
+def load_books() -> list[dict]:
+    """Return book definitions from config.json, falling back to the hardcoded list.
+
+    Each entry: {key, label, type, license, commission_rate}.
+    """
+    cfg = load_config()
+    books = cfg.get("books", _HARDCODED_BOOKS)
+    _validate_books(books, "config")
+    return books
+
+
 def _validate(leagues: list, source) -> None:
     for entry in leagues:
         missing = [k for k in ("key", "label", "min_books") if k not in entry]
@@ -78,3 +112,16 @@ def _validate(leagues: list, source) -> None:
             raise RuntimeError(
                 f"League entry in {source} missing required keys {missing}: {entry}"
             )
+
+
+def _validate_books(books: list, source) -> None:
+    keys_seen: set[str] = set()
+    for entry in books:
+        missing = [k for k in ("key", "label", "type", "license", "commission_rate") if k not in entry]
+        if missing:
+            raise RuntimeError(
+                f"Book entry in {source} missing required keys {missing}: {entry}"
+            )
+        if entry["key"] in keys_seen:
+            raise RuntimeError(f"Duplicate book key in {source}: {entry['key']}")
+        keys_seen.add(entry["key"])

@@ -15,10 +15,9 @@ CREATE TABLE IF NOT EXISTS fixtures (
 CREATE INDEX IF NOT EXISTS ix_fixtures_kickoff_sport ON fixtures (kickoff_utc, sport_key);
 
 CREATE TABLE IF NOT EXISTS books (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT    NOT NULL UNIQUE,
-    region          TEXT,
-    commission_rate REAL    NOT NULL DEFAULT 0
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name   TEXT    NOT NULL UNIQUE,
+    region TEXT
 );
 
 CREATE TABLE IF NOT EXISTS strategies (

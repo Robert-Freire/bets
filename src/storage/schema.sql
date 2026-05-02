@@ -21,11 +21,14 @@ CREATE INDEX ix_fixtures_kickoff_sport ON fixtures (kickoff_utc, sport_key);
 
 IF OBJECT_ID(N'books', N'U') IS NULL
 CREATE TABLE books (
-    id              int          NOT NULL IDENTITY(1,1) PRIMARY KEY,
-    name            nvarchar(64) NOT NULL UNIQUE,
-    region          nvarchar(8)  NULL,
-    commission_rate decimal(6,4) NOT NULL DEFAULT 0
+    id     int          NOT NULL IDENTITY(1,1) PRIMARY KEY,
+    name   nvarchar(64) NOT NULL UNIQUE,
+    region nvarchar(8)  NULL
 );
+
+-- Drop vestigial column (was never populated or read; source of truth is config.json).
+IF COL_LENGTH(N'books', N'commission_rate') IS NOT NULL
+    ALTER TABLE books DROP COLUMN commission_rate;
 
 IF OBJECT_ID(N'strategies', N'U') IS NULL
 CREATE TABLE strategies (
