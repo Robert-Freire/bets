@@ -1,6 +1,8 @@
 # Commission Rates by Bookmaker
 
-Used by `src/betting/commissions.py` to compute net edges and commission-adjusted Kelly stakes.
+**Source of truth:** the `books` section of `config.json`. `src/betting/commissions.py`
+loads from there at import time. `UK_LICENSED_BOOKS` and `EXCHANGE_BOOKS` in
+`src/betting/strategies.py` are derived from the same config at module load.
 
 **Verification date:** 2026-04-29
 

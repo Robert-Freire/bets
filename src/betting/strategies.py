@@ -37,16 +37,25 @@ except ImportError:
     def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
     def _effective_implied_prob(odds: float, book: str) -> float: return 1.0 / odds  # noqa: E704
 
-# ── book sets ────────────────────────────────────────────────────────────────
+# ── book sets (derived from config.json) ─────────────────────────────────────
 
-UK_LICENSED_BOOKS = {
-    "betfair_ex_uk", "betfair_sb_uk", "smarkets", "matchbook",
-    "betfred_uk", "williamhill", "coral", "ladbrokes_uk", "skybet",
-    "paddypower", "boylesports", "betvictor", "betway", "leovegas",
-    "casumo", "virginbet", "livescorebet", "sport888", "grosvenor",
-}
+try:
+    from src.config import load_books as _load_books
+    _BOOKS = _load_books()
+except Exception:
+    _BOOKS = []
 
-EXCHANGE_BOOKS = {"betfair_ex_uk", "smarkets", "matchbook"}
+if _BOOKS:
+    UK_LICENSED_BOOKS = {b["key"] for b in _BOOKS if b.get("license") == "UK"}
+    EXCHANGE_BOOKS    = {b["key"] for b in _BOOKS if b.get("type") == "exchange"}
+else:
+    UK_LICENSED_BOOKS = {
+        "betfair_ex_uk", "betfair_sb_uk", "smarkets", "matchbook",
+        "betfred_uk", "williamhill", "coral", "ladbrokes_uk", "skybet",
+        "paddypower", "boylesports", "betvictor", "betway", "leovegas",
+        "casumo", "virginbet", "livescorebet", "sport888", "grosvenor",
+    }
+    EXCHANGE_BOOKS = {"betfair_ex_uk", "smarkets", "matchbook"}
 
 # The Odds API team names → Understat team names (used by K_draw_bias xG lookup).
 # Without this map, ~30% of EPL/Bundesliga/Serie A/Ligue 1 fixtures fail name matching
