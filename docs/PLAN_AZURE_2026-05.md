@@ -142,8 +142,8 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.5.5 | Blob archive for raw API responses (Odds API, future Pinnacle/Betfair) — **WSL only**, env-flag gated | dev | no (gated; Pi never sets the flag) | ✅ Done 2026-05-01 | A.4 |
 | A.6 | Provision dev App Service + deploy `app.py` (**pivoted to Container Apps** — Reply VSE has 0 App Service VM quota) | dev | no | ✅ Done 2026-05-01 | A.5 |
 | A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | ✅ Done 2026-05-01 | A.6 |
-| A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | pending | A.7 + 1 week stable A.4/A.5 |
-| A.9 | Decommission WSL CSV path entirely | dev | no | pending | A.8 + 1 week stable |
+| A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | ✅ Partial 2026-05-02 — dashboard reads DB-only; scanner still dual-writes; CSV archive pending | A.7 + 1 week stable A.4/A.5 |
+| A.9 | Decommission WSL CSV path entirely (scanner stops writing CSV, remove CSV code paths) | dev | no | pending | A.8 full + 1 week stable |
 | **A.10** | **Stand up `kaunitz-prod-rg` + onboard Pi** (future sprint — separate plan doc) | **prod (new)** | **yes** | **deferred** | A.9 + ≥1 week soak |
 
 ---

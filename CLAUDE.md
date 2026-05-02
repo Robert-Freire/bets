@@ -206,7 +206,7 @@ Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg 
 
 Three bet sections: **Placed — awaiting result** · **Suggested — not yet placed** · **Settled** (with P&L + CLV%).
 
-The public Azure dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` reads from Azure SQL DB-first with CSV fallback (A.5). Pi data is not visible in the Azure dashboard until A.10 — only Pi-local `python3 app.py` shows it.
+The public Azure dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` reads exclusively from Azure SQL — no CSVs are baked into the Docker image (A.8 partial, 2026-05-02). The local dashboard (`python3 app.py`) reads from DB when `BETS_DB_WRITE=1` is set, or falls back to CSV (Pi / DB-unreachable). Pi data is not visible in the Azure dashboard until A.10 — only Pi-local `python3 app.py` shows it.
 
 ## Risk management
 
@@ -256,7 +256,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |
 | B.0 + B.0.5 + B.0.6 + B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
 | B.1 (bias backfill), B.2 (Brier-vs-close), B.3 (cron), B.4* (downstream variants) | pending |
-| Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | pending (≥1 wk soak from 2026-05-01) |
+| Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ dashboard DB-only done 2026-05-02 (PRs #27 + #28); scanner still dual-writes CSV+DB on WSL — CSV write cutover + archive pending |
 | Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |
 | Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |
 | Phase 10 (long-term: syndicate, multi-account) | open |
