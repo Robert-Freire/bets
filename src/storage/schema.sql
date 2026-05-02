@@ -165,3 +165,56 @@ CREATE TABLE drift (
     n_books        int              NULL,
     PRIMARY KEY (fixture_id, side, market, line, book_id, t_minus_min)
 );
+
+-- Per-(book, league, market) skill + bias signals (Phase B.0 / B.0.7) -------
+-- PK: (book, league, market, window_end, devig_method) — two rows per window,
+-- one per devig method ('shin' | 'multiplicative').
+-- Re-running compute_book_skill.py for the same (window_end, devig_method) is
+-- safe (delete + re-insert).
+--
+-- Migration guard: if the pre-B.0.7 schema exists (no devig_method column),
+-- drop and recreate.  Safe because the table had no production rows when B.0.7
+-- shipped.  REMOVE THIS GUARD once B.0.7 is confirmed deployed everywhere —
+-- leaving it in permanently would mask a future accidental drop scenario.
+IF OBJECT_ID(N'book_skill', N'U') IS NOT NULL
+    AND COL_LENGTH(N'book_skill', N'devig_method') IS NULL
+    DROP TABLE book_skill;
+
+IF OBJECT_ID(N'book_skill', N'U') IS NULL
+CREATE TABLE book_skill (
+    book                     nvarchar(64)  NOT NULL,
+    league                   nvarchar(128) NOT NULL,
+    market                   nvarchar(16)  NOT NULL,
+    window_end               date          NOT NULL,
+    devig_method             nvarchar(16)  NOT NULL,   -- 'shin' | 'multiplicative'
+    n_fixtures               int           NOT NULL,
+    n_fixtures_source        nvarchar(8)   NULL,       -- 'blob' | 'fdco'
+    -- Skill — Brier raw (B.0.6 + B.0.7):
+    brier_vs_close           decimal(10,8) NULL,       -- B.2 gated
+    brier_vs_outcome         decimal(10,8) NULL,
+    brier_vs_outcome_ci_low  decimal(10,8) NULL,
+    brier_vs_outcome_ci_high decimal(10,8) NULL,
+    -- Skill — paired Brier vs Pinnacle close (B.0.7; primary ranking metric):
+    brier_paired_vs_pinnacle decimal(10,8) NULL,
+    brier_paired_ci_low      decimal(10,8) NULL,
+    brier_paired_ci_high     decimal(10,8) NULL,
+    -- Skill — log loss (B.0.7; penalises confident-and-wrong harder):
+    log_loss                 decimal(10,8) NULL,
+    log_loss_ci_low          decimal(10,8) NULL,
+    log_loss_ci_high         decimal(10,8) NULL,
+    -- Bias columns (B.1 gated):
+    fav_longshot_slope       decimal(10,8) NULL,
+    home_bias                decimal(10,8) NULL,
+    draw_bias                decimal(10,8) NULL,
+    -- Free-tier signals (B.0.5):
+    flag_rate                decimal(10,8) NULL,
+    mean_flag_edge           decimal(10,8) NULL,
+    -- LOO consensus (B.0.7; replaces edge_vs_consensus which collapsed to ~0):
+    edge_vs_consensus_loo    decimal(10,8) NULL,
+    edge_vs_pinnacle         decimal(10,8) NULL,
+    divergence               decimal(10,8) NULL,       -- edge_vs_pinnacle - edge_vs_consensus_loo
+    -- truth_anchor: 'pinnacle' for EPL/BL/SA/L1; 'bet365+bwin' for Champ/BL2
+    truth_anchor             nvarchar(32)  NULL,
+    created_at               datetime2(3)  NOT NULL DEFAULT SYSUTCDATETIME(),
+    PRIMARY KEY (book, league, market, window_end, devig_method)
+);

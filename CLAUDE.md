@@ -147,12 +147,13 @@ scripts/check_sports.py     Sports discovery (bi-weekly)
 scripts/model_signals.py    CatBoost signal cache generator
 scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
 scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent)
+scripts/compute_book_skill.py  Per-(book, league, market) skill + bias signals → book_skill table (B.0.5 + B.0.6)
 
 app.py                      Flask dashboard
 templates/index.html        Dashboard UI
 
 src/config.py               Shared league config loader (load_config(), load_leagues()); respects LEAGUES_CONFIG env var; enriches entries with fdco_code from downloader.LEAGUES
-src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
+src/storage/schema.sql      Canonical MSSQL schema (8 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift, book_skill)
 src/storage/schema_sqlite.sql  SQLite mirror for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner
 src/storage/_keys.py        Deterministic UUID5 + sport-label helpers (don't change the namespace)
@@ -174,7 +175,7 @@ logs/closing_lines.csv      (frozen; closing_line.py paused — historical only)
 logs/drift.csv              (frozen; same)
 logs/closing_line.log       (frozen; same)
 
-tests/                      pytest suite (263 tests across 21 files; run with `pytest`)
+tests/                      pytest suite (294 tests across 22 files; run with `pytest`)
 
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10, foundation — historical for done phases)
 docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)
@@ -190,6 +191,8 @@ docs/REVIEW.md              Foundational review (2026-04-29; historical)
 docs/FDCO_INGEST_NOTES.md   Football-data.co.uk ingest details
 docs/AH_FEASIBILITY.md      Asian Handicap feasibility probe (R.9)
 docs/COMMISSIONS.md         Per-book commission rates
+docs/PAID_DATA_WISHLIST.md  Living list of investigations unlocked by paying for Odds API historical access — consult & append whenever a "we don't have enough data" question comes up
+docs/PLAN_FIXTURE_CALENDAR.md  Exploratory plan — what becomes possible (cron tailoring, outage detection, closing-line proximity, deterministic bet matching, etc.) if we build a fixture calendar. Origin: issue #7
 data/raw/                   Football-data.co.uk CSVs + Understat xG
 ```
 
@@ -251,6 +254,8 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Phase 8 (Betfair API auto-placement) | pending |
 | Phase 9a (Pi cron cutover) | ✅ done 2026-05-01 |
 | Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |
+| B.0 + B.0.5 + B.0.6 + B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
+| B.1 (bias backfill), B.2 (Brier-vs-close), B.3 (cron), B.4* (downstream variants) | pending |
 | Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | pending (≥1 wk soak from 2026-05-01) |
 | Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |
 | Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |

@@ -688,6 +688,66 @@ class BetRepo:
             self._db_failed = True
             return None
 
+    # --- book_skill (B.0) -----------------------------------------------------
+
+    _BOOK_SKILL_COLS = (
+        "book", "league", "market", "window_end", "devig_method", "n_fixtures",
+        "n_fixtures_source",
+        "brier_vs_close",
+        "brier_vs_outcome", "brier_vs_outcome_ci_low", "brier_vs_outcome_ci_high",
+        "brier_paired_vs_pinnacle", "brier_paired_ci_low", "brier_paired_ci_high",
+        "log_loss", "log_loss_ci_low", "log_loss_ci_high",
+        "fav_longshot_slope", "home_bias", "draw_bias",
+        "flag_rate", "mean_flag_edge",
+        "edge_vs_consensus_loo", "edge_vs_pinnacle", "divergence",
+        "truth_anchor",
+    )
+    _BOOK_SKILL_STR_COLS = frozenset(
+        {"book", "league", "market", "window_end", "devig_method",
+         "truth_anchor", "n_fixtures_source"}
+    )
+
+    def write_book_skill(self, rows: list[dict]) -> None:
+        """Upsert book_skill rows (delete + re-insert per composite PK).
+
+        No-op if DB not enabled. Pi-safe: never called when BETS_DB_WRITE
+        is unset, and never imports pyodbc at top level.
+        """
+        if not rows or not self.db_enabled:
+            return
+        with self._db_section() as cur:
+            if cur is None:
+                return
+            cols = ", ".join(self._BOOK_SKILL_COLS)
+            placeholders = ", ".join(["?"] * len(self._BOOK_SKILL_COLS))
+            for row in rows:
+                book = row.get("book") or ""
+                league = row.get("league") or ""
+                market = row.get("market") or "h2h"
+                window_end = row.get("window_end") or ""
+                devig_method = row.get("devig_method") or "shin"
+                cur.execute(
+                    "DELETE FROM book_skill "
+                    "WHERE book = ? AND league = ? AND market = ? "
+                    "AND window_end = ? AND devig_method = ?",
+                    (book, league, market, window_end, devig_method),
+                )
+                vals: list = []
+                for c in self._BOOK_SKILL_COLS:
+                    v = row.get(c)
+                    if c in self._BOOK_SKILL_STR_COLS:
+                        vals.append(v)
+                    elif c == "n_fixtures":
+                        vals.append(_i(v))
+                    else:
+                        vals.append(_f(v))
+                cur.execute(
+                    f"INSERT INTO book_skill ({cols}) VALUES ({placeholders})",
+                    vals,
+                )
+
+    # --- update settle --------------------------------------------------------
+
     def update_bet_settle(self, scan_date: str, kickoff: str, home: str,
                           away: str, market: str, line: str, side: str,
                           book: str, *, result: str, actual_stake: float | str | None,
