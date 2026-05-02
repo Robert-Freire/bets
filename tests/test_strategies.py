@@ -303,6 +303,38 @@ def test_edge_filter_uses_net_edge():
         )
 
 
+def test_gross_edge_above_threshold_but_net_edge_below_is_rejected():
+    """A bet whose gross edge clears min_edge but whose true edge doesn't must be rejected.
+
+    Rogue book: williamhill at HOME odds 2.50 in a 28.9%-overround market.
+    18 base books give consensus HOME ~0.390. Shin devigging on the rogue market
+    pushes its fair HOME to ~0.305, so:
+      edge_gross = 0.390 − 0.305 ≈ +8.5%  (would pass the old gross-edge filter)
+      edge_net   = 0.390 − 1/2.50 ≈ −1.0% (correctly rejected by the new filter)
+    Under the old code this bet would have been flagged; under the fix it must not be.
+    """
+    from tests.conftest import synthetic_event
+
+    base_books = [b for b in sorted(UK_LICENSED_BOOKS) if b != "williamhill"]
+    books = {b: (2.40, 3.20, 3.00) for b in base_books}
+    # High overround (1.289): Shin devigging pulls HOME fair to ~0.305 vs raw 0.400
+    books["williamhill"] = (2.50, 1.80, 3.00)
+    ev = synthetic_event(h2h_prices=books)
+
+    cfg = StrategyConfig(
+        name="_test_gross_vs_net",
+        label="", description="",
+        min_edge=0.03, drop_outlier_book=False,
+        min_books=15,   # 19 UK books total; default 20 would short-circuit before the filter
+    )
+    bets = evaluate_strategy([ev], "soccer_epl", cfg)
+
+    williamhill_home = [b for b in bets if b["book"] == "williamhill" and b["side"] == "H"]
+    assert williamhill_home == [], (
+        f"williamhill HOME should be rejected (net edge ≈ −1.0%) but was flagged: {williamhill_home}"
+    )
+
+
 # ── R.1 tests ─────────────────────────────────────────────────────────────────
 
 def test_variant_I_power_devig_bet_count_similar_to_G(sample_event):
