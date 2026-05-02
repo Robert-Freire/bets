@@ -1009,7 +1009,6 @@ def main():
             "odds": vb["odds"],
             "impl_raw": round(1.0 / vb["odds"], 4),
             "impl_effective": round(_effective_implied_prob(vb["odds"], vb["book"]), 4),
-            # net edge: consensus prob minus effective implied prob (after commission deduction)
             "edge": round(vb["cons"] - _effective_implied_prob(vb["odds"], vb["book"]), 4),
             "edge_gross": round(vb.get("edge_gross", vb["edge"]), 4),
             "effective_odds": round(_effective_odds(vb["odds"], vb["book"]), 4),
