@@ -751,22 +751,20 @@ class BetRepo:
     def update_bet_settle(self, scan_date: str, kickoff: str, home: str,
                           away: str, market: str, line: str, side: str,
                           book: str, *, result: str, actual_stake: float | str | None,
-                          pnl: float | str | None, odds: float | str | None = None) -> bool:
+                          pnl: float | str | None, odds: float | str | None = None) -> int:
         """Update an existing bet's settle data in the DB.
 
-        The bet UUID is recomputed from the natural key — same as the
-        write path. Returns True if the UPDATE succeeded (regardless of
-        rows affected — a missing row is not an error here, it just means
-        the bet exists in CSV but not yet in DB, e.g. legacy data).
+        Returns the number of rows updated (0 = not found in DB, 1 = success).
+        Tries UUID lookup first; falls back to natural-key JOIN if UUID hits 0.
         """
         if not self.db_enabled:
-            return False
+            return 0
         bid = bet_uuid(scan_date, kickoff, home, away, market or "h2h",
                        normalise_line(line), side, book)
+        settled_at = datetime.utcnow()
         with self._db_section() as cur:
             if cur is None:
-                return False
-            settled_at = datetime.utcnow()
+                return 0
             if odds is not None and _f(odds) is not None:
                 cur.execute(
                     "UPDATE bets SET result = ?, actual_stake = ?, pnl = ?, "
@@ -781,4 +779,45 @@ class BetRepo:
                     (result or "pending", _f(actual_stake), _f(pnl),
                      settled_at, bid),
                 )
-        return True
+            rows = cur.rowcount
+            if rows == 0:
+                # UUID miss — fall back to natural-key JOIN update
+                print(f"[repo] WARN: UUID lookup missed for bet "
+                      f"{home} vs {away} {kickoff} {side} {book}; "
+                      f"trying natural-key fallback", file=sys.stderr)
+                ko_dt = _parse_dt(kickoff)
+                if odds is not None and _f(odds) is not None:
+                    cur.execute(
+                        "UPDATE b SET b.result = ?, b.actual_stake = ?, b.pnl = ?, "
+                        "b.odds = ?, b.settled_at = ? "
+                        "FROM bets b "
+                        "JOIN fixtures f ON f.id = b.fixture_id "
+                        "JOIN books bk ON bk.id = b.book_id "
+                        "WHERE CONVERT(date, b.scanned_at) = ? "
+                        "  AND f.kickoff_utc = ? AND f.home = ? AND f.away = ? "
+                        "  AND b.market = ? AND b.side = ? AND bk.name = ?",
+                        (result or "pending", _f(actual_stake), _f(pnl),
+                         _f(odds), settled_at,
+                         scan_date, ko_dt, home, away,
+                         market or "h2h", side, book),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE b SET b.result = ?, b.actual_stake = ?, b.pnl = ?, "
+                        "b.settled_at = ? "
+                        "FROM bets b "
+                        "JOIN fixtures f ON f.id = b.fixture_id "
+                        "JOIN books bk ON bk.id = b.book_id "
+                        "WHERE CONVERT(date, b.scanned_at) = ? "
+                        "  AND f.kickoff_utc = ? AND f.home = ? AND f.away = ? "
+                        "  AND b.market = ? AND b.side = ? AND bk.name = ?",
+                        (result or "pending", _f(actual_stake), _f(pnl),
+                         settled_at,
+                         scan_date, ko_dt, home, away,
+                         market or "h2h", side, book),
+                    )
+                rows = cur.rowcount
+                if rows > 0:
+                    print(f"[repo] natural-key fallback updated {rows} row(s)",
+                          file=sys.stderr)
+        return rows

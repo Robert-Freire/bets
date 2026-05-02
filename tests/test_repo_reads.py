@@ -166,7 +166,7 @@ def test_update_bet_settle_writes_to_db(fresh_env, tmp_path):
         market="h2h", line="", side="HOME", book="bet365",
         result="W", actual_stake=20.0, pnl=22.0, odds=2.10,
     )
-    assert ok is True
+    assert ok == 1
     db.commit()
 
     r = db.execute(
@@ -184,7 +184,7 @@ def test_update_bet_settle_returns_false_when_db_disabled(fresh_env, tmp_path):
         line="", side="HOME", book="bet365",
         result="W", actual_stake=10.0, pnl=5.0,
     )
-    assert ok is False
+    assert ok == 0
 
 
 # ---- /health + dashboard fallback -----------------------------------------

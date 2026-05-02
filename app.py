@@ -403,12 +403,10 @@ def update(bet_id: int):
         bets[bet_id]["odds"] = odds
     bets[bet_id]["pnl"] = calc_pnl(result, actual_stake, bets[bet_id].get("odds", ""))
 
-    # CSV stays canonical until A.8 cutover. Settle data also lands in
-    # the DB when dual-write is on, so DB-first reads pick it up too.
     save_bets(bets)
     if repo.db_enabled and bets[bet_id].get("_source") != "legacy":
         b = bets[bet_id]
-        repo.update_bet_settle(
+        rows_updated = repo.update_bet_settle(
             scan_date=scan_date_of(b.get("scanned_at", "")),
             kickoff=b.get("kickoff", ""),
             home=b.get("home", ""),
@@ -422,6 +420,13 @@ def update(bet_id: int):
             pnl=b.get("pnl") or None,
             odds=b.get("odds") or None,
         )
+        if rows_updated == 0:
+            import sys as _sys
+            _sys.stderr.write(
+                f"[dashboard] WARN: DB update wrote 0 rows for bet {bet_id} "
+                f"({b.get('home')} vs {b.get('away')} {b.get('kickoff')} "
+                f"{b.get('side')} {b.get('book')}); CSV updated but DB unchanged\n"
+            )
     repo.close()
     return redirect(url_for("index"))
 
