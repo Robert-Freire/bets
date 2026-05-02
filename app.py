@@ -148,17 +148,19 @@ def load_bets(repo: BetRepo | None = None) -> list[dict]:
     updates routed via repo.update_bet_settle land here too). On DB
     failure or with the env unset, falls back to the CSV.
     """
-    bets = []
-    if BETS_LEGACY_CSV.exists():
-        bets.extend(_read_csv_file(BETS_LEGACY_CSV, "legacy"))
-
     db_rows = None
     if repo is not None:
         db_rows = repo.get_bets()
+
+    bets = []
     if db_rows is None:
+        # CSV-only mode (Pi, or DB unreachable): read both files.
+        if BETS_LEGACY_CSV.exists():
+            bets.extend(_read_csv_file(BETS_LEGACY_CSV, "legacy"))
         if BETS_CSV.exists():
             bets.extend(_read_csv_file(BETS_CSV, "new"))
     else:
+        # DB mode: legacy rows are in the DB after migration; CSV ignored.
         for row in db_rows:
             _normalise_row(row, row.get("_source", "db"))
         bets.extend(db_rows)

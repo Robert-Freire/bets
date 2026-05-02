@@ -42,8 +42,10 @@ COPY app.py ./
 COPY templates/ ./templates/
 COPY src/ ./src/
 COPY docs/RESEARCH_FEED.md ./docs/RESEARCH_FEED.md
+# No CSV files baked in — DB is the authoritative source.
+# Run scripts/migrate_csv_to_db.py before deploying this image
+# to ensure bets_legacy.csv rows are in Azure SQL.
 RUN mkdir -p logs
-COPY logs/bets.csv logs/bets_legacy.csv ./logs/
 
 ENV PORT=8080
 EXPOSE 8080

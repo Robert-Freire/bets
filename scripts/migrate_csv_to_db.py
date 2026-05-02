@@ -194,7 +194,7 @@ class Importer:
         "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
         "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
         "devig_method", "weight_scheme", "stake", "result",
-        "settled_at", "pnl", "pinnacle_close_prob", "clv_pct",
+        "actual_stake", "settled_at", "pnl", "pinnacle_close_prob", "clv_pct",
     )
 
     def _row_to_bet_values(self, row: dict, fixture_id: str, book_id: int,
@@ -225,6 +225,7 @@ class Importer:
             row.get("weight_scheme") or None,
             _f(row.get("stake")),
             row.get("result") or "pending",
+            _f(row.get("actual_stake")),
             _parse_dt(row.get("settled_at")),
             _f(row.get("pnl")),
             _f(row.get("pinnacle_close_prob")),
@@ -265,7 +266,7 @@ class Importer:
         "edge_gross", "effective_odds", "commission_rate", "consensus",
         "pinnacle_cons", "n_books", "confidence", "model_signal", "dispersion",
         "outlier_z", "devig_method", "weight_scheme", "stake", "result",
-        "settled_at", "pnl", "pinnacle_close_prob", "clv_pct",
+        "actual_stake", "settled_at", "pnl", "pinnacle_close_prob", "clv_pct",
     )
 
     def insert_paper_bet(self, row: dict, strategy_name: str) -> None:
@@ -398,9 +399,13 @@ def _open_and_iter(path: Path) -> Iterator[dict]:
 
 def import_all(imp: Importer, logs_dir: Path) -> ImportSummary:
     bets_csv = logs_dir / "bets.csv"
+    bets_legacy_csv = logs_dir / "bets_legacy.csv"
     closing_csv = logs_dir / "closing_lines.csv"
     drift_csv = logs_dir / "drift.csv"
     paper_dir = logs_dir / "paper"
+
+    for row in _iter_csv(bets_legacy_csv):
+        imp.insert_bet(row)
 
     for row in _iter_csv(bets_csv):
         imp.insert_bet(row)
