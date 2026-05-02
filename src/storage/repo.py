@@ -688,6 +688,57 @@ class BetRepo:
             self._db_failed = True
             return None
 
+    # --- book_skill (B.0) -----------------------------------------------------
+
+    _BOOK_SKILL_COLS = (
+        "book", "league", "market", "window_end", "n_fixtures",
+        "brier_vs_close", "brier_vs_outcome", "log_loss",
+        "fav_longshot_slope", "home_bias", "draw_bias",
+        "flag_rate", "mean_flag_edge",
+        "edge_vs_consensus", "edge_vs_pinnacle", "divergence",
+        "truth_anchor",
+    )
+
+    def write_book_skill(self, rows: list[dict]) -> None:
+        """Upsert book_skill rows (delete + re-insert per composite PK).
+
+        No-op if DB not enabled. Pi-safe: never called when BETS_DB_WRITE
+        is unset, and never imports pyodbc at top level.
+        """
+        if not rows or not self.db_enabled:
+            return
+        with self._db_section() as cur:
+            if cur is None:
+                return
+            cols = ", ".join(self._BOOK_SKILL_COLS)
+            placeholders = ", ".join(["?"] * len(self._BOOK_SKILL_COLS))
+            for row in rows:
+                book = row.get("book") or ""
+                league = row.get("league") or ""
+                market = row.get("market") or "h2h"
+                window_end = row.get("window_end") or ""
+                cur.execute(
+                    "DELETE FROM book_skill "
+                    "WHERE book = ? AND league = ? AND market = ? AND window_end = ?",
+                    (book, league, market, window_end),
+                )
+                _STR_COLS = {"book", "league", "market", "window_end", "truth_anchor"}
+                vals: list = []
+                for c in self._BOOK_SKILL_COLS:
+                    v = row.get(c)
+                    if c in _STR_COLS:
+                        vals.append(v)
+                    elif c == "n_fixtures":
+                        vals.append(_i(v))
+                    else:
+                        vals.append(_f(v))
+                cur.execute(
+                    f"INSERT INTO book_skill ({cols}) VALUES ({placeholders})",
+                    vals,
+                )
+
+    # --- update settle --------------------------------------------------------
+
     def update_bet_settle(self, scan_date: str, kickoff: str, home: str,
                           away: str, market: str, line: str, side: str,
                           book: str, *, result: str, actual_stake: float | str | None,

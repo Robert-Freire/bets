@@ -131,3 +131,26 @@ CREATE TABLE IF NOT EXISTS drift (
     n_books        INTEGER,
     PRIMARY KEY (fixture_id, side, market, line, book_id, t_minus_min)
 );
+
+-- Per-(book, league, market) skill + bias signals (Phase B.0)
+CREATE TABLE IF NOT EXISTS book_skill (
+    book               TEXT    NOT NULL,
+    league             TEXT    NOT NULL,
+    market             TEXT    NOT NULL,
+    window_end         TEXT    NOT NULL,
+    n_fixtures         INTEGER NOT NULL,
+    brier_vs_close     REAL,
+    brier_vs_outcome   REAL,
+    log_loss           REAL,
+    fav_longshot_slope REAL,
+    home_bias          REAL,
+    draw_bias          REAL,
+    flag_rate          REAL,
+    mean_flag_edge     REAL,
+    edge_vs_consensus  REAL,
+    edge_vs_pinnacle   REAL,
+    divergence         REAL,
+    truth_anchor       TEXT,
+    created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (book, league, market, window_end)
+);

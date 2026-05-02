@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "paper_bets",
     "closing_lines",
     "drift",
+    "book_skill",
 }
 
 
@@ -158,7 +159,7 @@ def test_migrate_runner_reports_changes_and_idempotency(tmp_path):
 
     first = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, check=True)
     assert "applied" in first.stdout, first.stdout
-    assert "+7" in first.stdout, f"expected +7 tables on first run; got: {first.stdout}"
+    assert "+8" in first.stdout, f"expected +8 tables on first run; got: {first.stdout}"
 
     second = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, check=True)
     assert "no changes" in second.stdout, second.stdout

@@ -165,3 +165,35 @@ CREATE TABLE drift (
     n_books        int              NULL,
     PRIMARY KEY (fixture_id, side, market, line, book_id, t_minus_min)
 );
+
+-- Per-(book, league, market) skill + bias signals (Phase B.0) ---------------
+-- Keyed by (book, league, market, window_end): one row per rolling 8-week
+-- window. Re-running compute_book_skill.py for the same window_end is safe
+-- (delete + re-insert).
+
+IF OBJECT_ID(N'book_skill', N'U') IS NULL
+CREATE TABLE book_skill (
+    book               nvarchar(64)  NOT NULL,
+    league             nvarchar(128) NOT NULL,
+    market             nvarchar(16)  NOT NULL,
+    window_end         date          NOT NULL,
+    n_fixtures         int           NOT NULL,
+    -- Skill columns (B.2 gated — null until enough archive depth):
+    brier_vs_close     decimal(10,8) NULL,
+    brier_vs_outcome   decimal(10,8) NULL,
+    log_loss           decimal(10,8) NULL,
+    -- Bias columns (B.1 gated):
+    fav_longshot_slope decimal(10,8) NULL,
+    home_bias          decimal(10,8) NULL,
+    draw_bias          decimal(10,8) NULL,
+    -- Free-tier signals (B.0.5 + B.0.6):
+    flag_rate          decimal(10,8) NULL,
+    mean_flag_edge     decimal(10,8) NULL,
+    edge_vs_consensus  decimal(10,8) NULL,
+    edge_vs_pinnacle   decimal(10,8) NULL,
+    divergence         decimal(10,8) NULL,
+    -- truth_anchor: 'pinnacle' for EPL/BL/SA/L1; 'bet365+bwin' for Champ/BL2
+    truth_anchor       nvarchar(32)  NULL,
+    created_at         datetime2(3)  NOT NULL DEFAULT SYSUTCDATETIME(),
+    PRIMARY KEY (book, league, market, window_end)
+);

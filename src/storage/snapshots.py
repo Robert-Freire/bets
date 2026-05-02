@@ -225,6 +225,37 @@ class SnapshotArchive:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(gz_bytes)
 
+    # --- reading helpers (B.0.5 analysis) ------------------------------------
+
+    def list_blob_keys(self, prefix: str = "") -> list[str]:
+        """List blob keys under *prefix*. Returns [] if archive disabled or on error."""
+        self._init()
+        if not self._enabled:
+            return []
+        try:
+            container_client = self._service.get_container_client(  # type: ignore[union-attr]
+                self._container_name
+            )
+            return [b.name for b in container_client.list_blobs(name_starts_with=prefix)]
+        except Exception as e:
+            print(f"[snapshots] WARN: list_blob_keys prefix={prefix!r}: {e}",
+                  file=sys.stderr)
+            return []
+
+    def download_blob(self, key: str) -> bytes | None:
+        """Download raw (still gzipped) bytes for *key*. Returns None on error."""
+        self._init()
+        if not self._enabled:
+            return None
+        try:
+            blob_client = self._service.get_blob_client(  # type: ignore[union-attr]
+                container=self._container_name, blob=key
+            )
+            return blob_client.download_blob().readall()
+        except Exception as e:
+            print(f"[snapshots] WARN: download_blob key={key!r}: {e}", file=sys.stderr)
+            return None
+
     def _drain_buffer(self) -> None:
         """Upload every file under logs/snapshots/. Delete on success."""
         if not _LOCAL_BUFFER_DIR.exists():
@@ -243,6 +274,28 @@ class SnapshotArchive:
                     print(f"[snapshots] WARN: drained {rel_key} but could not delete buffer file: {e}",
                           file=sys.stderr)
             # On failure leave it for the next run.
+
+
+def load_snapshot_envelope(gz_bytes: bytes) -> dict | None:
+    """Parse a gzipped SnapshotArchive envelope. Returns None on failure."""
+    try:
+        return json.loads(gzip.decompress(gz_bytes))
+    except Exception as e:
+        print(f"[snapshots] WARN: failed to parse snapshot envelope: {e}",
+              file=sys.stderr)
+        return None
+
+
+def extract_events(envelope: dict) -> list:
+    """Return the list of API events from a parsed envelope, or []."""
+    body_raw = envelope.get("body_raw")
+    if isinstance(body_raw, str):
+        try:
+            result = json.loads(body_raw)
+            return result if isinstance(result, list) else []
+        except Exception:
+            return []
+    return body_raw if isinstance(body_raw, list) else []
 
 
 # Module-level singleton: scan_odds.py imports and uses one instance.
