@@ -29,23 +29,18 @@ from pathlib import Path
 from typing import Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 DEFAULT_LOGS_DIR = ROOT / "logs"
 
 # Stable namespace for deterministic UUID5 generation. Changing this string
 # breaks idempotency across reruns — do not edit.
 _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "kaunitz.bets:v1")
 
-# CSV `sport` column → canonical Odds-API sport_key. Tennis labels are
-# dynamic; unknown values fall through to the label as-is.
-_LABEL_TO_KEY = {
-    "EPL":          "soccer_epl",
-    "Bundesliga":   "soccer_germany_bundesliga",
-    "Serie A":      "soccer_italy_serie_a",
-    "Championship": "soccer_efl_champ",
-    "Ligue 1":      "soccer_france_ligue_one",
-    "Bundesliga 2": "soccer_germany_bundesliga2",
-    "NBA":          "basketball_nba",
-}
+# Imported from _keys.py — the canonical label→sport_key map shared across
+# the storage layer. Add new leagues there, not here.
+from src.storage._keys import LABEL_TO_KEY as _LABEL_TO_KEY  # noqa: E402
 
 
 # ---- helpers ---------------------------------------------------------------
