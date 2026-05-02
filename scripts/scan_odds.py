@@ -188,7 +188,7 @@ def api_get(path: str, params: dict) -> tuple[list | dict, str]:
         )
     except Exception as _e:
         print(f"[snapshots] WARN: archive call raised: {_e}", file=sys.stderr)
-    remaining = headers.get("X-Requests-Remaining", "?")
+    remaining = headers.get("x-requests-remaining", headers.get("X-Requests-Remaining", "?"))
     return json.loads(body), remaining
 
 
