@@ -314,7 +314,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                         continue
                     if disp.get(side, 0.0) > MAX_DISPERSION:
                         continue
-                    edge = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    edge_gross = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    edge = cons[side] - _effective_implied_prob(odds, b["book"])
                     if edge >= min_edge and 1.2 <= odds <= 15.0:
                         other_probs = [b2["fair"][side] for b2 in h2h_books
                                        if b2["book"] != b["book"] and side in b2["fair"]]
@@ -334,6 +335,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             "impl_effective": round(_effective_implied_prob(odds, b["book"]), 4),
                             "cons": round(cons[side], 4),
                             "edge": round(edge, 4),
+                            "edge_gross": round(edge_gross, 4),
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
                             "model_signal": _model_signal(home, away, sport_key, impl_raw, side),
@@ -382,7 +384,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                         continue
                     if disp.get(side, 0.0) > MAX_DISPERSION:
                         continue
-                    edge = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    edge_gross = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    edge = cons[side] - _effective_implied_prob(odds, b["book"])
                     if edge >= min_edge and 1.2 <= odds <= 15.0:
                         other_probs = [b2["fair"][side] for b2 in data["books"]
                                        if b2["book"] != b["book"] and side in b2["fair"]]
@@ -402,6 +405,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             "impl_effective": round(_effective_implied_prob(odds, b["book"]), 4),
                             "cons": round(cons[side], 4),
                             "edge": round(edge, 4),
+                            "edge_gross": round(edge_gross, 4),
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
                             "model_signal": "?",
@@ -441,7 +445,8 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                         continue
                     if disp.get(side, 0.0) > MAX_DISPERSION:
                         continue
-                    edge = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    edge_gross = cons[side] - b["fair"].get(side, 1.0 / odds)
+                    edge = cons[side] - _effective_implied_prob(odds, b["book"])
                     if edge >= min_edge and 1.2 <= odds <= 15.0:
                         other_probs = [b2["fair"][side] for b2 in btts_books
                                        if b2["book"] != b["book"] and side in b2["fair"]]
@@ -461,6 +466,7 @@ def find_value_bets(events: list, sport_key: str) -> list[dict]:
                             "impl_effective": round(_effective_implied_prob(odds, b["book"]), 4),
                             "cons": round(cons[side], 4),
                             "edge": round(edge, 4),
+                            "edge_gross": round(edge_gross, 4),
                             "pinnacle_cons": round(pin_fair.get(side, 0.0), 4),
                             "n_books": n, "confidence": conf,
                             "model_signal": "?",
@@ -1003,9 +1009,8 @@ def main():
             "odds": vb["odds"],
             "impl_raw": round(1.0 / vb["odds"], 4),
             "impl_effective": round(_effective_implied_prob(vb["odds"], vb["book"]), 4),
-            # net edge: consensus prob minus effective implied prob (after commission deduction)
             "edge": round(vb["cons"] - _effective_implied_prob(vb["odds"], vb["book"]), 4),
-            "edge_gross": round(vb["edge"], 4),
+            "edge_gross": round(vb.get("edge_gross", vb["edge"]), 4),
             "effective_odds": round(_effective_odds(vb["odds"], vb["book"]), 4),
             "commission_rate": round(_commission_rate(vb["book"]), 4),
             "consensus": round(vb["cons"], 4),

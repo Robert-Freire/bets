@@ -275,12 +275,12 @@ def test_impl_raw_equals_inverse_odds():
             )
 
 
-def test_edge_filter_uses_gross_edge():
-    """Every flagged bet must have edge_gross >= strategy.min_edge.
+def test_edge_filter_uses_net_edge():
+    """Every flagged bet must have edge (cons − effective_implied_prob) >= strategy.min_edge.
 
-    In production, the edge filter is: cons - Shin-devigged fair >= min_edge (gross).
-    strategies.py must use the same gross edge for the flag decision, not the net edge
-    (which uses 1/odds instead of Shin-devigged fair and would be spuriously higher).
+    The filter must use the true value metric, not the Shin-devigged gross edge
+    (cons − book_fair_devigged), which inflates apparent edge by 2–4× and causes
+    bets with negative true value to pass the gate. See issue #22.
     """
     from tests.conftest import synthetic_event
 
@@ -291,17 +291,48 @@ def test_edge_filter_uses_gross_edge():
     ev = synthetic_event(h2h_prices=books)
 
     no_filter = StrategyConfig(
-        name="_test_gross_edge",
+        name="_test_net_edge",
         label="", description="",
         min_edge=0.03, drop_outlier_book=False,
     )
     bets = evaluate_strategy([ev], "soccer_epl", no_filter)
 
-    # If any bets are flagged, each must satisfy edge_gross >= min_edge
     for b in bets:
-        assert b["edge_gross"] >= no_filter.min_edge, (
-            f"{b['book']} {b['side']}: edge_gross {b['edge_gross']:.4f} < min_edge {no_filter.min_edge}"
+        assert b["edge"] >= no_filter.min_edge, (
+            f"{b['book']} {b['side']}: edge {b['edge']:.4f} < min_edge {no_filter.min_edge}"
         )
+
+
+def test_gross_edge_above_threshold_but_net_edge_below_is_rejected():
+    """A bet whose gross edge clears min_edge but whose true edge doesn't must be rejected.
+
+    Rogue book: williamhill at HOME odds 2.50 in a 28.9%-overround market.
+    18 base books give consensus HOME ~0.390. Shin devigging on the rogue market
+    pushes its fair HOME to ~0.305, so:
+      edge_gross = 0.390 − 0.305 ≈ +8.5%  (would pass the old gross-edge filter)
+      edge_net   = 0.390 − 1/2.50 ≈ −1.0% (correctly rejected by the new filter)
+    Under the old code this bet would have been flagged; under the fix it must not be.
+    """
+    from tests.conftest import synthetic_event
+
+    base_books = [b for b in sorted(UK_LICENSED_BOOKS) if b != "williamhill"]
+    books = {b: (2.40, 3.20, 3.00) for b in base_books}
+    # High overround (1.289): Shin devigging pulls HOME fair to ~0.305 vs raw 0.400
+    books["williamhill"] = (2.50, 1.80, 3.00)
+    ev = synthetic_event(h2h_prices=books)
+
+    cfg = StrategyConfig(
+        name="_test_gross_vs_net",
+        label="", description="",
+        min_edge=0.03, drop_outlier_book=False,
+        min_books=15,   # 19 UK books total; default 20 would short-circuit before the filter
+    )
+    bets = evaluate_strategy([ev], "soccer_epl", cfg)
+
+    williamhill_home = [b for b in bets if b["book"] == "williamhill" and b["side"] == "H"]
+    assert williamhill_home == [], (
+        f"williamhill HOME should be rejected (net edge ≈ −1.0%) but was flagged: {williamhill_home}"
+    )
 
 
 # ── R.1 tests ─────────────────────────────────────────────────────────────────
@@ -514,11 +545,11 @@ def _high_xg_team_data(home: str, away: str, q25: float = 1.2) -> dict:
     }
 
 
-def _k_event(draw_odds: float = 3.40) -> dict:
+def _k_event(draw_odds: float = 3.55) -> dict:
     """Event with 20 UK books + betfair at the given draw odds.
 
-    Base books have short draw odds (high consensus draw prob ~0.33) so that
-    betfair's draw at ≥3.20 shows a genuine ≥3% edge vs consensus.
+    Base books have short draw odds (consensus draw prob ~0.323). After Betfair's
+    5% commission, draw_odds≥3.55 is needed for a genuine ≥3% true edge (cons − eff_implied).
     """
     base = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:19]
     books = {b: (2.70, 2.85, 2.80) for b in base}  # short draw → high consensus draw prob
@@ -536,7 +567,7 @@ def test_variant_K_draw_bias_config():
 
 
 def test_variant_K_only_produces_draw_bets():
-    ev = _k_event(draw_odds=3.40)
+    ev = _k_event(draw_odds=3.55)
     xg = _low_xg_team_data("Arsenal", "Chelsea")
     bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
     assert bets, "K_draw_bias should produce at least one bet on low-xG in-band fixture"
