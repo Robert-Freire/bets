@@ -4,37 +4,20 @@
 loads from there at import time. `UK_LICENSED_BOOKS` and `EXCHANGE_BOOKS` in
 `src/betting/strategies.py` are derived from the same config at module load.
 
-**Verification date:** 2026-04-29
+## Book types
 
-## Exchanges (commission on net winnings)
+- **Exchanges** (`type: exchange`) — commission charged on net winnings; rate stored in `config.json`.
+- **Sportsbooks** (`type: sportsbook`) — commission baked into odds; Shin de-vigging removes it.
 
-| Book (API key) | Commission | Source |
-|---|---|---|
-| `betfair_ex_uk` | 5% (UK Market Base Rate) | https://www.betfair.com/aboutUs/Betfair.Charges/ |
-| `smarkets` | 2% | https://smarkets.com/betting-exchange/commission |
-| `matchbook` | 2% | https://www.matchbook.com/aboutus/commission |
+## Verification sources (exchanges only)
 
-## Sportsbooks (commission baked into odds; margin already removed by Shin de-vigging)
+| Book (API key) | Source |
+|---|---|
+| `betfair_ex_uk` | https://www.betfair.com/aboutUs/Betfair.Charges/ |
+| `smarkets` | https://smarkets.com/betting-exchange/commission |
+| `matchbook` | https://www.matchbook.com/aboutus/commission |
 
-| Book (API key) | Commission | Notes |
-|---|---|---|
-| `pinnacle` | 0% | Low-margin book; used as consensus anchor |
-| `betfair_sb_uk` | 0% | Fixed-odds sportsbook, distinct from exchange |
-| `betfred_uk` | 0% | |
-| `williamhill` | 0% | |
-| `coral` | 0% | |
-| `ladbrokes_uk` | 0% | |
-| `skybet` | 0% | |
-| `paddypower` | 0% | |
-| `boylesports` | 0% | |
-| `betvictor` | 0% | |
-| `betway` | 0% | |
-| `leovegas` | 0% | |
-| `casumo` | 0% | |
-| `virginbet` | 0% | |
-| `livescorebet` | 0% | |
-| `sport888` | 0% | 888Sport |
-| `grosvenor` | 0% | |
+**Verification date:** 2026-04-29. Re-verify quarterly — exchange rates can change.
 
 ## How commission affects edge and stakes
 
@@ -59,4 +42,3 @@ Kelly stakes are computed on effective odds, so Betfair bets will have smaller s
 ## Notes
 
 - Betfair's UK MBR (Market Base Rate) is 5% as of 2026. Premium charges apply for highly profitable accounts but are excluded here.
-- Commission rates can change; re-verify this table quarterly.

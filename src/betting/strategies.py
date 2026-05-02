@@ -39,23 +39,10 @@ except ImportError:
 
 # ── book sets (derived from config.json) ─────────────────────────────────────
 
-try:
-    from src.config import load_books as _load_books
-    _BOOKS = _load_books()
-except Exception:
-    _BOOKS = []
-
-if _BOOKS:
-    UK_LICENSED_BOOKS = {b["key"] for b in _BOOKS if b.get("license") == "UK"}
-    EXCHANGE_BOOKS    = {b["key"] for b in _BOOKS if b.get("type") == "exchange"}
-else:
-    UK_LICENSED_BOOKS = {
-        "betfair_ex_uk", "betfair_sb_uk", "smarkets", "matchbook",
-        "betfred_uk", "williamhill", "coral", "ladbrokes_uk", "skybet",
-        "paddypower", "boylesports", "betvictor", "betway", "leovegas",
-        "casumo", "virginbet", "livescorebet", "sport888", "grosvenor",
-    }
-    EXCHANGE_BOOKS = {"betfair_ex_uk", "smarkets", "matchbook"}
+from src.config import load_books as _load_books
+_BOOKS = _load_books()
+UK_LICENSED_BOOKS = {b["key"] for b in _BOOKS if b["license"] == "UK"}
+EXCHANGE_BOOKS    = {b["key"] for b in _BOOKS if b["type"] == "exchange"}
 
 # The Odds API team names → Understat team names (used by K_draw_bias xG lookup).
 # Without this map, ~30% of EPL/Bundesliga/Serie A/Ligue 1 fixtures fail name matching
