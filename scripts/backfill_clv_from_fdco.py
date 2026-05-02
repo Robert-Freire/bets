@@ -30,6 +30,7 @@ if str(_ROOT) not in sys.path:
 from src.betting.commissions import effective_odds
 from src.betting.devig import shin
 from src.betting.team_names import API_TO_FD
+from src.config import load_leagues as _load_leagues
 
 _RAW_DIR  = _ROOT / "data" / "raw"
 _BETS_CSV = _ROOT / "logs" / "bets.csv"
@@ -38,14 +39,12 @@ _SEASON   = "2526"
 _FDCO_URL = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 _STALE_DAYS = 3
 
-# Sport label → FDCO league code
-SPORT_TO_FDCO = {
-    "EPL":          "E0",
-    "Bundesliga":   "D1",
-    "Serie A":      "I1",
-    "Ligue 1":      "F1",
-    "Championship": "E1",
-    "Bundesliga 2": "D2",
+# Sport label → FDCO league code — built from active config so adding/removing
+# a league in config.json flows through automatically.
+SPORT_TO_FDCO: dict[str, str] = {
+    e["label"]: e["fdco_code"]
+    for e in _load_leagues()
+    if "fdco_code" in e
 }
 
 

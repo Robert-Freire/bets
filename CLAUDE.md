@@ -151,6 +151,7 @@ scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs;
 app.py                      Flask dashboard
 templates/index.html        Dashboard UI
 
+src/config.py               Shared league config loader (load_config(), load_leagues()); respects LEAGUES_CONFIG env var; enriches entries with fdco_code from downloader.LEAGUES
 src/storage/schema.sql      Canonical MSSQL schema (7 tables: fixtures, books, strategies, bets, paper_bets, closing_lines, drift)
 src/storage/schema_sqlite.sql  SQLite mirror for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner

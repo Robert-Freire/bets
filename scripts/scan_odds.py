@@ -24,6 +24,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from src.config import load_config as _src_load_config, _validate as _validate_leagues
+
 try:
     from src.betting.devig import shin as _shin_devig, proportional as _proportional_devig
     _DEVIG = True
@@ -149,62 +151,11 @@ UK_LICENSED_BOOKS = {
     "grosvenor",       # Grosvenor
 }
 
-_HARDCODED_FOOTBALL = [
-    ("soccer_epl",                "EPL",          20),
-    ("soccer_germany_bundesliga", "Bundesliga",   20),
-    ("soccer_italy_serie_a",      "Serie A",      20),
-    ("soccer_efl_champ",          "Championship", 25),
-    ("soccer_france_ligue_one",   "Ligue 1",      20),
-    ("soccer_germany_bundesliga2","Bundesliga 2", 20),
-]
 _NBA_SPORT = ("basketball_nba", "NBA", 20)
 
 
 def _load_config() -> dict:
-    """Load scanner config from LEAGUES_CONFIG env var → config.json.
-
-    When LEAGUES_CONFIG is explicitly set the file must have a valid 'leagues'
-    array — no silent fallback, so a misconfigured host fails loudly.
-    When LEAGUES_CONFIG is absent and config.json has no 'leagues' key the
-    hardcoded football list is used (Pi back-compat before config rolls out).
-    """
-    leagues_config_env = os.environ.get("LEAGUES_CONFIG")
-    if leagues_config_env:
-        config_path = Path(leagues_config_env)
-        if not config_path.exists():
-            raise RuntimeError(f"LEAGUES_CONFIG={leagues_config_env} does not exist.")
-        cfg = json.loads(config_path.read_text())
-        if "leagues" not in cfg:
-            raise RuntimeError(
-                f"Config {config_path} has no 'leagues' key. "
-                "Required: [{\"key\": ..., \"label\": ..., \"min_books\": ...}, ...]"
-            )
-        _validate_leagues(cfg["leagues"], config_path)
-        return cfg
-
-    config_path = Path(__file__).resolve().parent.parent / "config.json"
-    cfg: dict = {}
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text())
-        except Exception:
-            pass
-    if "leagues" not in cfg:
-        cfg["leagues"] = [
-            {"key": k, "label": l, "min_books": m} for k, l, m in _HARDCODED_FOOTBALL
-        ]
-    else:
-        _validate_leagues(cfg["leagues"], config_path)
-    return cfg
-
-
-def _validate_leagues(leagues: list, source) -> None:
-    for entry in leagues:
-        missing = [k for k in ("key", "label", "min_books") if k not in entry]
-        if missing:
-            raise RuntimeError(
-                f"League entry in {source} missing required keys {missing}: {entry}"
-            )
+    return _src_load_config()
 
 
 _CONFIG = _load_config()

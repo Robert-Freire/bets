@@ -90,7 +90,7 @@ The two environments now diverge on more than just notifications. Don't apply Pi
 **Practical implications for this weekend's eval:**
 - **No live drift tracking.** `logs/drift.csv` is frozen as of 2026-05-01. T-60 / T-15 / T-1 capture is gone.
 - **CLV won't be visible Sat/Sun.** First populated `pinnacle_close_prob` cells appear ~08:30 UTC Monday after the FDCO backfill cron fires. Don't pre-judge "no edge" from Sunday's empty CLV column.
-- **CLV scope is football top-6 only.** EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2. Anything outside (NBA, tennis — already none scanned this weekend; BTTS — already 0 bets) gets no CLV ever. We don't bet outside that scope right now anyway.
+- **CLV scope = active config leagues (FDCO-covered).** WSL/dev: top-7 (6 prod + La Liga via SP1). Pi/prod: top-6 (EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2). Anything outside (NBA, tennis — none scanned this weekend; BTTS — 0 bets historically) gets no CLV ever.
 - **Totals: 2.5 line only.** FDCO doesn't publish other totals. Already aligned with our market mix.
 - **+1 day delay vs at-close.** Fine for weekly review, useless for live monitoring. We accepted this tradeoff to stay under the 500/mo Odds API budget.
 
@@ -109,7 +109,7 @@ ssh robert@192.168.0.28 'cd ~/projects/bets && export $(cat .env) && .venv/bin/p
 
 ### Both machines
 - [ ] **CLV bets per variant > 0** for at least 5 of the active variants (A, C, D, F, G, H typically fire most). Variants with 0 bets this weekend won't have CLV — that's normal, not a failure.
-- [ ] **`pinnacle_close_prob` populated** for every settled top-6-football h2h or totals-2.5 bet kicked off Sat/Sun.
+- [ ] **`pinnacle_close_prob` populated** for every settled config-league h2h or totals-2.5 bet kicked off Sat/Sun (top-7 on WSL, top-6 on Pi).
 - [ ] **No `[backfill_clv]` errors** in `logs/backfill_clv.log` other than expected "no FDCO row found" warnings for fixtures FDCO hasn't published yet.
 - [ ] **No 401/quota errors** in either scan log.
 - [ ] **No `[paper:schema]` migration loops** — schema migration should run once per CSV, then be silent.
@@ -213,7 +213,7 @@ ssh robert@192.168.0.28 'crontab -l | grep -cE "scan_odds|backfill_clv"'        
 
 - **CLV is delayed by 1 day** — populated by Mon 08:00 FDCO backfill, not at-close. Don't expect Sat/Sun CLV.
 - **`logs/drift.csv` is frozen** — closing-line script paused; T-60/T-15/T-1 captures will not grow this weekend. Existing rows are historical only.
-- **No CLV outside top-6 football leagues** — NBA + tennis already not scanned this weekend; BTTS bets historically 0.
+- **No CLV outside config-active football leagues** — NBA + tennis already not scanned this weekend; BTTS bets historically 0. WSL gets La Liga CLV (SP1 now in backfill); Pi does not (config.json has 6 leagues).
 - **WSL gaps when laptop sleeps** — acceptable; Pi covers production reliability.
 - **Pre-R.11 paper rows have empty `strategy_config_hash`** — own "pre-R.11 / WSL-test" eval window. `compare_strategies.py` default filters them out; pass `--all-history` to include.
 - **Pi data not visible in the Azure dashboard yet** — A.10 (Pi onboarding) handles that; runs in its own future sprint.
