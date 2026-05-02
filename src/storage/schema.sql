@@ -27,8 +27,20 @@ CREATE TABLE books (
 );
 
 -- Drop vestigial column (was never populated or read; source of truth is config.json).
+-- Must drop the auto-named DEFAULT constraint first (SQL Server blocks DROP COLUMN otherwise).
+-- Already applied 2026-05-02; kept as a no-op guard for fresh DBs created from old schema.
 IF COL_LENGTH(N'books', N'commission_rate') IS NOT NULL
+BEGIN
+    DECLARE @con nvarchar(256) = (
+        SELECT dc.name
+        FROM sys.default_constraints dc
+        JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+        WHERE c.object_id = OBJECT_ID(N'books') AND c.name = N'commission_rate'
+    );
+    IF @con IS NOT NULL
+        EXEC(N'ALTER TABLE books DROP CONSTRAINT ' + @con);
     ALTER TABLE books DROP COLUMN commission_rate;
+END;
 
 IF OBJECT_ID(N'strategies', N'U') IS NULL
 CREATE TABLE strategies (

@@ -24,17 +24,24 @@ def split_statements(sql_text: str) -> list[str]:
     """Split a SQL script into individual statements.
 
     Strips line comments (`-- ...`) and blank lines, then groups remaining
-    lines into statements terminated by `;` at end-of-line. Does NOT handle
-    `;` inside string literals — fine for our DDL since we never embed them.
+    lines into statements. A statement ends at `;` on its own or at the end
+    of a line, but only when not inside a BEGIN/END block (so multi-statement
+    IF/BEGIN blocks are sent as one batch).
     """
     statements: list[str] = []
     current: list[str] = []
+    depth = 0  # BEGIN/END nesting
     for raw_line in sql_text.splitlines():
-        stripped = raw_line.strip()
+        stripped = raw_line.strip().upper()
         if not stripped or stripped.startswith("--"):
             continue
+        word = stripped.split()[0] if stripped.split() else ""
+        if word == "BEGIN":
+            depth += 1
+        elif word == "END" or word == "END;":
+            depth -= 1
         current.append(raw_line)
-        if stripped.endswith(";"):
+        if depth == 0 and raw_line.rstrip().endswith(";"):
             stmt = "\n".join(current).rstrip(";\n ").strip()
             if stmt:
                 statements.append(stmt)
