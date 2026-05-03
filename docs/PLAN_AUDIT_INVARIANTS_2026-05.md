@@ -22,15 +22,7 @@ APIs or git-tracked files. The audit touches only the DB and ntfy — cloud-safe
 ```
 .github/workflows/audit_invariants.yml   Mon 08:10 UTC = 09:10 BST (summer)
 scripts/audit_invariants.py              the 13 checks
-logs/audit_state.json                    I-9 state (gitignored; written by workflow via artifact or runner tmpdir)
 ```
-
-> **Note on audit_state.json**: GitHub Actions runners are ephemeral, so I-9
-> (week-over-week CLV shift) cannot persist state between runs via the filesystem.
-> Options: (a) store last_avg_clv in the DB (a new single-row config/state table),
-> or (b) query the DB for the CLV average from 7–14 days ago and compare to the
-> current 0–7d average entirely in SQL — no file state needed. Option (b) is
-> preferred; implement when wiring I-9 properly.
 
 ## Check groups
 
@@ -47,7 +39,7 @@ logs/audit_state.json                    I-9 state (gitignored; written by workf
 **Group 3 — CLV pipeline**
 - I-7: ≥70% of football settled bets (kickoff > 14d) have `clv_pct` on FDCO-covered leagues
 - I-8: `clv_pct` in `[-0.50, 0.50]` (outside = likely join mismatch)
-- I-9: Week-over-week avg CLV shift < 10pp (WARNING only — doesn't page; see note above)
+- I-9: Week-over-week avg CLV shift < 10pp (WARNING only — doesn't page; all-SQL: compares 0–7d vs 7–14d settled bets, no file state)
 
 **Group 4 — book_skill construction**
 - I-10: `mean(ABS(edge_vs_consensus_loo))` > 0.0001 for latest window (LOO regression guard)
@@ -79,4 +71,4 @@ runtime via `az keyvault secret show`. `kaunitz-github-actions` SP has
 
 - 2026-05-03: plan created.
 - 2026-05-03: Groups 1–4 (I-1..I-13) shipped in `scripts/audit_invariants.py`. WSL cron wired Mon 09:10 BST. Groups 5–6 pending.
-- 2026-05-03: Moved from WSL cron to GitHub Actions. `audit_invariants.yml` workflow created. WSL cron entry removed. Needs `AZURE_SQL_DSN` repo secret before first run.
+- 2026-05-03: Moved from WSL cron to GitHub Actions. `audit_invariants.yml` workflow created. WSL cron entry removed. No new secrets required — OIDC + KV reuses existing `AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID` creds.
