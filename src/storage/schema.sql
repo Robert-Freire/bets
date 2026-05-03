@@ -13,8 +13,19 @@ CREATE TABLE fixtures (
     home          nvarchar(128)    NOT NULL,
     away          nvarchar(128)    NOT NULL,
     kickoff_utc   datetime2(3)     NOT NULL,
+    source        nvarchar(8)      NULL,        -- 'fdco' | 'afd'
+    status        nvarchar(16)     NULL,        -- 'scheduled'
+    ingested_at   datetime2(3)     NULL,        -- set on each FixtureRepo upsert
     created_at    datetime2(3)     NOT NULL DEFAULT SYSUTCDATETIME()
 );
+
+-- Migration guards for columns added after initial schema deployment.
+IF COL_LENGTH(N'fixtures', N'source') IS NULL
+    ALTER TABLE fixtures ADD source nvarchar(8) NULL;
+IF COL_LENGTH(N'fixtures', N'status') IS NULL
+    ALTER TABLE fixtures ADD status nvarchar(16) NULL;
+IF COL_LENGTH(N'fixtures', N'ingested_at') IS NULL
+    ALTER TABLE fixtures ADD ingested_at datetime2(3) NULL;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_fixtures_kickoff_sport')
 CREATE INDEX ix_fixtures_kickoff_sport ON fixtures (kickoff_utc, sport_key);

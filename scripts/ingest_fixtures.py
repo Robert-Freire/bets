@@ -1,7 +1,8 @@
 """Ingest upcoming fixtures from football-data.co.uk and (optionally) api.football-data.org.
 
-Writes logs/fixture_calendar.json for use by src/data/fixture_calendar.py.
-Both Pi and WSL run this script — no DB dependency required.
+Writes to the `fixtures` table in Azure SQL via FixtureRepo.  When DB env vars
+are unset (Pi pre-A.10), the script fetches and parses fixtures but skips the
+upsert with a warning — no JSON file is written.
 
 Sources:
   1. FDCO fixtures.csv (free, all leagues, includes kickoff time in UK local time)
@@ -20,7 +21,6 @@ import json
 import os
 import sys
 import time
-import unicodedata
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -31,10 +31,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.data.downloader import LEAGUES
+from src.storage._keys import _norm_name, fixture_uuid
 
 _LONDON = ZoneInfo("Europe/London")
 _FDCO_FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
-_CALENDAR_PATH = _ROOT / "logs" / "fixture_calendar.json"
 _RAW_DIR = _ROOT / "data" / "raw"
 _FORWARD_WEEKS = 8
 # api.football-data.org free tier rejects date ranges wider than ~10 days
@@ -92,50 +92,18 @@ def _parse_fdco_kickoff(date_str: str, time_str: str) -> datetime | None:
     return local_dt.astimezone(timezone.utc)
 
 
-def _norm_name(name: str) -> str:
-    """NFD-fold accents, lowercase, strip ' FC'/' AFC' suffix.
-
-    Handles EPL naming differences between sources (AFD 'Arsenal FC' vs FDCO
-    'Arsenal').  Continental clubs whose FDCO names are abbreviated (e.g. FDCO
-    'Dortmund' vs AFD 'Borussia Dortmund') may still produce duplicate rows
-    when AFD is enabled for those leagues; acceptable for the current state
-    where FOOTBALL_DATA_API_KEY is not set.
-    """
-    name = unicodedata.normalize("NFD", name)
-    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
-    name = name.strip().lower()
-    for suffix in (" fc", " afc"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)].strip()
-            break
-    return name
-
-
-def _fixture_key(f: dict) -> tuple | None:
-    """Dedup key: (sport_key, kickoff_date, norm_home, norm_away).
-
-    Keys on the date part of kickoff_utc (not the full timestamp) so that AFD
-    and FDCO rows for the same fixture can be matched even if their reported
-    kickoff minute differs slightly.
-    """
-    ko = f.get("kickoff_utc", "")
-    date_part = ko[:10] if len(ko) >= 10 else ""
-    if not date_part:
-        return None
-    home = _norm_name(f.get("home", ""))
-    away = _norm_name(f.get("away", ""))
-    if not home or not away:
-        return None
-    return (f.get("sport_key", ""), date_part, home, away)
-
-
 def _dedup(fixtures: list[dict]) -> list[dict]:
-    """Remove duplicates by fixture key; last entry wins on collision."""
-    seen: dict[tuple, dict] = {}
+    """Remove duplicates by fixture UUID; last entry wins on collision."""
+    seen: dict[str, dict] = {}
     for f in fixtures:
-        key = _fixture_key(f)
-        if key:
-            seen[key] = f
+        sport_key = f.get("sport_key", "")
+        kickoff = f.get("kickoff_utc", "")
+        home = f.get("home", "")
+        away = f.get("away", "")
+        if not sport_key or len(kickoff) < 10 or not home or not away:
+            continue
+        fid = fixture_uuid(sport_key, kickoff, home, away)
+        seen[fid] = f
     return list(seen.values())
 
 
@@ -188,6 +156,8 @@ def _fetch_fdco_fixtures_csv() -> list[dict]:
             "home": home,
             "away": away,
             "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+            "source": "fdco",
+            "status": "scheduled",
         })
 
     print(f"[fdco] fixtures.csv: {len(fixtures)} upcoming fixtures across "
@@ -236,6 +206,8 @@ def _fetch_fdco_season_csvs(limit_fdco_codes: list[str] | None = None) -> list[d
                         "home": home,
                         "away": away,
                         "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                        "source": "fdco",
+                        "status": "scheduled",
                     })
         except Exception as e:
             print(f"[fdco] {fd_code}: season CSV parse error: {e}")
@@ -287,50 +259,50 @@ def _fetch_afd(api_key: str) -> list[dict]:
                 "home": home,
                 "away": away,
                 "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                "source": "afd",
+                "status": "scheduled",
             })
         print(f"[afd] {comp_code}: {len(matches)} fixtures (next {_AFD_WINDOW_DAYS}d)")
 
     return fixtures
 
 
-def _write_calendar(
-    fixtures: list[dict], now: datetime, *, allow_empty: bool
+def _upsert_calendar(
+    fixtures: list[dict], repo, *, allow_empty: bool
 ) -> None:
-    """Write logs/fixture_calendar.json atomically via tmp+rename.
+    """Upsert fixtures into the DB via FixtureRepo.
 
-    Refuses to overwrite the existing calendar with an empty list unless
-    allow_empty=True, preventing a transient FDCO failure from poisoning
-    the canary for the full week until the next scheduled run.
+    When fixtures is empty and allow_empty is False, preserves existing DB rows
+    instead of attempting a no-op upsert, preventing a transient FDCO failure
+    from clearing the canary's view for the full week.
+
+    With upsert semantics, --allow-empty on an empty input is a no-op
+    (nothing to upsert; existing rows untouched) — it only suppresses the WARN.
     """
+    if not repo.db_enabled:
+        print("[calendar] WARN: DB not configured — skipping upsert. "
+              "Set BETS_DB_WRITE=1 and AZURE_SQL_DSN to enable.",
+              file=sys.stderr)
+        return
     if not fixtures and not allow_empty:
-        try:
-            existing_count = len(
-                json.loads(_CALENDAR_PATH.read_text()).get("fixtures", [])
-            )
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            existing_count = 0
+        existing_count = repo.count_ingested_fixtures()
         if existing_count:
             print(
                 f"[calendar] WARN: ingest returned 0 fixtures. "
-                f"Preserving existing {existing_count}-fixture calendar. "
-                f"Use --allow-empty to force overwrite."
+                f"Preserving existing {existing_count} calendar rows. "
+                f"Use --allow-empty to suppress this warning."
             )
         else:
             print(
-                "[calendar] WARN: ingest returned 0 fixtures and no existing calendar. "
-                "Use --allow-empty to write empty calendar."
+                "[calendar] WARN: ingest returned 0 fixtures and no existing rows. "
+                "Use --allow-empty to suppress this warning."
             )
         return
-
-    _CALENDAR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "fixtures": fixtures,
-    }
-    tmp = _CALENDAR_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(_CALENDAR_PATH)
-    print(f"[calendar] Written {len(fixtures)} fixtures to {_CALENDAR_PATH}")
+    if not fixtures:
+        # allow_empty + empty list → no-op
+        return
+    n = repo.upsert_many(fixtures)
+    print(f"[calendar] Upserted {n} fixtures into DB")
 
 
 def main() -> None:
@@ -338,7 +310,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Parse but don't write")
     parser.add_argument(
         "--allow-empty", action="store_true",
-        help="Write even when 0 fixtures found (bootstrapping / end-of-season)"
+        help="Suppress empty-ingest warning (bootstrapping / end-of-season)"
     )
     parser.add_argument(
         "--leagues", nargs="+", default=None,
@@ -384,7 +356,12 @@ def main() -> None:
         print("[calendar] Dry-run: not writing")
         return
 
-    _write_calendar(fixtures, now, allow_empty=args.allow_empty)
+    from src.storage.repo import FixtureRepo
+    repo = FixtureRepo()
+    try:
+        _upsert_calendar(fixtures, repo, allow_empty=args.allow_empty)
+    finally:
+        repo.close()
 
 
 if __name__ == "__main__":

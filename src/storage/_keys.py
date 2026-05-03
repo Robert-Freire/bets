@@ -3,12 +3,14 @@
 The same namespace and natural keys are used by:
   - `scripts/migrate_csv_to_db.py` (one-shot CSV backfill, A.3)
   - `src/storage/repo.py`           (live dual-write repo, A.4)
+  - `scripts/ingest_fixtures.py`    (fixture calendar ingest)
 
 Changing `_NAMESPACE` or any of the natural-key tuples breaks
 idempotency between the importer and the live writer. Don't.
 """
 from __future__ import annotations
 
+import unicodedata
 import uuid
 
 _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "kaunitz.bets:v1")
@@ -41,10 +43,35 @@ def _u5(parts: tuple) -> str:
     return str(uuid.uuid5(_NAMESPACE, "|".join(str(p) for p in parts)))
 
 
-def fixture_uuid(kickoff: str, home: str, away: str) -> str:
-    """Stable fixture UUID. Independent of sport label so a corrected
-    label later does not split the fixture."""
-    return _u5(("fixture", kickoff, home, away))
+def _norm_name(name: str) -> str:
+    """NFD-fold accents, lowercase, strip ' FC'/' AFC' suffix.
+
+    Canonical normalisation for cross-source fixture dedup (FDCO vs AFD vs
+    Odds API team names).  Used both by fixture_uuid and ingest_fixtures.
+    """
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+    name = name.strip().lower()
+    for suffix in (" fc", " afc"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)].strip()
+            break
+    return name
+
+
+def fixture_uuid(sport_key: str, kickoff_utc: str, home: str, away: str) -> str:
+    """Stable fixture UUID keyed on sport + UTC date + normalised team names.
+
+    Keying on date (not full timestamp) collapses minor kickoff-time
+    differences between FDCO and AFD for the same fixture.  _norm_name
+    collapses 'Arsenal FC' vs 'Arsenal' differences.
+
+    The "fixture|" prefix in the name string disambiguates from bets/paper_bets
+    UUIDs that share the same _NAMESPACE.
+    """
+    date_part = kickoff_utc[:10]  # YYYY-MM-DD in UTC
+    name = f"fixture|{sport_key}|{date_part}|{_norm_name(home)}|{_norm_name(away)}"
+    return str(uuid.uuid5(_NAMESPACE, name))
 
 
 def bet_uuid(scan_date: str, kickoff: str, home: str, away: str,

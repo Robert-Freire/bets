@@ -1,7 +1,7 @@
-"""Tests for scripts/ingest_fixtures.py — FDCO parsing and fixture calendar writing."""
+"""Tests for scripts/ingest_fixtures.py — FDCO parsing and fixture calendar upsert."""
 from __future__ import annotations
 
-import json
+import sqlite3
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -9,10 +9,25 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+SCHEMA_SQLITE = ROOT / "src" / "storage" / "schema_sqlite.sql"
+
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import scripts.ingest_fixtures as ingest
+
+
+def _make_db():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA_SQLITE.read_text())
+    conn.commit()
+    return conn
+
+
+def _make_repo(conn):
+    from src.storage.repo import FixtureRepo
+    return FixtureRepo(conn=conn)
 
 
 # ── _parse_fdco_kickoff ───────────────────────────────────────────────────────
@@ -117,24 +132,28 @@ def test_fetch_fdco_returns_empty_on_error(monkeypatch):
     assert fixtures == []
 
 
-# ── _norm_name ────────────────────────────────────────────────────────────────
+# ── _norm_name (imported from _keys) ─────────────────────────────────────────
 
 def test_norm_name_strips_fc_suffix():
-    assert ingest._norm_name("Arsenal FC") == "arsenal"
-    assert ingest._norm_name("Arsenal") == "arsenal"
+    from src.storage._keys import _norm_name
+    assert _norm_name("Arsenal FC") == "arsenal"
+    assert _norm_name("Arsenal") == "arsenal"
 
 
 def test_norm_name_strips_afc_suffix():
-    assert ingest._norm_name("Cardiff AFC") == "cardiff"
+    from src.storage._keys import _norm_name
+    assert _norm_name("Cardiff AFC") == "cardiff"
 
 
 def test_norm_name_folds_accents():
-    assert ingest._norm_name("Mönchengladbach") == "monchengladbach"
-    assert ingest._norm_name("Paris Saint-Germain") == "paris saint-germain"
+    from src.storage._keys import _norm_name
+    assert _norm_name("Mönchengladbach") == "monchengladbach"
+    assert _norm_name("Paris Saint-Germain") == "paris saint-germain"
 
 
 def test_norm_name_case_insensitive():
-    assert ingest._norm_name("ARSENAL FC") == ingest._norm_name("arsenal fc")
+    from src.storage._keys import _norm_name
+    assert _norm_name("ARSENAL FC") == _norm_name("arsenal fc")
 
 
 # ── _dedup ────────────────────────────────────────────────────────────────────
@@ -238,69 +257,81 @@ def test_current_season_century_boundary(monkeypatch):
     assert ingest._current_season() == "9900"
 
 
-# ── _write_calendar ───────────────────────────────────────────────────────────
+# ── _upsert_calendar ──────────────────────────────────────────────────────────
 
-def test_write_calendar_writes_atomically(tmp_path):
-    cal_path = tmp_path / "logs" / "fixture_calendar.json"
-    cal_path.parent.mkdir()
-    monkeypatch_path = cal_path  # use local var, no monkeypatch needed
-    import scripts.ingest_fixtures as _ingest
-    orig = _ingest._CALENDAR_PATH
-    _ingest._CALENDAR_PATH = cal_path
-    try:
-        from datetime import datetime, timezone
-        fixtures = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
-                     "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
-        _ingest._write_calendar(fixtures, datetime.now(timezone.utc), allow_empty=False)
-        assert cal_path.exists()
-        data = json.loads(cal_path.read_text())
-        assert len(data["fixtures"]) == 1
-        assert not (tmp_path / "logs" / "fixture_calendar.tmp").exists()
-    finally:
-        _ingest._CALENDAR_PATH = orig
+def _fx(home="Arsenal", away="Chelsea"):
+    return {
+        "sport_key": "soccer_epl", "league": "EPL",
+        "home": home, "away": away,
+        "kickoff_utc": "2026-05-10T14:00:00+00:00",
+        "source": "fdco", "status": "scheduled",
+    }
 
 
-def test_write_calendar_preserves_existing_on_empty_ingest(tmp_path, monkeypatch):
-    cal_path = tmp_path / "logs" / "fixture_calendar.json"
-    cal_path.parent.mkdir()
-    existing = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
-                 "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
-    cal_path.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": existing}))
-    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
-
-    from datetime import datetime, timezone
-    ingest._write_calendar([], datetime.now(timezone.utc), allow_empty=False)
-
-    # File unchanged: still has the original fixture
-    data = json.loads(cal_path.read_text())
-    assert len(data["fixtures"]) == 1
+def test_upsert_calendar_writes_to_db():
+    conn = _make_db()
+    repo = _make_repo(conn)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    count = conn.execute("SELECT COUNT(*) FROM fixtures WHERE ingested_at IS NOT NULL").fetchone()[0]
+    assert count == 1
 
 
-def test_write_calendar_allow_empty_overwrites(tmp_path, monkeypatch):
-    cal_path = tmp_path / "logs" / "fixture_calendar.json"
-    cal_path.parent.mkdir()
-    existing = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
-                 "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
-    cal_path.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": existing}))
-    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
+def test_upsert_calendar_preserves_existing_on_empty_ingest(capsys):
+    """Transient FDCO failure must not clear existing calendar rows."""
+    conn = _make_db()
+    repo = _make_repo(conn)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    before = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
 
-    from datetime import datetime, timezone
-    ingest._write_calendar([], datetime.now(timezone.utc), allow_empty=True)
+    ingest._upsert_calendar([], repo, allow_empty=False)
 
-    data = json.loads(cal_path.read_text())
-    assert data["fixtures"] == []
-
-
-def test_write_calendar_skips_and_warns_when_no_existing_file(tmp_path, monkeypatch, capsys):
-    cal_path = tmp_path / "logs" / "fixture_calendar.json"
-    cal_path.parent.mkdir()
-    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
-
-    from datetime import datetime, timezone
-    ingest._write_calendar([], datetime.now(timezone.utc), allow_empty=False)
-
-    assert not cal_path.exists()
+    after = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
+    assert after == before
     assert "WARN" in capsys.readouterr().out
+
+
+def test_upsert_calendar_allow_empty_is_noop_on_empty_input():
+    """--allow-empty with empty fixtures is a no-op; existing rows untouched."""
+    conn = _make_db()
+    repo = _make_repo(conn)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    before = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
+
+    ingest._upsert_calendar([], repo, allow_empty=True)
+
+    after = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
+    assert after == before
+
+
+def test_upsert_calendar_idempotent():
+    """Running upsert twice produces the same row count."""
+    conn = _make_db()
+    repo = _make_repo(conn)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    assert conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0] == 1
+
+
+def test_upsert_calendar_updates_ingested_at_on_re_upsert():
+    """Re-upserting an existing row updates ingested_at."""
+    conn = _make_db()
+    repo = _make_repo(conn)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    first_ts = conn.execute("SELECT ingested_at FROM fixtures").fetchone()[0]
+
+    import time as _time
+    _time.sleep(0.01)  # ensure clock advances
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    second_ts = conn.execute("SELECT ingested_at FROM fixtures").fetchone()[0]
+    assert second_ts >= first_ts  # monotonically non-decreasing
+
+
+def test_upsert_calendar_db_disabled_warns(capsys):
+    """When DB is not configured, _upsert_calendar emits a warning."""
+    from src.storage.repo import FixtureRepo
+    repo = FixtureRepo(dsn=None)
+    ingest._upsert_calendar([_fx()], repo, allow_empty=False)
+    assert "WARN" in capsys.readouterr().err
 
 
 # ── main() integration ────────────────────────────────────────────────────────
@@ -308,19 +339,30 @@ def test_write_calendar_skips_and_warns_when_no_existing_file(tmp_path, monkeypa
 def test_main_dry_run_does_not_write(tmp_path, monkeypatch):
     import urllib.request
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
-    monkeypatch.setattr(ingest, "_CALENDAR_PATH", tmp_path / "fixture_calendar.json")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
     monkeypatch.setattr(ingest, "_RAW_DIR", tmp_path)
     monkeypatch.delenv("FOOTBALL_DATA_API_KEY", raising=False)
 
+    # Patch FixtureRepo at the source so main()'s local import gets it
+    upserted = []
+
+    class FakeRepo:
+        db_enabled = True
+        def upsert_many(self, fixtures): upserted.extend(fixtures)
+        def count_ingested_fixtures(self): return 0
+        def close(self): pass
+
+    import src.storage.repo as _repo_mod
+    monkeypatch.setattr(_repo_mod, "FixtureRepo", FakeRepo)
+
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py", "--dry-run"])
-
     ingest.main()
-    assert not (tmp_path / "fixture_calendar.json").exists()
+    assert not upserted
 
 
-def test_main_writes_calendar_json(tmp_path, monkeypatch):
+def test_main_writes_fixtures_to_db(monkeypatch):
     import urllib.request
 
     sample_csv = "Div,Date,Time,HomeTeam,AwayTeam\nE0,10/05/2026,15:00,Arsenal,Chelsea\n"
@@ -334,38 +376,47 @@ def test_main_writes_calendar_json(tmp_path, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(ingest, "_today", lambda: date(2026, 5, 1))
-    monkeypatch.setattr(ingest, "_CALENDAR_PATH", tmp_path / "fixture_calendar.json")
     monkeypatch.delenv("FOOTBALL_DATA_API_KEY", raising=False)
+
+    conn = _make_db()
+    repo = _make_repo(conn)
+
+    import src.storage.repo as _repo_mod
+    monkeypatch.setattr(_repo_mod, "FixtureRepo", lambda: repo)
 
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py"])
     ingest.main()
 
-    cal = json.loads((tmp_path / "fixture_calendar.json").read_text())
-    assert "fixtures" in cal
-    assert "generated_at" in cal
-    assert len(cal["fixtures"]) >= 1
-    assert cal["fixtures"][0]["sport_key"] == "soccer_epl"
+    count = conn.execute(
+        "SELECT COUNT(*) FROM fixtures WHERE sport_key = 'soccer_epl'"
+    ).fetchone()[0]
+    assert count >= 1
 
 
-def test_main_preserves_calendar_when_fdco_offline(tmp_path, monkeypatch):
-    """Transient FDCO failure must not poison the calendar."""
+def test_main_preserves_calendar_when_fdco_offline(monkeypatch):
+    """Transient FDCO failure must not clear existing calendar rows."""
     import urllib.request
 
-    cal_path = tmp_path / "logs" / "fixture_calendar.json"
-    cal_path.parent.mkdir()
-    existing = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
-                 "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
-    cal_path.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": existing}))
-
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
-    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
-    monkeypatch.setattr(ingest, "_RAW_DIR", tmp_path)  # no season CSVs
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
+    monkeypatch.setattr(ingest, "_RAW_DIR", Path("/nonexistent"))
     monkeypatch.delenv("FOOTBALL_DATA_API_KEY", raising=False)
+
+    conn = _make_db()
+    repo = _make_repo(conn)
+    # Pre-seed one existing row
+    repo.upsert_many([{
+        "sport_key": "soccer_epl", "league": "EPL", "home": "A", "away": "B",
+        "kickoff_utc": "2026-05-10T14:00:00+00:00", "source": "fdco", "status": "scheduled",
+    }])
+
+    import src.storage.repo as _repo_mod
+    monkeypatch.setattr(_repo_mod, "FixtureRepo", lambda: repo)
 
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py"])
     ingest.main()
 
-    data = json.loads(cal_path.read_text())
-    assert len(data["fixtures"]) == 1  # original preserved
+    count = conn.execute("SELECT COUNT(*) FROM fixtures").fetchone()[0]
+    assert count == 1  # original preserved

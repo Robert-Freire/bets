@@ -315,8 +315,8 @@ class BetRepo:
 
     def _ensure_fixture(self, kickoff: str, home: str, away: str,
                         sport_label: str) -> str:
-        fid = fixture_uuid(kickoff, home, away)
         sport_key = LABEL_TO_KEY.get(sport_label, sport_label or "unknown")
+        fid = fixture_uuid(sport_key, kickoff, home, away)
         self._cur.execute(
             "INSERT INTO fixtures (id, sport_key, league, home, away, kickoff_utc) "
             "SELECT ?, ?, ?, ?, ?, ? "
@@ -828,3 +828,221 @@ class BetRepo:
                     print(f"[repo] natural-key fallback updated {rows} row(s)",
                           file=sys.stderr)
         return rows
+
+
+# ── FixtureRepo ────────────────────────────────────────────────────────────────
+
+class FixtureRepo:
+    """Write/read the `fixtures` table for the fixture calendar ingest.
+
+    Pi-safety contract: no pyodbc import at module level; lazy connect only
+    when `BETS_DB_WRITE=1` and a DSN is configured.  When disabled,
+    `db_enabled` is False and all write/read methods are no-ops / return
+    empty defaults.
+
+    Test injection: pass `conn=<sqlite3.Connection>` to bypass DSN resolution
+    and use a pre-configured in-memory SQLite connection.  In this mode
+    `_sqlite` is True and queries use SQLite-compatible syntax.
+    """
+
+    def __init__(self, dsn: str | None = "__resolve__", *, conn=None):
+        if conn is not None:
+            # Test injection: SQLite connection provided directly.
+            self._dsn = "injected"
+            self._conn = conn
+            self._cur = conn.cursor()
+            self._db_failed = False
+            self._sqlite = True
+            return
+        if dsn == "__resolve__":
+            dsn = _resolve_dsn()
+        self._dsn = dsn
+        self._conn = None
+        self._cur = None
+        self._db_failed = False
+        self._sqlite = False
+
+    @property
+    def db_enabled(self) -> bool:
+        return self._dsn is not None and not self._db_failed
+
+    def _connect(self):
+        if self._conn is not None:
+            return self._conn
+        if self._dsn is None:
+            return None
+        try:
+            import pyodbc  # lazy import (Pi safety)
+            self._conn = pyodbc.connect(self._dsn)
+            self._cur = self._conn.cursor()
+            return self._conn
+        except Exception as e:
+            print(f"[fixture_repo] WARN: DB connect failed: {e}", file=sys.stderr)
+            self._db_failed = True
+            return None
+
+    def close(self):
+        if self._conn is not None and not self._sqlite:
+            try:
+                self._conn.commit()
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+            self._cur = None
+
+    @contextmanager
+    def _db_section(self):
+        if self._connect() is None:
+            yield None
+            return
+        try:
+            yield self._cur
+            if not self._sqlite:
+                self._conn.commit()
+            else:
+                self._conn.commit()
+        except Exception as e:
+            print(f"[fixture_repo] WARN: DB write failed: {e}", file=sys.stderr)
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            self._db_failed = True
+
+    def upsert_many(self, fixtures: list[dict]) -> int:
+        """Upsert calendar fixtures; return number of rows touched.
+
+        For each fixture: compute UUID5, UPDATE mutable fields on existing
+        rows (including ingested_at), INSERT if not exists.  Idempotent.
+        """
+        if not fixtures or not self.db_enabled:
+            return 0
+        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        touched = 0
+        with self._db_section() as cur:
+            if cur is None:
+                return 0
+            for f in fixtures:
+                sport_key = f.get("sport_key", "")
+                kickoff = f.get("kickoff_utc", "")
+                home = f.get("home", "")
+                away = f.get("away", "")
+                if not sport_key or not kickoff or not home or not away:
+                    continue
+                fid = fixture_uuid(sport_key, kickoff, home, away)
+                league = f.get("league")
+                source = f.get("source")
+                status = f.get("status")
+                ko_dt = _parse_dt(kickoff) if not self._sqlite else kickoff
+                # Update existing row
+                cur.execute(
+                    "UPDATE fixtures "
+                    "SET kickoff_utc = ?, source = ?, status = ?, ingested_at = ? "
+                    "WHERE id = ?",
+                    (ko_dt, source, status, now, fid),
+                )
+                # Insert if it didn't exist
+                cur.execute(
+                    "INSERT INTO fixtures "
+                    "(id, sport_key, league, home, away, kickoff_utc, "
+                    " source, status, ingested_at) "
+                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? "
+                    "WHERE NOT EXISTS (SELECT 1 FROM fixtures WHERE id = ?)",
+                    (fid, sport_key, league, home, away,
+                     ko_dt, source, status, now, fid),
+                )
+                touched += 1
+        return touched
+
+    def get_fixtures(
+        self, sport_key: str, from_date, to_date
+    ) -> list[dict]:
+        """Return fixtures for sport_key in [from_date, to_date] (UTC dates)."""
+        if not self.db_enabled or self._connect() is None:
+            return []
+        from_str = str(from_date)   # "YYYY-MM-DD"
+        to_str = str(to_date)
+        # Use string prefix comparison — works for both SQLite TEXT and MSSQL
+        # datetime2 (pyodbc passes strings; MSSQL does implicit cast).
+        # to_str + "T99" ensures the full to_date day is included.
+        try:
+            self._cur.execute(
+                "SELECT id, sport_key, league, home, away, kickoff_utc, "
+                "       source, status "
+                "FROM fixtures "
+                "WHERE sport_key = ? "
+                "  AND kickoff_utc >= ? AND kickoff_utc < ? "
+                "ORDER BY kickoff_utc",
+                (sport_key, from_str, to_str + "T99"),
+            )
+            rows = []
+            for r in self._cur.fetchall():
+                fid, sk, league, home, away, ko, source, status = r
+                rows.append({
+                    "id": fid,
+                    "sport_key": sk,
+                    "league": league,
+                    "home": home,
+                    "away": away,
+                    "kickoff_utc": str(ko) if ko else "",
+                    "source": source or "",
+                    "status": status or "",
+                })
+            return rows
+        except Exception as e:
+            print(f"[fixture_repo] WARN: get_fixtures failed: {e}", file=sys.stderr)
+            self._db_failed = True
+            return []
+
+    def count_fixtures(self, sport_key: str, from_date, to_date) -> int:
+        """Count fixtures for sport_key in [from_date, to_date]."""
+        if not self.db_enabled or self._connect() is None:
+            return 0
+        from_str = str(from_date)
+        to_str = str(to_date)
+        try:
+            self._cur.execute(
+                "SELECT COUNT(*) FROM fixtures "
+                "WHERE sport_key = ? "
+                "  AND kickoff_utc >= ? AND kickoff_utc < ?",
+                (sport_key, from_str, to_str + "T99"),
+            )
+            return self._cur.fetchone()[0] or 0
+        except Exception as e:
+            print(f"[fixture_repo] WARN: count_fixtures failed: {e}", file=sys.stderr)
+            self._db_failed = True
+            return 0
+
+    def count_ingested_fixtures(self) -> int:
+        """Count fixtures written by FixtureRepo (ingested_at IS NOT NULL)."""
+        if not self.db_enabled or self._connect() is None:
+            return 0
+        try:
+            self._cur.execute(
+                "SELECT COUNT(*) FROM fixtures WHERE ingested_at IS NOT NULL"
+            )
+            return self._cur.fetchone()[0] or 0
+        except Exception as e:
+            print(f"[fixture_repo] WARN: count_ingested_fixtures failed: {e}",
+                  file=sys.stderr)
+            self._db_failed = True
+            return 0
+
+    def latest_ingest_at(self) -> datetime | None:
+        """Return the most recent ingested_at timestamp, or None if no ingests."""
+        if not self.db_enabled or self._connect() is None:
+            return None
+        try:
+            self._cur.execute(
+                "SELECT MAX(ingested_at) FROM fixtures "
+                "WHERE ingested_at IS NOT NULL"
+            )
+            val = self._cur.fetchone()[0]
+            if val is None:
+                return None
+            return _parse_dt(str(val))
+        except Exception as e:
+            print(f"[fixture_repo] WARN: latest_ingest_at failed: {e}", file=sys.stderr)
+            self._db_failed = True
+            return None
