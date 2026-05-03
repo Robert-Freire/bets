@@ -123,6 +123,99 @@ def test_resolve_canary_no_op_when_no_football_in_scan():
     assert out == "soccer_epl"
 
 
+# ── canary_verdict() — pure helper unit tests ─────────────────────────────────
+# The in-loop canary wiring in scan_odds.main() is not unit-tested here (see
+# existing comment below).  canary_verdict() encapsulates the calendar-aware
+# decision so the logic itself is fully testable.
+
+import src.data.fixture_calendar as _fc
+
+
+def _write_cal(tmp_path, fixtures):
+    import json
+    cal = tmp_path / "logs" / "fixture_calendar.json"
+    cal.parent.mkdir(parents=True, exist_ok=True)
+    cal.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": fixtures}))
+    return cal
+
+
+@pytest.fixture(autouse=False)
+def _patch_fc_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+
+
+def test_canary_verdict_alert_when_fixtures_expected(tmp_path, monkeypatch):
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    _write_cal(tmp_path, [
+        {"sport_key": "soccer_epl", "league": "EPL", "home": "A", "away": "B",
+         "kickoff_utc": "2026-05-10T14:00:00+00:00", "source": "fdco", "status": "scheduled"},
+    ])
+    from datetime import date
+    verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
+    assert verdict == "alert"
+    assert len(near) == 1
+
+
+def test_canary_verdict_silent_when_no_fixtures(tmp_path, monkeypatch):
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    # Calendar has fixtures for a different league, not EPL
+    _write_cal(tmp_path, [
+        {"sport_key": "soccer_germany_bundesliga", "league": "Bundesliga",
+         "home": "A", "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00",
+         "source": "fdco", "status": "scheduled"},
+    ])
+    from datetime import date
+    verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
+    assert verdict == "silent"
+    assert near == []
+
+
+def test_canary_verdict_unknown_when_calendar_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    from datetime import date
+    verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
+    assert verdict == "unknown"
+    assert near == []
+
+
+def test_canary_verdict_unknown_when_calendar_corrupt(tmp_path, monkeypatch):
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs" / "fixture_calendar.json").write_text("not valid json{{{")
+    from datetime import date
+    verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
+    assert verdict == "unknown"
+
+
+def test_canary_verdict_unknown_when_calendar_stale(tmp_path, monkeypatch):
+    import os, time as _time
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    _write_cal(tmp_path, [
+        {"sport_key": "soccer_epl", "league": "EPL", "home": "A", "away": "B",
+         "kickoff_utc": "2026-05-10T14:00:00+00:00", "source": "fdco", "status": "scheduled"},
+    ])
+    stale = _time.time() - (9 * 86400)
+    os.utime(_fc._CALENDAR_PATH, (stale, stale))
+    from datetime import date
+    verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
+    assert verdict == "unknown"
+
+
+def test_canary_verdict_alert_not_affected_by_empty_global_calendar(tmp_path, monkeypatch):
+    """An empty-but-parseable calendar returns 'silent', not 'unknown' — correct."""
+    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    _write_cal(tmp_path, [])  # valid JSON, no fixtures
+    from datetime import date
+    verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
+    # Empty calendar is parseable → calendar_available() is True; no fixtures for EPL → 'silent'
+    assert verdict == "silent"
+
+
 # In-loop canary trip is exercised by the scanner end-to-end and is not unit
 # tested here — main() reorders football so the canary league fetches first,
 # then sets a skip flag if it returned 0 events. See scan_odds.main() for the
