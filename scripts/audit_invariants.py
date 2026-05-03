@@ -113,37 +113,40 @@ def _check_i1_pnl(cur) -> tuple[str, str]:
 
 
 def _check_i2_edge(cur) -> tuple[str, str]:
-    """Edge must lie in [-0.20, 0.20] for every non-null row."""
-    total = 0
-    for table in ("bets", "paper_bets"):
-        n = _scalar(
-            cur,
-            f"SELECT COUNT(*) FROM {table} WHERE edge IS NOT NULL "
-            f"AND (edge < -0.20 OR edge > 0.20)",
-        )
-        total += n or 0
-    if total:
-        return FAIL, f"{total} rows with edge outside [-0.20, 0.20]"
-    return OK, "all edge values in bounds"
+    """Edge must lie in [-0.20, 0.20] for every non-null row in bets.
+
+    Scoped to bets only: paper_bets store the scanner's Shin-consensus edge,
+    which can legitimately be negative for strategies that flag via a different
+    devigging method (e.g. I_power_devig) — those are not errors.
+    """
+    n = _scalar(
+        cur,
+        "SELECT COUNT(*) FROM bets WHERE edge IS NOT NULL "
+        "AND (edge < -0.20 OR edge > 0.20)",
+    ) or 0
+    if n:
+        return FAIL, f"{n} rows in bets with edge outside [-0.20, 0.20]"
+    return OK, "all bets edge values in bounds"
 
 
 def _check_i3_stake(cur) -> tuple[str, str]:
-    """Stake must be ≥5 and divisible by 5 for all non-null stake rows.
+    """Stake must be ≥5 and divisible by 5 for bets scanned from 2026-04-30.
 
-    Project convention is whole-£5 stakes only; CAST to BIGINT before % 5
-    to avoid decimal remainder noise (e.g. 10.00 % 5 can be non-zero in SQL).
+    Scoped to bets only: paper strategies store the pre-rounding raw Kelly stake,
+    not the £5-rounded value, so paper_bets legitimately have fractional stakes.
+    Date cutoff excludes the 29 pre-rounding legacy bets from 2026-04-28/29
+    (imported before the £5 convention was introduced). CAST to BIGINT before
+    % 5 to avoid decimal remainder noise (e.g. 10.00 % 5 can be non-zero in SQL).
     """
-    total = 0
-    for table in ("bets", "paper_bets"):
-        n = _scalar(
-            cur,
-            f"SELECT COUNT(*) FROM {table} WHERE stake IS NOT NULL "
-            f"AND (stake < 5 OR CAST(stake AS BIGINT) % 5 != 0)",
-        )
-        total += n or 0
-    if total:
-        return FAIL, f"{total} rows with invalid stake (not ≥5 or not divisible by 5)"
-    return OK, "all stakes ≥5 and divisible by 5"
+    n = _scalar(
+        cur,
+        "SELECT COUNT(*) FROM bets WHERE stake IS NOT NULL "
+        "  AND scanned_at >= '2026-04-30' "
+        "  AND (stake < 5 OR CAST(stake AS BIGINT) % 5 != 0)",
+    ) or 0
+    if n:
+        return FAIL, f"{n} bets with invalid stake (not ≥5 or not divisible by 5)"
+    return OK, "all bets stakes ≥5 and divisible by 5"
 
 
 # ---------------------------------------------------------------------------

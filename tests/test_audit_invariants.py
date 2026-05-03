@@ -192,6 +192,21 @@ class TestI2Edge:
         status, msg = _check_i2_edge(conn.cursor())
         assert status == FAIL
 
+    def test_paper_bets_negative_edge_not_checked(self):
+        # paper_bets edge can be negative for strategy-specific devigging — not flagged
+        conn = _make_db()
+        _seed(conn)
+        conn.execute("INSERT OR IGNORE INTO strategies (id, name) VALUES (1, 'I_power_devig')")
+        conn.commit()
+        conn.execute(
+            "INSERT INTO paper_bets (id, strategy_id, fixture_id, book_id, scanned_at,"
+            " market, side, odds, edge, stake, result)"
+            " VALUES ('PB1', 1, 'F1', 1, '2026-05-01T09:00:00Z', 'h2h', 'HOME', 2.10, -0.45, 10.0, 'pending')"
+        )
+        conn.commit()
+        status, _ = _check_i2_edge(conn.cursor())
+        assert status == OK  # paper_bets not checked
+
 
 # ---------------------------------------------------------------------------
 # I-4 — P&L parity
