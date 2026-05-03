@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +34,6 @@ from src.data.downloader import LEAGUES
 
 _LONDON = ZoneInfo("Europe/London")
 _FDCO_FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
-_FDCO_RESULTS_URL = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 _CALENDAR_PATH = _ROOT / "logs" / "fixture_calendar.json"
 _RAW_DIR = _ROOT / "data" / "raw"
 _FORWARD_WEEKS = 8
@@ -90,6 +90,64 @@ def _parse_fdco_kickoff(date_str: str, time_str: str) -> datetime | None:
 
     local_dt = d.replace(hour=h, minute=m, tzinfo=_LONDON)
     return local_dt.astimezone(timezone.utc)
+
+
+def _norm_name(name: str) -> str:
+    """NFD-fold accents, lowercase, strip ' FC'/' AFC' suffix.
+
+    Handles EPL naming differences between sources (AFD 'Arsenal FC' vs FDCO
+    'Arsenal').  Continental clubs whose FDCO names are abbreviated (e.g. FDCO
+    'Dortmund' vs AFD 'Borussia Dortmund') may still produce duplicate rows
+    when AFD is enabled for those leagues; acceptable for the current state
+    where FOOTBALL_DATA_API_KEY is not set.
+    """
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+    name = name.strip().lower()
+    for suffix in (" fc", " afc"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)].strip()
+            break
+    return name
+
+
+def _fixture_key(f: dict) -> tuple | None:
+    """Dedup key: (sport_key, kickoff_date, norm_home, norm_away).
+
+    Keys on the date part of kickoff_utc (not the full timestamp) so that AFD
+    and FDCO rows for the same fixture can be matched even if their reported
+    kickoff minute differs slightly.
+    """
+    ko = f.get("kickoff_utc", "")
+    date_part = ko[:10] if len(ko) >= 10 else ""
+    if not date_part:
+        return None
+    home = _norm_name(f.get("home", ""))
+    away = _norm_name(f.get("away", ""))
+    if not home or not away:
+        return None
+    return (f.get("sport_key", ""), date_part, home, away)
+
+
+def _dedup(fixtures: list[dict]) -> list[dict]:
+    """Remove duplicates by fixture key; last entry wins on collision."""
+    seen: dict[tuple, dict] = {}
+    for f in fixtures:
+        key = _fixture_key(f)
+        if key:
+            seen[key] = f
+    return list(seen.values())
+
+
+def _merge(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    """Union-merge: keep all fixtures from both sources, preferring primary on collision.
+
+    Unlike league-level winner-take-all, this preserves secondary fixtures
+    beyond the primary's time horizon (e.g. FDCO at 8 weeks vs AFD at 10 days).
+    Primary rows (AFD, more precise kickoff times) overwrite secondary rows for
+    the same fixture via last-wins dedup.
+    """
+    return _dedup(secondary + primary)
 
 
 def _fetch_fdco_fixtures_csv() -> list[dict]:
@@ -166,7 +224,6 @@ def _fetch_fdco_season_csvs(limit_fdco_codes: list[str] | None = None) -> list[d
                         continue
                     if not (today <= ko.date() <= cutoff):
                         continue
-                    # Upcoming rows have no result yet
                     if row.get("FTR", "").strip():
                         continue
                     home = (row.get("HomeTeam") or "").strip()
@@ -196,7 +253,9 @@ def _fetch_afd(api_key: str) -> list[dict]:
     date_to = today + timedelta(days=_AFD_WINDOW_DAYS)
 
     fixtures: list[dict] = []
-    for sport_key, comp_code in _AFD_CODES.items():
+    for i, (sport_key, comp_code) in enumerate(_AFD_CODES.items()):
+        if i > 0:
+            time.sleep(7)  # free tier: 10 req/min; skip before first call
         url = (
             f"{_AFD_BASE}/competitions/{comp_code}/matches"
             f"?status=SCHEDULED&dateFrom={today}&dateTo={date_to}"
@@ -209,7 +268,6 @@ def _fetch_afd(api_key: str) -> list[dict]:
                 data = json.loads(resp.read())
         except Exception as e:
             print(f"[afd] {comp_code}: ERROR {e}")
-            time.sleep(7)
             continue
 
         matches = data.get("matches", [])
@@ -231,31 +289,8 @@ def _fetch_afd(api_key: str) -> list[dict]:
                 "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
             })
         print(f"[afd] {comp_code}: {len(matches)} fixtures (next {_AFD_WINDOW_DAYS}d)")
-        time.sleep(7)  # free tier: 10 req/min
 
     return fixtures
-
-
-def _merge(primary: list[dict], secondary: list[dict]) -> list[dict]:
-    """Merge two fixture lists. For leagues in primary, use primary; keep secondary-only leagues."""
-    primary_leagues = {f["sport_key"] for f in primary}
-    out = list(primary)
-    for f in secondary:
-        if f["sport_key"] not in primary_leagues:
-            out.append(f)
-    return out
-
-
-def _dedup(fixtures: list[dict]) -> list[dict]:
-    """Remove duplicates keyed by (sport_key, kickoff_utc, home, away)."""
-    seen: set[tuple] = set()
-    out: list[dict] = []
-    for f in fixtures:
-        key = (f["sport_key"], f["kickoff_utc"], f["home"], f["away"])
-        if key not in seen:
-            seen.add(key)
-            out.append(f)
-    return out
 
 
 def _write_calendar(
@@ -314,7 +349,7 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     print(f"=== Fixture calendar ingest === {now.strftime('%Y-%m-%d %H:%M UTC')}")
 
-    # Step 1: FDCO combined fixtures.csv (primary)
+    # Step 1: FDCO combined fixtures.csv (primary for FDCO-only path)
     fdco_fixtures = _fetch_fdco_fixtures_csv()
 
     # Step 1b: fall back to per-league season CSVs if combined fetch produced nothing
@@ -322,7 +357,9 @@ def main() -> None:
         print("[fdco] fixtures.csv returned 0 results — falling back to season CSVs")
         fdco_fixtures = _fetch_fdco_season_csvs(limit_fdco_codes=args.leagues)
 
-    # Step 2: optional api.football-data.org augmentation for precise kickoff times
+    # Step 2: optional api.football-data.org augmentation for precise kickoff times.
+    # AFD covers only 10 days; merge unions both sources so FDCO's 8-week window
+    # is preserved for fixtures beyond the AFD horizon.
     afd_key = os.environ.get("FOOTBALL_DATA_API_KEY", "")
     afd_fixtures: list[dict] = []
     if afd_key:
@@ -330,13 +367,11 @@ def main() -> None:
               f"(next {_AFD_WINDOW_DAYS}d) ...")
         afd_fixtures = _fetch_afd(afd_key)
 
-    # AFD has more precise kickoff times for its 4 leagues; use it as primary where available
     if afd_fixtures:
         fixtures = _merge(afd_fixtures, fdco_fixtures)
     else:
-        fixtures = fdco_fixtures
+        fixtures = _dedup(fdco_fixtures)
 
-    fixtures = _dedup(fixtures)
     fixtures.sort(key=lambda x: x["kickoff_utc"])
 
     league_counts: dict[str, int] = {}

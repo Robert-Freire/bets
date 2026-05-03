@@ -117,43 +117,103 @@ def test_fetch_fdco_returns_empty_on_error(monkeypatch):
     assert fixtures == []
 
 
+# ── _norm_name ────────────────────────────────────────────────────────────────
+
+def test_norm_name_strips_fc_suffix():
+    assert ingest._norm_name("Arsenal FC") == "arsenal"
+    assert ingest._norm_name("Arsenal") == "arsenal"
+
+
+def test_norm_name_strips_afc_suffix():
+    assert ingest._norm_name("Cardiff AFC") == "cardiff"
+
+
+def test_norm_name_folds_accents():
+    assert ingest._norm_name("Mönchengladbach") == "monchengladbach"
+    assert ingest._norm_name("Paris Saint-Germain") == "paris saint-germain"
+
+
+def test_norm_name_case_insensitive():
+    assert ingest._norm_name("ARSENAL FC") == ingest._norm_name("arsenal fc")
+
+
 # ── _dedup ────────────────────────────────────────────────────────────────────
 
 def test_dedup_removes_exact_duplicates():
     f = {"sport_key": "soccer_epl", "kickoff_utc": "2026-05-10T14:00:00+00:00",
-         "home": "A", "away": "B", "league": "EPL", "source": "fdco", "status": "scheduled"}
+         "home": "Arsenal", "away": "Chelsea", "league": "EPL"}
     result = ingest._dedup([f, f.copy()])
     assert len(result) == 1
 
 
+def test_dedup_matches_fc_vs_no_fc():
+    """Dedup must collapse 'Arsenal FC' (AFD) and 'Arsenal' (FDCO) as the same fixture."""
+    afd_row = {"sport_key": "soccer_epl", "kickoff_utc": "2026-05-10T14:00:00+00:00",
+               "home": "Arsenal FC", "away": "Chelsea FC", "league": "EPL"}
+    fdco_row = {"sport_key": "soccer_epl", "kickoff_utc": "2026-05-10T14:00:00+00:00",
+                "home": "Arsenal", "away": "Chelsea", "league": "EPL"}
+    result = ingest._dedup([fdco_row, afd_row])
+    assert len(result) == 1
+
+
+def test_dedup_last_entry_wins():
+    f1 = {"sport_key": "soccer_epl", "kickoff_utc": "2026-05-10T14:00:00+00:00",
+          "home": "Arsenal", "away": "Chelsea", "league": "EPL", "tag": "first"}
+    f2 = {**f1, "tag": "second"}
+    result = ingest._dedup([f1, f2])
+    assert result[0]["tag"] == "second"
+
+
 def test_dedup_keeps_different_fixtures():
     f1 = {"sport_key": "soccer_epl", "kickoff_utc": "2026-05-10T14:00:00+00:00",
-          "home": "A", "away": "B", "league": "EPL", "source": "fdco", "status": "scheduled"}
+          "home": "Arsenal", "away": "Chelsea", "league": "EPL"}
     f2 = {"sport_key": "soccer_epl", "kickoff_utc": "2026-05-10T16:00:00+00:00",
-          "home": "C", "away": "D", "league": "EPL", "source": "fdco", "status": "scheduled"}
+          "home": "Liverpool", "away": "Man City", "league": "EPL"}
     result = ingest._dedup([f1, f2])
     assert len(result) == 2
 
 
 # ── _merge ────────────────────────────────────────────────────────────────────
 
-def test_merge_prefers_primary_for_shared_leagues():
-    primary = [{"sport_key": "soccer_epl", "home": "A", "away": "B",
-                "kickoff_utc": "T", "league": "EPL", "source": "afd", "status": "scheduled"}]
-    secondary = [{"sport_key": "soccer_epl", "home": "C", "away": "D",
-                  "kickoff_utc": "T", "league": "EPL", "source": "fdco", "status": "scheduled"}]
-    result = ingest._merge(primary, secondary)
-    # Only the primary (afd) EPL fixture included
+def test_merge_prefers_primary_on_same_fixture():
+    """Primary (AFD) row wins over secondary (FDCO) for the same fixture."""
+    afd = [{"sport_key": "soccer_epl", "home": "Arsenal FC", "away": "Chelsea FC",
+            "kickoff_utc": "2026-05-10T14:05:00+00:00", "league": "EPL", "tag": "afd"}]
+    fdco = [{"sport_key": "soccer_epl", "home": "Arsenal", "away": "Chelsea",
+             "kickoff_utc": "2026-05-10T14:00:00+00:00", "league": "EPL", "tag": "fdco"}]
+    result = ingest._merge(afd, fdco)
     assert len(result) == 1
-    assert result[0]["source"] == "afd"
+    assert result[0]["tag"] == "afd"
+
+
+def test_merge_preserves_fdco_beyond_afd_window():
+    """Regression: union-merge must not drop FDCO fixtures beyond AFD's time horizon."""
+    today = "2026-05-10"
+    far = "2026-06-14"  # well beyond 10-day AFD window
+    afd = [{"sport_key": "soccer_epl", "home": "Arsenal FC", "away": "Chelsea FC",
+            "kickoff_utc": f"{today}T14:00:00+00:00", "league": "EPL"}]
+    fdco = [
+        {"sport_key": "soccer_epl", "home": "Arsenal", "away": "Chelsea",
+         "kickoff_utc": f"{today}T14:00:00+00:00", "league": "EPL"},   # same as AFD
+        {"sport_key": "soccer_epl", "home": "Liverpool", "away": "Man City",
+         "kickoff_utc": f"{far}T14:00:00+00:00", "league": "EPL"},     # beyond AFD window
+    ]
+    result = ingest._merge(afd, fdco)
+    # Both fixtures present: one deduped (today's) + one FDCO-only (far)
+    assert len(result) == 2
+    kickoff_dates = {f["kickoff_utc"][:10] for f in result}
+    assert today in kickoff_dates
+    assert far in kickoff_dates
+    # The today fixture should use AFD's version (more precise time)
+    today_f = next(f for f in result if f["kickoff_utc"].startswith(today))
+    assert today_f["home"] == "Arsenal FC"
 
 
 def test_merge_includes_secondary_only_leagues():
-    primary = [{"sport_key": "soccer_epl", "home": "A", "away": "B",
-                "kickoff_utc": "T", "league": "EPL", "source": "afd", "status": "scheduled"}]
-    secondary = [{"sport_key": "soccer_efl_champ", "home": "C", "away": "D",
-                  "kickoff_utc": "T", "league": "Championship", "source": "fdco",
-                  "status": "scheduled"}]
+    primary = [{"sport_key": "soccer_epl", "home": "Arsenal", "away": "Chelsea",
+                "kickoff_utc": "2026-05-10T14:00:00+00:00", "league": "EPL"}]
+    secondary = [{"sport_key": "soccer_efl_champ", "home": "Leeds", "away": "Hull",
+                  "kickoff_utc": "2026-05-10T15:00:00+00:00", "league": "Championship"}]
     result = ingest._merge(primary, secondary)
     assert len(result) == 2
     sport_keys = {f["sport_key"] for f in result}

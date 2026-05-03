@@ -35,9 +35,7 @@ def _load() -> list[dict] | None:
     try:
         data = json.loads(_CALENDAR_PATH.read_text())
         return data.get("fixtures", [])
-    except FileNotFoundError:
-        return None
-    except (json.JSONDecodeError, OSError):
+    except (OSError, json.JSONDecodeError):
         return None
 
 

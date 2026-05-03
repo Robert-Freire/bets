@@ -180,7 +180,7 @@ logs/closing_lines.csv      (frozen; closing_line.py paused — historical only)
 logs/drift.csv              (frozen; same)
 logs/closing_line.log       (frozen; same)
 
-tests/                      pytest suite (~310 tests across 24 files; run with `pytest`)
+tests/                      pytest suite (395 tests across 35 files; run with `pytest`)
 
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10, foundation — historical for done phases)
 docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)
