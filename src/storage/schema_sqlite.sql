@@ -9,8 +9,6 @@ CREATE TABLE IF NOT EXISTS fixtures (
     home        TEXT    NOT NULL,
     away        TEXT    NOT NULL,
     kickoff_utc TEXT    NOT NULL,
-    source      TEXT,
-    status      TEXT,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 

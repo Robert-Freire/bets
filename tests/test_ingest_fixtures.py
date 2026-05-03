@@ -168,8 +168,9 @@ def test_main_dry_run_does_not_write(tmp_path, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
     monkeypatch.setattr(ingest, "_CALENDAR_PATH", tmp_path / "fixture_calendar.json")
+    # Point _RAW_DIR at tmp_path so the season-CSV fallback also finds nothing
+    monkeypatch.setattr(ingest, "_RAW_DIR", tmp_path)
 
-    ingest.main.__module__  # ensure importable
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py", "--dry-run"])
 

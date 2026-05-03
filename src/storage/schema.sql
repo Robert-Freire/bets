@@ -19,12 +19,6 @@ CREATE TABLE fixtures (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_fixtures_kickoff_sport')
 CREATE INDEX ix_fixtures_kickoff_sport ON fixtures (kickoff_utc, sport_key);
 
--- Fixture calendar columns (ingest_fixtures.py; added post-initial-schema)
-IF COL_LENGTH(N'fixtures', N'source') IS NULL
-    ALTER TABLE fixtures ADD source nvarchar(32) NULL;
-IF COL_LENGTH(N'fixtures', N'status') IS NULL
-    ALTER TABLE fixtures ADD status nvarchar(16) NULL;
-
 IF OBJECT_ID(N'books', N'U') IS NULL
 CREATE TABLE books (
     id     int          NOT NULL IDENTITY(1,1) PRIMARY KEY,

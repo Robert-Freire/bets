@@ -128,14 +128,6 @@ def test_required_indices_present():
     assert not missing, f"Missing indices: {missing}"
 
 
-def test_fixtures_has_source_and_status_columns():
-    conn = _make_conn()
-    _apply(conn, SCHEMA_SQLITE.read_text())
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(fixtures)").fetchall()}
-    assert "source" in cols, "fixtures table missing 'source' column"
-    assert "status" in cols, "fixtures table missing 'status' column"
-
-
 def test_closing_lines_pk_includes_book_and_line():
     conn = _make_conn()
     _apply(conn, SCHEMA_SQLITE.read_text())
