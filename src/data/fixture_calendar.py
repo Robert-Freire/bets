@@ -6,20 +6,12 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
-from typing import NamedTuple
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CALENDAR_PATH = _ROOT / "logs" / "fixture_calendar.json"
 _STALE_DAYS = 8  # calendar older than this is treated as unavailable
-
-
-class KickoffCluster(NamedTuple):
-    window_start: datetime
-    window_end: datetime
-    leagues: list[str]
-    n_fixtures: int
 
 
 def calendar_available() -> bool:
@@ -123,53 +115,3 @@ def canary_verdict(
         and today_date <= ko.date() <= lookahead
     ]
     return ("alert", near) if near else ("silent", [])
-
-
-def next_kickoff_clusters(
-    league_keys: list[str],
-    hours_ahead: int = 168,
-    cluster_window_min: int = 90,
-) -> list[KickoffCluster]:
-    """Group upcoming kickoffs that fall within cluster_window_min of each other.
-
-    Returns clusters in chronological order. Each cluster represents a window of
-    fixtures for which a single scan at T-90min before window_start is sufficient.
-    Used to compute optimal cron scan times.
-    """
-    now = datetime.now(timezone.utc)
-    cutoff = now + timedelta(hours=hours_ahead)
-
-    fixtures = _load()
-    if fixtures is None:
-        return []
-
-    kickoffs: list[tuple[datetime, str]] = []
-    for f in fixtures:
-        if f.get("sport_key") not in league_keys:
-            continue
-        ko = _parse_ko(f)
-        if ko and now < ko <= cutoff:
-            kickoffs.append((ko, f["sport_key"]))
-
-    if not kickoffs:
-        return []
-
-    kickoffs.sort()
-    clusters: list[KickoffCluster] = []
-    ws, we = kickoffs[0][0], kickoffs[0][0]
-    leagues_set: set[str] = {kickoffs[0][1]}
-    count = 1
-
-    for ko, sk in kickoffs[1:]:
-        if (ko - we).total_seconds() <= cluster_window_min * 60:
-            we = max(we, ko)
-            leagues_set.add(sk)
-            count += 1
-        else:
-            clusters.append(KickoffCluster(ws, we, sorted(leagues_set), count))
-            ws, we = ko, ko
-            leagues_set = {sk}
-            count = 1
-
-    clusters.append(KickoffCluster(ws, we, sorted(leagues_set), count))
-    return clusters

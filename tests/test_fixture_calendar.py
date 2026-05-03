@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -23,8 +23,6 @@ def _make_fixture(sport_key: str, kickoff_utc: str, home: str = "Home FC", away:
         "home": home,
         "away": away,
         "kickoff_utc": kickoff_utc,
-        "source": "fdco",
-        "status": "scheduled",
     }
 
 
@@ -52,10 +50,16 @@ def test_calendar_available_true_when_fresh(tmp_path, monkeypatch):
 
 def test_calendar_available_false_when_stale(tmp_path, monkeypatch):
     import src.data.fixture_calendar as fc
+    import os
     fc._CALENDAR_PATH.write_text("{}")
     stale_mtime = time.time() - (9 * 86400)
-    import os
     os.utime(fc._CALENDAR_PATH, (stale_mtime, stale_mtime))
+    assert not fc.calendar_available()
+
+
+def test_calendar_available_false_when_corrupt(tmp_path, monkeypatch):
+    import src.data.fixture_calendar as fc
+    fc._CALENDAR_PATH.write_text("not valid json{{{")
     assert not fc.calendar_available()
 
 
@@ -63,8 +67,6 @@ def test_calendar_available_false_when_stale(tmp_path, monkeypatch):
 
 def test_has_fixtures_true_when_present(tmp_path):
     import src.data.fixture_calendar as fc
-    _write_calendar(tmp_path, [_make_fixture("soccer_epl", "2026-05-10T14:00:00+00:00")])
-    monkeypatch_path = fc._CALENDAR_PATH
     fc._CALENDAR_PATH.write_text(json.dumps({
         "generated_at": "2026-05-03T02:00:00Z",
         "fixtures": [_make_fixture("soccer_epl", "2026-05-10T14:00:00+00:00")],
@@ -120,6 +122,16 @@ def test_get_fixtures_filters_by_league_and_date(tmp_path):
     assert result[0]["home"] == "Arsenal"
 
 
+def test_get_fixtures_accepts_string_dates(tmp_path):
+    import src.data.fixture_calendar as fc
+    fc._CALENDAR_PATH.write_text(json.dumps({
+        "generated_at": "2026-05-03T02:00:00Z",
+        "fixtures": [_make_fixture("soccer_epl", "2026-05-10T14:00:00+00:00")],
+    }))
+    result = fc.get_fixtures("soccer_epl", "2026-05-10", "2026-05-10")
+    assert len(result) == 1
+
+
 def test_get_fixtures_inclusive_range(tmp_path):
     import src.data.fixture_calendar as fc
     fixtures = [
@@ -150,52 +162,3 @@ def test_get_fixtures_returns_empty_when_none_match(tmp_path):
     import src.data.fixture_calendar as fc
     fc._CALENDAR_PATH.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": []}))
     assert fc.get_fixtures("soccer_epl", date(2026, 5, 10), date(2026, 5, 12)) == []
-
-
-# ── next_kickoff_clusters ─────────────────────────────────────────────────────
-
-def test_next_kickoff_clusters_groups_close_kickoffs(tmp_path):
-    import src.data.fixture_calendar as fc
-
-    now = datetime.now(timezone.utc)
-    t1 = now + timedelta(hours=24)
-    t2 = t1 + timedelta(minutes=30)   # 30 min after t1 — same cluster
-    t3 = t1 + timedelta(hours=3)      # 3h after t1 — separate cluster
-
-    fixtures = [
-        _make_fixture("soccer_epl", t1.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "A", "B"),
-        _make_fixture("soccer_epl", t2.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "C", "D"),
-        _make_fixture("soccer_epl", t3.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "E", "F"),
-    ]
-    fc._CALENDAR_PATH.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": fixtures}))
-
-    clusters = fc.next_kickoff_clusters(["soccer_epl"], hours_ahead=48)
-    assert len(clusters) == 2
-    assert clusters[0].n_fixtures == 2
-    assert clusters[1].n_fixtures == 1
-
-
-def test_next_kickoff_clusters_excludes_past_and_distant(tmp_path):
-    import src.data.fixture_calendar as fc
-
-    now = datetime.now(timezone.utc)
-    past = now - timedelta(hours=1)
-    near = now + timedelta(hours=24)
-    far = now + timedelta(hours=200)
-
-    fixtures = [
-        _make_fixture("soccer_epl", past.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "A", "B"),
-        _make_fixture("soccer_epl", near.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "C", "D"),
-        _make_fixture("soccer_epl", far.strftime("%Y-%m-%dT%H:%M:%S+00:00"), "E", "F"),
-    ]
-    fc._CALENDAR_PATH.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": fixtures}))
-
-    clusters = fc.next_kickoff_clusters(["soccer_epl"], hours_ahead=48)
-    assert len(clusters) == 1
-    assert clusters[0].n_fixtures == 1
-
-
-def test_next_kickoff_clusters_empty_when_no_calendar():
-    import src.data.fixture_calendar as fc
-    clusters = fc.next_kickoff_clusters(["soccer_epl"])
-    assert clusters == []

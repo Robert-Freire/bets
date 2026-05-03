@@ -161,6 +161,88 @@ def test_merge_includes_secondary_only_leagues():
     assert "soccer_efl_champ" in sport_keys
 
 
+# ── _current_season ───────────────────────────────────────────────────────────
+
+def test_current_season_during_season(monkeypatch):
+    monkeypatch.setattr(ingest, "_today", lambda: date(2026, 5, 3))
+    assert ingest._current_season() == "2526"
+
+
+def test_current_season_after_july(monkeypatch):
+    monkeypatch.setattr(ingest, "_today", lambda: date(2026, 8, 1))
+    assert ingest._current_season() == "2627"
+
+
+def test_current_season_century_boundary(monkeypatch):
+    monkeypatch.setattr(ingest, "_today", lambda: date(2099, 8, 1))
+    assert ingest._current_season() == "9900"
+
+
+# ── _write_calendar ───────────────────────────────────────────────────────────
+
+def test_write_calendar_writes_atomically(tmp_path):
+    cal_path = tmp_path / "logs" / "fixture_calendar.json"
+    cal_path.parent.mkdir()
+    monkeypatch_path = cal_path  # use local var, no monkeypatch needed
+    import scripts.ingest_fixtures as _ingest
+    orig = _ingest._CALENDAR_PATH
+    _ingest._CALENDAR_PATH = cal_path
+    try:
+        from datetime import datetime, timezone
+        fixtures = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
+                     "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
+        _ingest._write_calendar(fixtures, datetime.now(timezone.utc), allow_empty=False)
+        assert cal_path.exists()
+        data = json.loads(cal_path.read_text())
+        assert len(data["fixtures"]) == 1
+        assert not (tmp_path / "logs" / "fixture_calendar.tmp").exists()
+    finally:
+        _ingest._CALENDAR_PATH = orig
+
+
+def test_write_calendar_preserves_existing_on_empty_ingest(tmp_path, monkeypatch):
+    cal_path = tmp_path / "logs" / "fixture_calendar.json"
+    cal_path.parent.mkdir()
+    existing = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
+                 "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
+    cal_path.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": existing}))
+    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
+
+    from datetime import datetime, timezone
+    ingest._write_calendar([], datetime.now(timezone.utc), allow_empty=False)
+
+    # File unchanged: still has the original fixture
+    data = json.loads(cal_path.read_text())
+    assert len(data["fixtures"]) == 1
+
+
+def test_write_calendar_allow_empty_overwrites(tmp_path, monkeypatch):
+    cal_path = tmp_path / "logs" / "fixture_calendar.json"
+    cal_path.parent.mkdir()
+    existing = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
+                 "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
+    cal_path.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": existing}))
+    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
+
+    from datetime import datetime, timezone
+    ingest._write_calendar([], datetime.now(timezone.utc), allow_empty=True)
+
+    data = json.loads(cal_path.read_text())
+    assert data["fixtures"] == []
+
+
+def test_write_calendar_skips_and_warns_when_no_existing_file(tmp_path, monkeypatch, capsys):
+    cal_path = tmp_path / "logs" / "fixture_calendar.json"
+    cal_path.parent.mkdir()
+    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
+
+    from datetime import datetime, timezone
+    ingest._write_calendar([], datetime.now(timezone.utc), allow_empty=False)
+
+    assert not cal_path.exists()
+    assert "WARN" in capsys.readouterr().out
+
+
 # ── main() integration ────────────────────────────────────────────────────────
 
 def test_main_dry_run_does_not_write(tmp_path, monkeypatch):
@@ -168,8 +250,8 @@ def test_main_dry_run_does_not_write(tmp_path, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
     monkeypatch.setattr(ingest, "_CALENDAR_PATH", tmp_path / "fixture_calendar.json")
-    # Point _RAW_DIR at tmp_path so the season-CSV fallback also finds nothing
     monkeypatch.setattr(ingest, "_RAW_DIR", tmp_path)
+    monkeypatch.delenv("FOOTBALL_DATA_API_KEY", raising=False)
 
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py", "--dry-run"])
@@ -193,6 +275,7 @@ def test_main_writes_calendar_json(tmp_path, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(ingest, "_today", lambda: date(2026, 5, 1))
     monkeypatch.setattr(ingest, "_CALENDAR_PATH", tmp_path / "fixture_calendar.json")
+    monkeypatch.delenv("FOOTBALL_DATA_API_KEY", raising=False)
 
     import sys as _sys
     monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py"])
@@ -203,3 +286,26 @@ def test_main_writes_calendar_json(tmp_path, monkeypatch):
     assert "generated_at" in cal
     assert len(cal["fixtures"]) >= 1
     assert cal["fixtures"][0]["sport_key"] == "soccer_epl"
+
+
+def test_main_preserves_calendar_when_fdco_offline(tmp_path, monkeypatch):
+    """Transient FDCO failure must not poison the calendar."""
+    import urllib.request
+
+    cal_path = tmp_path / "logs" / "fixture_calendar.json"
+    cal_path.parent.mkdir()
+    existing = [{"sport_key": "soccer_epl", "league": "EPL", "home": "A",
+                 "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00"}]
+    cal_path.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": existing}))
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: (_ for _ in ()).throw(OSError("offline")))
+    monkeypatch.setattr(ingest, "_CALENDAR_PATH", cal_path)
+    monkeypatch.setattr(ingest, "_RAW_DIR", tmp_path)  # no season CSVs
+    monkeypatch.delenv("FOOTBALL_DATA_API_KEY", raising=False)
+
+    import sys as _sys
+    monkeypatch.setattr(_sys, "argv", ["ingest_fixtures.py"])
+    ingest.main()
+
+    data = json.loads(cal_path.read_text())
+    assert len(data["fixtures"]) == 1  # original preserved

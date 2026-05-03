@@ -5,10 +5,11 @@ Both Pi and WSL run this script — no DB dependency required.
 
 Sources:
   1. FDCO fixtures.csv (free, all leagues, includes kickoff time in UK local time)
-  2. api.football-data.org (optional; set FOOTBALL_DATA_API_KEY; EPL/BL/SA/L1 only)
+  2. api.football-data.org (optional; set FOOTBALL_DATA_API_KEY; EPL/BL/SA/L1 only,
+     10-day window per call — free-tier date-range limit)
 
 Usage:
-    python3 scripts/ingest_fixtures.py [--dry-run] [--leagues E0 D1 ...]
+    python3 scripts/ingest_fixtures.py [--dry-run] [--allow-empty] [--leagues E0 D1 ...]
 """
 from __future__ import annotations
 
@@ -32,11 +33,12 @@ from src.data.downloader import LEAGUES
 
 _LONDON = ZoneInfo("Europe/London")
 _FDCO_FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
-_FDCO_SEASON_URL = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
-_CURRENT_SEASON = "2526"
+_FDCO_RESULTS_URL = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 _CALENDAR_PATH = _ROOT / "logs" / "fixture_calendar.json"
 _RAW_DIR = _ROOT / "data" / "raw"
 _FORWARD_WEEKS = 8
+# api.football-data.org free tier rejects date ranges wider than ~10 days
+_AFD_WINDOW_DAYS = 10
 
 # Reverse map: FDCO code (e.g. "E0") → Odds API sport_key
 _FDCO_TO_SPORT: dict[str, str] = {v["fd_code"]: k for k, v in LEAGUES.items()}
@@ -52,6 +54,17 @@ _AFD_CODES: dict[str, str] = {
     "soccer_italy_serie_a":      "SA",
     "soccer_france_ligue_one":   "FL1",
 }
+
+
+def _current_season() -> str:
+    """FDCO season code derived from today: 'YYZZ' (e.g. '2526' for 2025/26).
+    Season starts in July, so month >= 7 → use current year as start year.
+    """
+    today = _today()
+    y = today.year % 100
+    if today.month >= 7:
+        return f"{y:02d}{(y + 1) % 100:02d}"
+    return f"{(y - 1) % 100:02d}{y:02d}"
 
 
 def _parse_fdco_kickoff(date_str: str, time_str: str) -> datetime | None:
@@ -117,8 +130,6 @@ def _fetch_fdco_fixtures_csv() -> list[dict]:
             "home": home,
             "away": away,
             "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-            "source": "fdco",
-            "status": "scheduled",
         })
 
     print(f"[fdco] fixtures.csv: {len(fixtures)} upcoming fixtures across "
@@ -129,11 +140,12 @@ def _fetch_fdco_fixtures_csv() -> list[dict]:
 def _fetch_fdco_season_csvs(limit_fdco_codes: list[str] | None = None) -> list[dict]:
     """Fall back: parse upcoming fixtures from current-season per-league CSVs.
 
-    Used when fixtures.csv is unavailable. Season CSVs may include kickoff times
-    but only for the current season window already published.
+    Used when fixtures.csv is unavailable. Season CSVs include kickoff times
+    for fixtures already published in the current season window.
     """
     today = _today()
     cutoff = today + timedelta(weeks=_FORWARD_WEEKS)
+    season = _current_season()
 
     leagues_to_check = {
         k: v for k, v in LEAGUES.items()
@@ -143,7 +155,7 @@ def _fetch_fdco_season_csvs(limit_fdco_codes: list[str] | None = None) -> list[d
     fixtures: list[dict] = []
     for sport_key, meta in leagues_to_check.items():
         fd_code = meta["fd_code"]
-        csv_path = _RAW_DIR / f"{fd_code}_{_CURRENT_SEASON}.csv"
+        csv_path = _RAW_DIR / f"{fd_code}_{season}.csv"
         if not csv_path.exists():
             continue
         try:
@@ -167,20 +179,21 @@ def _fetch_fdco_season_csvs(limit_fdco_codes: list[str] | None = None) -> list[d
                         "home": home,
                         "away": away,
                         "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                        "source": "fdco_season",
-                        "status": "scheduled",
                     })
         except Exception as e:
             print(f"[fdco] {fd_code}: season CSV parse error: {e}")
 
-    print(f"[fdco] season CSVs: {len(fixtures)} upcoming fixtures")
+    print(f"[fdco] season CSVs ({season}): {len(fixtures)} upcoming fixtures")
     return fixtures
 
 
 def _fetch_afd(api_key: str) -> list[dict]:
-    """Fetch scheduled fixtures from api.football-data.org (free tier, 4 leagues)."""
+    """Fetch scheduled fixtures from api.football-data.org (free tier, 4 leagues).
+
+    Free tier caps the date range per request; we use a 10-day window.
+    """
     today = _today()
-    date_to = today + timedelta(weeks=_FORWARD_WEEKS)
+    date_to = today + timedelta(days=_AFD_WINDOW_DAYS)
 
     fixtures: list[dict] = []
     for sport_key, comp_code in _AFD_CODES.items():
@@ -216,10 +229,8 @@ def _fetch_afd(api_key: str) -> list[dict]:
                 "home": home,
                 "away": away,
                 "kickoff_utc": ko.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                "source": "afd",
-                "status": "scheduled",
             })
-        print(f"[afd] {comp_code}: {len(matches)} fixtures")
+        print(f"[afd] {comp_code}: {len(matches)} fixtures (next {_AFD_WINDOW_DAYS}d)")
         time.sleep(7)  # free tier: 10 req/min
 
     return fixtures
@@ -247,9 +258,53 @@ def _dedup(fixtures: list[dict]) -> list[dict]:
     return out
 
 
+def _write_calendar(
+    fixtures: list[dict], now: datetime, *, allow_empty: bool
+) -> None:
+    """Write logs/fixture_calendar.json atomically via tmp+rename.
+
+    Refuses to overwrite the existing calendar with an empty list unless
+    allow_empty=True, preventing a transient FDCO failure from poisoning
+    the canary for the full week until the next scheduled run.
+    """
+    if not fixtures and not allow_empty:
+        try:
+            existing_count = len(
+                json.loads(_CALENDAR_PATH.read_text()).get("fixtures", [])
+            )
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            existing_count = 0
+        if existing_count:
+            print(
+                f"[calendar] WARN: ingest returned 0 fixtures. "
+                f"Preserving existing {existing_count}-fixture calendar. "
+                f"Use --allow-empty to force overwrite."
+            )
+        else:
+            print(
+                "[calendar] WARN: ingest returned 0 fixtures and no existing calendar. "
+                "Use --allow-empty to write empty calendar."
+            )
+        return
+
+    _CALENDAR_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "fixtures": fixtures,
+    }
+    tmp = _CALENDAR_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(_CALENDAR_PATH)
+    print(f"[calendar] Written {len(fixtures)} fixtures to {_CALENDAR_PATH}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Parse but don't write")
+    parser.add_argument(
+        "--allow-empty", action="store_true",
+        help="Write even when 0 fixtures found (bootstrapping / end-of-season)"
+    )
     parser.add_argument(
         "--leagues", nargs="+", default=None,
         help="Limit to FDCO codes (e.g. E0 D1). Default: all.",
@@ -271,7 +326,8 @@ def main() -> None:
     afd_key = os.environ.get("FOOTBALL_DATA_API_KEY", "")
     afd_fixtures: list[dict] = []
     if afd_key:
-        print("[afd] FOOTBALL_DATA_API_KEY set — fetching api.football-data.org ...")
+        print(f"[afd] FOOTBALL_DATA_API_KEY set — fetching api.football-data.org "
+              f"(next {_AFD_WINDOW_DAYS}d) ...")
         afd_fixtures = _fetch_afd(afd_key)
 
     # AFD has more precise kickoff times for its 4 leagues; use it as primary where available
@@ -283,23 +339,17 @@ def main() -> None:
     fixtures = _dedup(fixtures)
     fixtures.sort(key=lambda x: x["kickoff_utc"])
 
-    league_counts = {}
+    league_counts: dict[str, int] = {}
     for f in fixtures:
         league_counts[f["league"]] = league_counts.get(f["league"], 0) + 1
-    summary = ", ".join(f"{l}:{n}" for l, n in sorted(league_counts.items()))
-    print(f"[calendar] Total: {len(fixtures)} fixtures | {summary}")
+    summary = ", ".join(f"{lg}:{n}" for lg, n in sorted(league_counts.items()))
+    print(f"[calendar] Total: {len(fixtures)} fixtures | {summary or '(none)'}")
 
     if args.dry_run:
         print("[calendar] Dry-run: not writing")
         return
 
-    _CALENDAR_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "fixtures": fixtures,
-    }
-    _CALENDAR_PATH.write_text(json.dumps(data, indent=2))
-    print(f"[calendar] Written to {_CALENDAR_PATH}")
+    _write_calendar(fixtures, now, allow_empty=args.allow_empty)
 
 
 if __name__ == "__main__":
