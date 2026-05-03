@@ -435,8 +435,10 @@ def _bias_from_rows(
     Returns dict[book -> {home_bias, draw_bias, fav_longshot_slope}].
 
     home/draw bias: mean signed deviation of each book's devigged prob from the
-    LOO consensus (book excluded from its own benchmark). Positive = book
-    overprices that outcome vs market.
+    LOO consensus (book excluded from its own benchmark). Positive = book's
+    implied prob is higher than the LOO consensus (i.e. the book prices that
+    outcome as *more* likely than peers); negative = book is generous on that
+    outcome (higher odds, lower implied prob).
 
     fav-longshot slope: OLS slope of realised_freq ~ bucket_midpoint across 10
     equal-width probability buckets. ~1.0 = calibrated; >1 = favourite-biased;
@@ -531,6 +533,8 @@ def _bias_from_rows(
                 denom = n_pts * sx2 - sx * sx
                 if abs(denom) > 1e-10:
                     raw_slope = (n_pts * sxy - sx * sy) / denom
+                    # Shrink toward calibrated null (1.0) not global mean, because
+                    # a slope of 1.0 is the universal no-bias prior for any book.
                     slope = 1.0 + (raw_slope - 1.0) * w
 
         result[bk] = {

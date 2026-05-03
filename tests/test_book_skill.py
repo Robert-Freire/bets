@@ -595,17 +595,24 @@ def test_bias_from_rows_home_bias_sign():
     result = _bias_from_rows(rows, since, until, shin)
 
     assert "bet365" in result
-    # bet365 offers higher home odds → lower implied prob → negative home_bias
-    # (it underestimates home probability relative to LOO consensus)
-    assert result["bet365"]["home_bias"] is not None
     # bet365 home odds 2.10 > pinnacle 2.00 → devigged p_home(bet365) < p_home(pin)
-    # home_bias = p_home(bet365) - p_home(loo) should be negative
+    # home_bias = p_home(book) - p_home(loo); bet365 is below LOO → negative
+    assert result["bet365"]["home_bias"] is not None
     assert result["bet365"]["home_bias"] < 0, (
         f"Expected negative home_bias for generous home odds, "
         f"got {result['bet365']['home_bias']:.6f}"
     )
-    # Pinnacle is in the opposite direction
+    # With 2 books LOO for each = the other book's probs → biases are exact negations.
+    # Pinnacle prices home as more likely (lower odds) → positive home_bias.
     assert result["pinnacle"]["home_bias"] is not None
+    assert result["pinnacle"]["home_bias"] > 0, (
+        f"Expected positive home_bias for pinnacle (tighter home odds), "
+        f"got {result['pinnacle']['home_bias']:.6f}"
+    )
+    # Symmetry: the two biases sum to ~0 (two-book LOO identity)
+    assert abs(result["bet365"]["home_bias"] + result["pinnacle"]["home_bias"]) < 1e-9, (
+        "Two-book LOO biases must be exact negations"
+    )
 
 
 def test_bias_from_rows_returns_none_slope_for_too_few_buckets():
@@ -653,17 +660,42 @@ def test_bias_shrinkage_reduces_extreme_values():
 
     # Extreme home generosity: bet365 at 3.0 vs pinnacle 2.0
     rows = _make_fdco_rows(5, book_h_odds_fn=lambda i: 3.0)
+
+    # Compute raw mean directly to compare against shrunken output
+    from src.betting.devig import shin as _shin
+    from scripts.compute_book_skill import _FDCO_BOOK_COLS, _parse_fdco_date
+    from datetime import date as _date
+    home_diffs = []
+    for row in rows:
+        d = _parse_fdco_date(row.get("Date", ""))
+        if d is None:
+            continue
+        probs = {}
+        for bk, (ch, cd, ca) in _FDCO_BOOK_COLS.items():
+            try:
+                oh, od, oa = float(row.get(ch) or 0), float(row.get(cd) or 0), float(row.get(ca) or 0)
+            except (TypeError, ValueError):
+                continue
+            if min(oh, od, oa) > 1.0:
+                probs[bk] = _shin([1/oh, 1/od, 1/oa])
+        if len(probs) >= 2:
+            for bk, bk_p in probs.items():
+                if bk == "bet365":
+                    others = [p for k, p in probs.items() if k != bk]
+                    loo_home = sum(p[0] for p in others) / len(others)
+                    home_diffs.append(bk_p[0] - loo_home)
+    raw_mean = sum(home_diffs) / len(home_diffs) if home_diffs else 0.0
+
     result = _bias_from_rows(rows, date(2026, 4, 1), date(2026, 4, 30), shin)
-
     bet365 = result.get("bet365", {})
-    home_bias = bet365.get("home_bias")
-    assert home_bias is not None
+    shrunken = bet365.get("home_bias")
+    assert shrunken is not None
 
-    # With n=5, w = 5/(5+50) ≈ 0.091 → shrunken value is ~91% of the way to global mean
-    # global mean ≈ 0 (two books, symmetric effect) so shrunken bias is much smaller than raw
-    # We just verify the shrinkage weight < 1.0 (implying |shrunken| < |raw|) for small n
-    w = 5 / (5 + _SHRINKAGE_N0)
-    assert w < 0.2, f"Shrinkage weight {w:.3f} too high for n=5"
+    # The shrunken value must be strictly closer to 0 than the raw mean for n=5
+    # (global mean ≈ 0 for a two-book symmetric dataset, so shrinkage pulls toward 0)
+    assert abs(shrunken) < abs(raw_mean), (
+        f"Shrinkage did not reduce |bias|: raw={raw_mean:.6f}, shrunken={shrunken:.6f}"
+    )
 
 
 def test_blob_accum_home_draw_bias_extracted():
