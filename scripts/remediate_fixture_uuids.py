@@ -65,6 +65,11 @@ def remediate(conn, *, dry_run: bool) -> dict:
 
     for row in rows:
         old_id, sport_key, home, away, ko = row
+        # Normalise to lowercase: pyodbc returns MSSQL uniqueidentifier values
+        # in uppercase ("AD2B2893-...") while fixture_uuid() produces lowercase
+        # ("53c18561-...").  Without normalisation the equality check below
+        # would always fail on the second run, causing a PK collision.
+        old_id = old_id.lower() if old_id else old_id
         # fixture_uuid only uses kickoff_utc[:10] — the date part.  str(ko)[:10]
         # yields "YYYY-MM-DD" regardless of whether ko is a datetime object
         # ("2026-05-09 16:30:00"), a bare date string ("2026-05-09"), or an
@@ -84,7 +89,7 @@ def remediate(conn, *, dry_run: bool) -> dict:
         print("[remediate] Nothing to migrate — all rows already on new UUID scheme.")
         return stats
 
-    existing_ids = {r[0] for r in rows}
+    existing_ids = {r[0].lower() for r in rows if r[0]}
     collisions = [(old, new, d) for old, new, d in migrations if new in existing_ids]
     non_collisions = [(old, new, d) for old, new, d in migrations if new not in existing_ids]
     stats["collisions"] = len(collisions)
