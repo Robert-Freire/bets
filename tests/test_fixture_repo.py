@@ -173,6 +173,24 @@ def test_get_fixtures_returns_empty_when_disabled():
     assert repo.get_fixtures("soccer_epl", date(2026, 5, 10), date(2026, 5, 10)) == []
 
 
+def test_get_fixtures_includes_late_kickoff_on_to_date():
+    """Fixture at 23:59 on to_date must be included (off-by-one regression guard)."""
+    conn = _make_db()
+    repo = _make_repo(conn)
+    repo.upsert_many([_fx(kickoff="2026-05-10T23:59:00+00:00")])
+    result = repo.get_fixtures("soccer_epl", date(2026, 5, 10), date(2026, 5, 10))
+    assert len(result) == 1
+
+
+def test_get_fixtures_excludes_midnight_after_to_date():
+    """Fixture at 00:00 on to_date+1 must NOT be included."""
+    conn = _make_db()
+    repo = _make_repo(conn)
+    repo.upsert_many([_fx(kickoff="2026-05-11T00:00:00+00:00", home="Next", away="Day")])
+    result = repo.get_fixtures("soccer_epl", date(2026, 5, 10), date(2026, 5, 10))
+    assert len(result) == 0
+
+
 # ── count_fixtures ────────────────────────────────────────────────────────────
 
 def test_count_fixtures_returns_correct_count():

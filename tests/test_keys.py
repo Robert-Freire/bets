@@ -129,3 +129,15 @@ def test_norm_name_strips_fc():
 def test_norm_name_folds_accents():
     from src.storage._keys import _norm_name
     assert _norm_name("Mönchengladbach") == "monchengladbach"
+
+
+def test_fixture_uuid_pinned_value():
+    """Pin the exact UUID so any future key-shape change fails loudly.
+
+    This is the canary: if this assertion breaks, you changed fixture_uuid's
+    key shape and must ship a DB remediation script before the next ingest.
+    See src/storage/_keys.py docstring for the protocol.
+    """
+    from src.storage._keys import fixture_uuid
+    assert fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea") == \
+        "7831f699-219a-5cdc-9e77-8409c955260b"

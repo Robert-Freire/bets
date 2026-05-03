@@ -36,7 +36,7 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -768,7 +768,7 @@ class BetRepo:
             return 0
         bid = bet_uuid(scan_date, kickoff, home, away, market or "h2h",
                        normalise_line(line), side, book)
-        settled_at = datetime.utcnow()
+        settled_at = datetime.now(timezone.utc).replace(tzinfo=None)
         with self._db_section() as cur:
             if cur is None:
                 return 0
@@ -918,7 +918,7 @@ class FixtureRepo:
         """
         if not fixtures or not self.db_enabled:
             return 0
-        now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         touched = 0
         with self._db_section() as cur:
             if cur is None:
@@ -962,10 +962,9 @@ class FixtureRepo:
         if not self.db_enabled or self._connect() is None:
             return []
         from_str = str(from_date)   # "YYYY-MM-DD"
-        to_str = str(to_date)
-        # Use string prefix comparison — works for both SQLite TEXT and MSSQL
-        # datetime2 (pyodbc passes strings; MSSQL does implicit cast).
-        # to_str + "T99" ensures the full to_date day is included.
+        # Exclusive upper bound: next-day midnight is safe for both SQLite TEXT
+        # comparison and MSSQL datetime2 implicit cast from a date string.
+        exclusive_end = str((date.fromisoformat(str(to_date)) if isinstance(to_date, str) else to_date) + timedelta(days=1))
         try:
             self._cur.execute(
                 "SELECT id, sport_key, league, home, away, kickoff_utc, "
@@ -974,7 +973,7 @@ class FixtureRepo:
                 "WHERE sport_key = ? "
                 "  AND kickoff_utc >= ? AND kickoff_utc < ? "
                 "ORDER BY kickoff_utc",
-                (sport_key, from_str, to_str + "T99"),
+                (sport_key, from_str, exclusive_end),
             )
             rows = []
             for r in self._cur.fetchall():
@@ -1000,13 +999,13 @@ class FixtureRepo:
         if not self.db_enabled or self._connect() is None:
             return 0
         from_str = str(from_date)
-        to_str = str(to_date)
+        exclusive_end = str((date.fromisoformat(str(to_date)) if isinstance(to_date, str) else to_date) + timedelta(days=1))
         try:
             self._cur.execute(
                 "SELECT COUNT(*) FROM fixtures "
                 "WHERE sport_key = ? "
                 "  AND kickoff_utc >= ? AND kickoff_utc < ?",
-                (sport_key, from_str, to_str + "T99"),
+                (sport_key, from_str, exclusive_end),
             )
             return self._cur.fetchone()[0] or 0
         except Exception as e:

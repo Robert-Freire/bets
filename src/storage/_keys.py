@@ -1,12 +1,20 @@
-"""Shared deterministic-UUID + label helpers for storage code.
+"""Deterministic key derivation for the bets data model.
 
-The same namespace and natural keys are used by:
+The same namespace AND the same name-string shape are used by:
   - `scripts/migrate_csv_to_db.py` (one-shot CSV backfill, A.3)
   - `src/storage/repo.py`           (live dual-write repo, A.4)
   - `scripts/ingest_fixtures.py`    (fixture calendar ingest)
 
-Changing `_NAMESPACE` or any of the natural-key tuples breaks
-idempotency between the importer and the live writer. Don't.
+CRITICAL — changing `_NAMESPACE` OR the argument signature OR the internal
+name-string shape of any *_uuid() function orphans every existing UUID in the
+DB and breaks idempotency between the importer and the live writer.
+
+If you must change a key shape:
+  1. Update every call site in lockstep (importer, live writer, tests).
+  2. Ship a one-shot remediation script that re-derives UUIDs in existing
+     rows AND updates every FK reference before the next ingest run.
+     (See scripts/remediate_fixture_uuids.py for a worked example.)
+  3. Run it against every populated environment before the cron fires.
 """
 from __future__ import annotations
 
