@@ -254,6 +254,13 @@ class BetRepo:
             self._db_failed = True
             return None
 
+    def read_cursor(self):
+        """Return the cursor for read-only queries, or None if unavailable.
+
+        Prefer this over accessing _cur directly in scripts that only read.
+        """
+        return self._cur if self._connect() is not None else None
+
     def close(self):
         if self._conn is not None:
             try:

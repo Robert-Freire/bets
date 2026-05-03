@@ -36,7 +36,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Install Python deps
-        run: pip install pyodbc
+        run: pip install -r requirements-audit.txt
 
       - name: Run audit invariants
         env:

@@ -364,14 +364,12 @@ def run() -> int:
     print(f"[audit] start {now}")
 
     repo = BetRepo()
-    conn = repo._connect()
-    if conn is None:
+    cur = repo.read_cursor()
+    if cur is None:
         msg = "DB unavailable — check BETS_DB_WRITE=1 and Azure credentials"
         print(f"[audit] FATAL: {msg}", file=sys.stderr)
         _notify("Bets audit FATAL", msg, priority="high")
         return 1
-
-    cur = repo._cur
 
     checks = [
         ("I-1",  _check_i1_pnl(cur)),
