@@ -40,7 +40,7 @@ _NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "kaunitz.bets:v1")
 
 # Imported from _keys.py — the canonical label→sport_key map shared across
 # the storage layer. Add new leagues there, not here.
-from src.storage._keys import LABEL_TO_KEY as _LABEL_TO_KEY  # noqa: E402
+from src.storage._keys import LABEL_TO_KEY as _LABEL_TO_KEY, fixture_uuid as _fixture_uuid  # noqa: E402
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -171,8 +171,8 @@ class Importer:
 
     def upsert_fixture(self, kickoff: str, home: str, away: str,
                        sport_label: str) -> str:
-        fid = _u5(("fixture", kickoff, home, away))
         sport_key = _LABEL_TO_KEY.get(sport_label, sport_label)
+        fid = _fixture_uuid(sport_key, kickoff, home, away)
         self.cur.execute(
             "INSERT INTO fixtures (id, sport_key, league, home, away, kickoff_utc) "
             "SELECT ?, ?, ?, ?, ?, ? "

@@ -8,7 +8,7 @@ GitHub issue [#7](https://github.com/Robert-Freire/bets/issues/7) — distinguis
 
 ## What "the calendar" means
 
-A persisted mapping `(league, date, kickoff_time_utc, home, away) → expected` covering at least:
+The `fixtures` table in Azure SQL, populated weekly by `scripts/ingest_fixtures.py` via `FixtureRepo`. Read by `src/data/fixture_calendar.py` (Pi-safe: no-op when DB env vars unset). Covers at least:
 
 - Active 6 prod leagues + 5 dev candidates wired in M.2.
 - Forward window: rolling 8 weeks (covers international breaks + season-end).
@@ -97,7 +97,12 @@ The calendar's value-per-dependent grows monotonically — once it exists, every
 - 2026-05-02: doc created from conversation. No build started.
 - 2026-05-03: initial build shipped (PR). Implemented: schema migration (source/status on fixtures),
   `scripts/ingest_fixtures.py` (FDCO fixtures.csv primary + api.football-data.org optional),
-  `src/data/fixture_calendar.py` (has_fixtures / get_fixtures / next_kickoff_clusters),
+  `src/data/fixture_calendar.py` (has_fixtures / get_fixtures / canary_verdict),
   canary integration in scan_odds.py (issue #7 — silent skip when calendar confirms no fixtures;
   confirmed-outage alert when fixtures expected), Mon 02:00 UTC cron entry.
-  Deferred to follow-up: cron tailoring (#1), closing-line proximity (#3), DB upsert.
+  Deferred to follow-up: cron tailoring (#1), closing-line proximity (#3).
+- 2026-05-03: JSON-to-SQL migration shipped. `logs/fixture_calendar.json` dropped.
+  `FixtureRepo` writes/reads `fixtures` table. `fixture_uuid` now keys on
+  sport_key + UTC date + normalised team names (_norm_name). `ingested_at` column
+  added for staleness detection. `src/data/fixture_calendar.py` now reads from DB
+  (Pi-safe fallback: returns unknown/empty when DB unset).

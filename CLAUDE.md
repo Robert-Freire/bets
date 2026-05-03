@@ -124,7 +124,7 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 30 12 * * 0     Sun 12:30           — before afternoon games
 
 # CLV + housekeeping (both machines)
-0  2  * * 1     Mon 02:00           — fixture calendar ingest (logs/fixture_calendar.json)
+0  2  * * 1     Mon 02:00           — fixture calendar ingest (fixtures table in Azure SQL)
 0  8  * * 1     Mon 08:00           — football-data.co.uk CLV backfill
 0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
 0  3  * * *     Daily 3am           — bets.csv snapshot to bets.csv.bak.<date> (14d retention on snapshots only — live file untouched)
@@ -149,7 +149,7 @@ scripts/model_signals.py    CatBoost signal cache generator
 scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
 scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent)
 scripts/compute_book_skill.py  Per-(book, league, market) skill + bias signals → book_skill table (B.0.5 + B.0.6)
-scripts/ingest_fixtures.py  Mon 02:00 fixture calendar ingest → logs/fixture_calendar.json (Pi-safe)
+scripts/ingest_fixtures.py  Mon 02:00 fixture calendar ingest → fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
 
 app.py                      Flask dashboard
 templates/index.html        Dashboard UI
@@ -159,9 +159,9 @@ src/storage/schema.sql      Canonical MSSQL schema (8 tables: fixtures, books, s
 src/storage/schema_sqlite.sql  SQLite mirror for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner
 src/storage/_keys.py        Deterministic UUID5 + sport-label helpers (don't change the namespace)
-src/storage/repo.py         BetRepo dual-writer (A.4; lazy pyodbc import)
+src/storage/repo.py         BetRepo dual-writer (A.4) + FixtureRepo calendar read/write; lazy pyodbc import
 src/storage/snapshots.py    SnapshotArchive: gzipped raw API responses → Azure Blob (A.5.5; lazy azure-storage-blob import; logs/snapshots/ buffer on failure)
-src/data/fixture_calendar.py  Forward fixture lookup from logs/fixture_calendar.json (Pi-safe; no DB)
+src/data/fixture_calendar.py  Forward fixture lookup from fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
 src/betting/strategies.py   16 paper variants (A–P; A_production live, B–P shadow) + evaluate_strategy()
@@ -174,13 +174,12 @@ logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state
 logs/scan.log               Scanner output
 logs/backfill_clv.log       FDCO backfill output
-logs/fixture_calendar.json  Upcoming fixture index (ingest_fixtures.py; 8-week forward window; Pi-safe)
 logs/ingest_fixtures.log    Fixture ingest output
 logs/closing_lines.csv      (frozen; closing_line.py paused — historical only)
 logs/drift.csv              (frozen; same)
 logs/closing_line.log       (frozen; same)
 
-tests/                      pytest suite (395 tests across 35 files; run with `pytest`)
+tests/                      pytest suite (439 tests across 36 files; run with `pytest`)
 
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10, foundation — historical for done phases)
 docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)

@@ -5,6 +5,7 @@ returned 0 fixtures and burned 26 credits)."""
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -128,91 +129,100 @@ def test_resolve_canary_no_op_when_no_football_in_scan():
 # existing comment below).  canary_verdict() encapsulates the calendar-aware
 # decision so the logic itself is fully testable.
 
+import sqlite3
+
 import src.data.fixture_calendar as _fc
 
-
-def _write_cal(tmp_path, fixtures):
-    import json
-    cal = tmp_path / "logs" / "fixture_calendar.json"
-    cal.parent.mkdir(parents=True, exist_ok=True)
-    cal.write_text(json.dumps({"generated_at": "2026-05-03T02:00:00Z", "fixtures": fixtures}))
-    return cal
+SCHEMA_SQLITE = ROOT / "src" / "storage" / "schema_sqlite.sql"
 
 
-@pytest.fixture(autouse=False)
-def _patch_fc_path(tmp_path, monkeypatch):
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+def _make_db():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA_SQLITE.read_text())
+    conn.commit()
+    return conn
 
 
-def test_canary_verdict_alert_when_fixtures_expected(tmp_path, monkeypatch):
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
-    _write_cal(tmp_path, [
-        {"sport_key": "soccer_epl", "league": "EPL", "home": "A", "away": "B",
-         "kickoff_utc": "2026-05-10T14:00:00+00:00", "source": "fdco", "status": "scheduled"},
-    ])
+def _make_fc_repo(conn):
+    from src.storage.repo import FixtureRepo
+    return FixtureRepo(conn=conn)
+
+
+def _seed(conn, fixtures):
+    from src.storage.repo import FixtureRepo
+    repo = FixtureRepo(conn=conn)
+    repo.upsert_many(fixtures)
+    return repo
+
+
+def _fx(sport_key="soccer_epl", kickoff="2026-05-10T14:00:00+00:00"):
+    return {"sport_key": sport_key, "league": "EPL", "home": "A", "away": "B",
+            "kickoff_utc": kickoff, "source": "fdco", "status": "scheduled"}
+
+
+@pytest.fixture(autouse=True)
+def _reset_fc_repo(monkeypatch):
+    monkeypatch.setattr(_fc, "_repo", None)
+
+
+def test_canary_verdict_alert_when_fixtures_expected(monkeypatch):
+    conn = _make_db()
+    repo = _seed(conn, [_fx()])
+    monkeypatch.setattr(_fc, "_repo", repo)
     from datetime import date
     verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
     assert verdict == "alert"
     assert len(near) == 1
 
 
-def test_canary_verdict_silent_when_no_fixtures(tmp_path, monkeypatch):
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
-    # Calendar has fixtures for a different league, not EPL
-    _write_cal(tmp_path, [
-        {"sport_key": "soccer_germany_bundesliga", "league": "Bundesliga",
-         "home": "A", "away": "B", "kickoff_utc": "2026-05-10T14:00:00+00:00",
-         "source": "fdco", "status": "scheduled"},
-    ])
+def test_canary_verdict_silent_when_no_fixtures(monkeypatch):
+    conn = _make_db()
+    repo = _seed(conn, [_fx(sport_key="soccer_germany_bundesliga")])
+    monkeypatch.setattr(_fc, "_repo", repo)
     from datetime import date
     verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
     assert verdict == "silent"
     assert near == []
 
 
-def test_canary_verdict_unknown_when_calendar_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
+def test_canary_verdict_unknown_when_db_disabled(monkeypatch):
+    from src.storage.repo import FixtureRepo
+    monkeypatch.setattr(_fc, "_repo", FixtureRepo(dsn=None))
     from datetime import date
     verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
     assert verdict == "unknown"
     assert near == []
 
 
-def test_canary_verdict_unknown_when_calendar_corrupt(tmp_path, monkeypatch):
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "logs" / "fixture_calendar.json").write_text("not valid json{{{")
+def test_canary_verdict_unknown_when_no_ingests(monkeypatch):
+    conn = _make_db()
+    monkeypatch.setattr(_fc, "_repo", _make_fc_repo(conn))
     from datetime import date
     verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
     assert verdict == "unknown"
 
 
-def test_canary_verdict_unknown_when_calendar_stale(tmp_path, monkeypatch):
-    import os, time as _time
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
-    _write_cal(tmp_path, [
-        {"sport_key": "soccer_epl", "league": "EPL", "home": "A", "away": "B",
-         "kickoff_utc": "2026-05-10T14:00:00+00:00", "source": "fdco", "status": "scheduled"},
-    ])
-    stale = _time.time() - (9 * 86400)
-    os.utime(_fc._CALENDAR_PATH, (stale, stale))
+def test_canary_verdict_unknown_when_calendar_stale(monkeypatch):
+    from datetime import timedelta
+    conn = _make_db()
+    repo = _seed(conn, [_fx()])
+    stale_ts = (datetime.utcnow() - timedelta(days=9)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    conn.execute("UPDATE fixtures SET ingested_at = ?", (stale_ts,))
+    conn.commit()
+    monkeypatch.setattr(_fc, "_repo", repo)
     from datetime import date
     verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
     assert verdict == "unknown"
 
 
-def test_canary_verdict_alert_not_affected_by_empty_global_calendar(tmp_path, monkeypatch):
-    """An empty-but-parseable calendar returns 'silent', not 'unknown' — correct."""
-    monkeypatch.setattr(_fc, "_CALENDAR_PATH", tmp_path / "logs" / "fixture_calendar.json")
-    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
-    _write_cal(tmp_path, [])  # valid JSON, no fixtures
+def test_canary_verdict_silent_when_calendar_empty_but_fresh(monkeypatch):
+    """Fresh calendar with no matching fixtures → 'silent', not 'unknown'."""
+    conn = _make_db()
+    repo = _seed(conn, [_fx(sport_key="soccer_germany_bundesliga")])
+    monkeypatch.setattr(_fc, "_repo", repo)
     from datetime import date
     verdict, near = _fc.canary_verdict("soccer_epl", date(2026, 5, 10), date(2026, 5, 12))
-    # Empty calendar is parseable → calendar_available() is True; no fixtures for EPL → 'silent'
     assert verdict == "silent"
 
 
@@ -220,3 +230,76 @@ def test_canary_verdict_alert_not_affected_by_empty_global_calendar(tmp_path, mo
 # tested here — main() reorders football so the canary league fetches first,
 # then sets a skip flag if it returned 0 events. See scan_odds.main() for the
 # logic; CLAUDE.md "How the scanner works" documents the behaviour.
+
+
+# ── _check_calendar_match() — observation-only postponement detector ──────────
+
+def _event(commence_iso: str) -> dict:
+    return {"commence_time": commence_iso}
+
+
+def test_check_calendar_match_silent_for_non_football(capsys, monkeypatch):
+    # Calendar has fixtures but sport is NBA → check is skipped entirely
+    monkeypatch.setattr(scan_odds, "_get_calendar_fixtures",
+                        lambda *a, **kw: [{"sport_key": "x"}])
+    scan_odds._check_calendar_match("basketball_nba", "NBA", [])
+    assert "[mismatch]" not in capsys.readouterr().out
+
+
+def test_check_calendar_match_silent_when_no_calendar_fixtures(capsys, monkeypatch):
+    # Calendar absent / no fixtures expected → nothing to compare, no log
+    monkeypatch.setattr(scan_odds, "_get_calendar_fixtures", lambda *a, **kw: [])
+    scan_odds._check_calendar_match("soccer_epl", "EPL", [_event("2099-01-01T14:00:00Z")])
+    assert "[mismatch]" not in capsys.readouterr().out
+
+
+def test_check_calendar_match_silent_when_counts_agree(capsys, monkeypatch):
+    from datetime import datetime, timezone
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT14:00:00Z")
+    monkeypatch.setattr(scan_odds, "_get_calendar_fixtures",
+                        lambda *a, **kw: [{"sport_key": "soccer_epl"}])
+    scan_odds._check_calendar_match("soccer_epl", "EPL", [_event(today_iso)])
+    assert "[mismatch]" not in capsys.readouterr().out
+
+
+def test_check_calendar_match_logs_when_api_short(capsys, monkeypatch):
+    # Calendar expects 3, API returns 1 in window → log mismatch
+    monkeypatch.setattr(
+        scan_odds, "_get_calendar_fixtures",
+        lambda *a, **kw: [{"sport_key": "soccer_epl"}] * 3,
+    )
+    from datetime import datetime, timezone
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT14:00:00Z")
+    scan_odds._check_calendar_match("soccer_epl", "EPL", [_event(today_iso)])
+    out = capsys.readouterr().out
+    assert "[mismatch]" in out
+    assert "API 1" in out
+    assert "calendar 3" in out
+
+
+def test_check_calendar_match_ignores_api_events_outside_window(capsys, monkeypatch):
+    # API returns 5 events but only 1 is within the 2-day window;
+    # calendar expects 1 → counts agree, no log
+    monkeypatch.setattr(
+        scan_odds, "_get_calendar_fixtures",
+        lambda *a, **kw: [{"sport_key": "soccer_epl"}],
+    )
+    from datetime import datetime, timezone, timedelta
+    today = datetime.now(timezone.utc)
+    in_window = today.strftime("%Y-%m-%dT14:00:00Z")
+    far = (today + timedelta(days=10)).strftime("%Y-%m-%dT14:00:00Z")
+    events = [_event(in_window)] + [_event(far)] * 4
+    scan_odds._check_calendar_match("soccer_epl", "EPL", events)
+    assert "[mismatch]" not in capsys.readouterr().out
+
+
+def test_check_calendar_match_tolerates_bad_commence_time(capsys, monkeypatch):
+    # Malformed commence_time → skipped silently, doesn't crash
+    monkeypatch.setattr(
+        scan_odds, "_get_calendar_fixtures",
+        lambda *a, **kw: [{"sport_key": "soccer_epl"}],
+    )
+    scan_odds._check_calendar_match("soccer_epl", "EPL", [_event("not-a-date")])
+    out = capsys.readouterr().out
+    # Should log mismatch (API 0 vs calendar 1) without raising
+    assert "[mismatch]" in out

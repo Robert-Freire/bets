@@ -73,3 +73,71 @@ def test_bets_csv_dedup_key_matches():
     vb = {"home": "Arsenal", "away": "Chelsea", "market": "h2h", "line": "", "side": "H"}
     k = (vb["home"], vb["away"], vb["market"], str(vb.get("line", "")), vb["side"])
     assert len(k) == 5
+
+
+# ── fixture_uuid + _norm_name ─────────────────────────────────────────────────
+
+def test_fixture_uuid_is_deterministic():
+    from src.storage._keys import fixture_uuid
+    id1 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    id2 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    assert id1 == id2
+
+
+def test_fixture_uuid_collapses_timestamp_to_date():
+    from src.storage._keys import fixture_uuid
+    id1 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    id2 = fixture_uuid("soccer_epl", "2026-05-10T18:00:00Z", "Arsenal", "Chelsea")
+    assert id1 == id2
+
+
+def test_fixture_uuid_collapses_fc_suffix():
+    from src.storage._keys import fixture_uuid
+    id1 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal FC", "Chelsea FC")
+    id2 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    assert id1 == id2
+
+
+def test_fixture_uuid_different_leagues():
+    from src.storage._keys import fixture_uuid
+    id1 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    id2 = fixture_uuid("soccer_germany_bundesliga", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    assert id1 != id2
+
+
+def test_fixture_uuid_different_dates():
+    from src.storage._keys import fixture_uuid
+    id1 = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    id2 = fixture_uuid("soccer_epl", "2026-05-11T14:00:00Z", "Arsenal", "Chelsea")
+    assert id1 != id2
+
+
+def test_fixture_uuid_does_not_collide_with_bet_uuid():
+    from src.storage._keys import fixture_uuid, bet_uuid, normalise_line, scan_date_of
+    fid = fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea")
+    bid = bet_uuid("2026-05-03", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea",
+                   "h2h", "", "HOME", "bet365")
+    assert fid != bid
+
+
+def test_norm_name_strips_fc():
+    from src.storage._keys import _norm_name
+    assert _norm_name("Arsenal FC") == "arsenal"
+    assert _norm_name("Arsenal") == "arsenal"
+
+
+def test_norm_name_folds_accents():
+    from src.storage._keys import _norm_name
+    assert _norm_name("Mönchengladbach") == "monchengladbach"
+
+
+def test_fixture_uuid_pinned_value():
+    """Pin the exact UUID so any future key-shape change fails loudly.
+
+    This is the canary: if this assertion breaks, you changed fixture_uuid's
+    key shape and must ship a DB remediation script before the next ingest.
+    See src/storage/_keys.py docstring for the protocol.
+    """
+    from src.storage._keys import fixture_uuid
+    assert fixture_uuid("soccer_epl", "2026-05-10T14:00:00Z", "Arsenal", "Chelsea") == \
+        "7831f699-219a-5cdc-9e77-8409c955260b"

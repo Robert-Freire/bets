@@ -68,6 +68,15 @@ def test_sqlite_schema_idempotent():
     assert before == after, "Schema is not idempotent on rerun"
 
 
+def test_fixtures_has_calendar_columns():
+    conn = _make_conn()
+    _apply(conn, SCHEMA_SQLITE.read_text())
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(fixtures)").fetchall()}
+    assert {"source", "status", "ingested_at"}.issubset(cols), (
+        f"fixtures table missing calendar columns; got: {cols}"
+    )
+
+
 def test_bets_has_expected_columns():
     conn = _make_conn()
     _apply(conn, SCHEMA_SQLITE.read_text())

@@ -25,7 +25,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.config import load_config as _src_load_config, _validate as _validate_leagues
-from src.data.fixture_calendar import canary_verdict as _canary_verdict
+from src.data.fixture_calendar import (
+    canary_verdict as _canary_verdict,
+    get_fixtures as _get_calendar_fixtures,
+)
 
 try:
     from src.betting.devig import shin as _shin_devig, proportional as _proportional_devig
@@ -233,6 +236,36 @@ def _resolve_canary(configured: str, football: list[tuple[str, str, int]]) -> st
               f"list {sorted(football_keys)}; falling back to {fallback}.")
         return fallback
     return configured
+
+
+def _check_calendar_match(sport_key: str, label: str, events: list[dict]) -> None:
+    """Observation-only: log [mismatch] when API event count diverges from the
+    calendar's fixture count for the next 2 days. Validates the cross-source
+    join (team names + timezones) before any code consumes the calendar for
+    real decisions. Football-only — calendar doesn't cover NBA/tennis.
+    """
+    if not sport_key.startswith("soccer_"):
+        return
+    today = datetime.now(timezone.utc).date()
+    horizon = today + timedelta(days=2)
+    expected = _get_calendar_fixtures(sport_key, today, horizon)
+    if not expected:
+        return  # calendar absent or no fixtures expected — nothing to compare
+
+    api_in_window = 0
+    for e in events:
+        ct = e.get("commence_time", "")
+        try:
+            dt = datetime.fromisoformat(ct.replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        if today <= dt <= horizon:
+            api_in_window += 1
+
+    if api_in_window != len(expected):
+        print(f"  [mismatch] {label}: API {api_in_window}, "
+              f"calendar {len(expected)} (next 2d) — possible postponement "
+              f"or calendar drift")
 
 
 def _health_check_sports() -> set[str]:
@@ -858,6 +891,11 @@ def main():
                   f"{flag}")
             if bets:
                 sport_summary.append(f"{label}: {len(bets)} bet(s)")
+
+            # Observation-only: log API↔calendar count mismatches so we can
+            # see postponements / data-source drift before consuming the
+            # calendar for real decisions (cron tailoring, etc.).
+            _check_calendar_match(sport_key, label, events)
 
             # Canary trip: if the configured football league returned 0 events,
             # consult the fixture calendar before alerting.
