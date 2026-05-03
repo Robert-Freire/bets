@@ -21,6 +21,11 @@ jobs:
 
       - name: Install ODBC driver
         run: |
+          # Remove any pre-existing Microsoft repo entries; the ubuntu-22.04
+          # runner ships one without a Signed-By field which conflicts with ours.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/mssql-release.list \
+                     /usr/share/keyrings/microsoft-prod.gpg
           curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
             | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
           curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
