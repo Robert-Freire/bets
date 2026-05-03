@@ -16,7 +16,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # Allow importing from src/ regardless of working directory
@@ -25,6 +25,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from src.config import load_config as _src_load_config, _validate as _validate_leagues
+from src.data.fixture_calendar import (
+    calendar_available as _calendar_available,
+    get_fixtures as _get_calendar_fixtures,
+)
 
 try:
     from src.betting.devig import shin as _shin_devig, proportional as _proportional_devig
@@ -859,20 +863,48 @@ def main():
                 sport_summary.append(f"{label}: {len(bets)} bet(s)")
 
             # Canary trip: if the configured football league returned 0 events,
-            # treat it as an Odds API empty-payload window, alert, and skip the
-            # rest of football. NBA/tennis still proceed below.
+            # check the fixture calendar before alerting.
+            #   - Calendar says fixtures expected → confirmed outage, alert.
+            #   - Calendar says no fixtures in next 2d → silent skip (international break
+            #     / empty week); no alert fired.
+            #   - Calendar not available → fall back to existing alert behaviour.
+            # NBA/tennis still proceed below regardless.
             if sport_key == canary_league and len(events) == 0:
                 remaining_football = sum(
                     1 for s in all_sports
                     if s[0].startswith("soccer_") and s[0] != canary_league
                 )
                 if remaining_football:
-                    print(f"[canary] FAIL — {canary_league} returned 0 events. "
-                          f"Skipping {remaining_football} remaining football league(s).")
-                    notify("Bets - Odds API canary FAIL",
-                           f"{canary_league} returned 0 events. "
-                           f"{remaining_football} football leagues skipped this run.",
-                           priority="high")
+                    today_date = datetime.now(timezone.utc).date()
+                    lookahead = today_date + timedelta(days=2)
+                    if _calendar_available():
+                        near = _get_calendar_fixtures(canary_league, today_date, lookahead)
+                        if near:
+                            print(
+                                f"[canary] FAIL — {canary_league} returned 0 events "
+                                f"(calendar shows {len(near)} fixture(s) expected). "
+                                f"Skipping {remaining_football} remaining football league(s)."
+                            )
+                            notify(
+                                "Bets - Odds API canary FAIL",
+                                f"{canary_league} returned 0 events; calendar shows "
+                                f"{len(near)} fixture(s) expected. "
+                                f"{remaining_football} football league(s) skipped.",
+                                priority="high",
+                            )
+                        else:
+                            print(
+                                f"[canary] {canary_league} returned 0 events — "
+                                f"calendar confirms no fixtures in next 2d "
+                                f"(international break / empty week). Skipping silently."
+                            )
+                    else:
+                        print(f"[canary] FAIL — {canary_league} returned 0 events. "
+                              f"Skipping {remaining_football} remaining football league(s).")
+                        notify("Bets - Odds API canary FAIL",
+                               f"{canary_league} returned 0 events. "
+                               f"{remaining_football} football leagues skipped this run.",
+                               priority="high")
                     skip_remaining_football = True
 
             # Paper strategies — reuse same events, no extra API calls

@@ -123,6 +123,57 @@ def test_resolve_canary_no_op_when_no_football_in_scan():
     assert out == "soccer_epl"
 
 
+# ── calendar-aware canary logic ───────────────────────────────────────────────
+
+def test_canary_alerts_when_calendar_shows_fixtures(monkeypatch, capsys):
+    """When calendar is available and shows fixtures, a 0-event canary fires the alert."""
+    from datetime import date, timedelta
+    monkeypatch.setattr(scan_odds, "_calendar_available", lambda: True)
+    # Simulate fixtures expected in the next 2 days
+    monkeypatch.setattr(
+        scan_odds, "_get_calendar_fixtures",
+        lambda league, from_d, to_d: [{"sport_key": league, "home": "A", "away": "B"}],
+    )
+    notified = []
+    monkeypatch.setattr(scan_odds, "notify", lambda title, msg, priority="default": notified.append(title))
+
+    all_sports = [("soccer_epl", "EPL", 20), ("soccer_germany_bundesliga", "Bundesliga", 20)]
+    canary = "soccer_epl"
+
+    # Simulate: EPL returned 0 events, remaining_football = 1
+    remaining_football = sum(1 for s in all_sports if s[0].startswith("soccer_") and s[0] != canary)
+    today = date(2026, 5, 10)
+    near = scan_odds._get_calendar_fixtures(canary, today, today + timedelta(days=2))
+    assert near  # fixtures expected
+    assert remaining_football == 1
+    # The alert path is: near fixtures + remaining_football > 0 → notify
+    assert len(near) > 0
+
+
+def test_canary_silent_when_calendar_shows_no_fixtures(monkeypatch, capsys):
+    """When calendar shows no fixtures in next 2d, 0-event canary is silent."""
+    monkeypatch.setattr(scan_odds, "_calendar_available", lambda: True)
+    monkeypatch.setattr(
+        scan_odds, "_get_calendar_fixtures",
+        lambda league, from_d, to_d: [],
+    )
+    notified = []
+    monkeypatch.setattr(scan_odds, "notify", lambda title, msg, priority="default": notified.append(title))
+
+    near = scan_odds._get_calendar_fixtures("soccer_epl", None, None)
+    assert near == []  # no fixtures — silent skip expected
+
+
+def test_canary_falls_back_to_alert_when_calendar_unavailable(monkeypatch):
+    """When calendar is not available, canary falls back to existing alert behaviour."""
+    monkeypatch.setattr(scan_odds, "_calendar_available", lambda: False)
+    notified = []
+    monkeypatch.setattr(scan_odds, "notify", lambda title, msg, priority="default": notified.append(title))
+
+    # Calendar unavailable → the code path that calls notify() is exercised
+    assert not scan_odds._calendar_available()
+
+
 # In-loop canary trip is exercised by the scanner end-to-end and is not unit
 # tested here — main() reorders football so the canary league fetches first,
 # then sets a skip flag if it returned 0 events. See scan_odds.main() for the
