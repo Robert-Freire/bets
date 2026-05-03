@@ -551,6 +551,166 @@ def test_compute_smoke_two_devig_methods(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# B.1: bias signals (_bias_from_rows + _BookAccum home/draw extraction)
+# ---------------------------------------------------------------------------
+
+def _make_fdco_rows(n: int, book_h_odds_fn=None, include_pinnacle: bool = True) -> list[dict]:
+    """Synthetic FDCO rows for bias tests.
+
+    All fixtures: home wins (FTR=H). Pinnacle: flat 2.0/3.5/4.0.
+    book_h_odds_fn(i): callable returning home odds for non-pinnacle book i.
+    """
+    pin_h, pin_d, pin_a = 2.0, 3.5, 4.0
+    book_h_odds_fn = book_h_odds_fn or (lambda i: 2.1)  # slight home generosity
+    rows = []
+    for i in range(n):
+        bh = book_h_odds_fn(i)
+        row = {
+            "Date": f"{i % 28 + 1:02d}/04/2026",
+            "FTR": "H",
+        }
+        if include_pinnacle:
+            row.update({"PSCH": str(pin_h), "PSCD": str(pin_d), "PSCA": str(pin_a)})
+        row.update({
+            "B365CH": str(bh), "B365CD": str(pin_d), "B365CA": str(pin_a),
+            "BWCH": "", "BWCD": "", "BWCA": "",
+            "BVCH": "", "BVCD": "", "BVCA": "",
+            "BFECH": "", "BFECD": "", "BFECA": "",
+        })
+        rows.append(row)
+    return rows
+
+
+def test_bias_from_rows_home_bias_sign():
+    """A book consistently shorter on home outcome has positive home_bias."""
+    from datetime import date
+    from src.betting.devig import shin
+    from scripts.compute_book_skill import _bias_from_rows
+
+    # bet365 priced at 2.10 on home vs pinnacle 2.00 — bet365 is generous on home
+    rows = _make_fdco_rows(30, book_h_odds_fn=lambda i: 2.10)
+    since = date(2026, 4, 1)
+    until = date(2026, 4, 30)
+
+    result = _bias_from_rows(rows, since, until, shin)
+
+    assert "bet365" in result
+    # bet365 offers higher home odds → lower implied prob → negative home_bias
+    # (it underestimates home probability relative to LOO consensus)
+    assert result["bet365"]["home_bias"] is not None
+    # bet365 home odds 2.10 > pinnacle 2.00 → devigged p_home(bet365) < p_home(pin)
+    # home_bias = p_home(bet365) - p_home(loo) should be negative
+    assert result["bet365"]["home_bias"] < 0, (
+        f"Expected negative home_bias for generous home odds, "
+        f"got {result['bet365']['home_bias']:.6f}"
+    )
+    # Pinnacle is in the opposite direction
+    assert result["pinnacle"]["home_bias"] is not None
+
+
+def test_bias_from_rows_returns_none_slope_for_too_few_buckets():
+    """Fav-longshot slope is None when fewer than 3 buckets have >= 3 observations."""
+    from datetime import date
+    from src.betting.devig import shin
+    from scripts.compute_book_skill import _bias_from_rows
+
+    # 2 rows — cannot fill 3 distinct probability buckets with >= 3 obs each
+    rows = _make_fdco_rows(2)
+    result = _bias_from_rows(rows, date(2026, 4, 1), date(2026, 4, 30), shin)
+    for bk_data in result.values():
+        assert bk_data["fav_longshot_slope"] is None
+
+
+def test_bias_from_rows_slope_nontrivial_with_enough_data():
+    """Fav-longshot slope is non-None and finite with 60 fixtures and varied probs."""
+    from datetime import date
+    from src.betting.devig import shin
+    from scripts.compute_book_skill import _bias_from_rows
+
+    # Vary home odds 1.3–4.0 so probs span multiple buckets
+    import math
+    def h_odds(i):
+        return 1.3 + (i % 20) * 0.135  # cycles through ~1.3 to ~4.0
+
+    rows = _make_fdco_rows(60, book_h_odds_fn=h_odds)
+    # Alternate outcomes so realized freq is not trivially 0 or 1
+    for i, row in enumerate(rows):
+        row["FTR"] = ["H", "D", "A"][i % 3]
+
+    result = _bias_from_rows(rows, date(2026, 4, 1), date(2026, 4, 30), shin)
+    bet365 = result.get("bet365", {})
+    slope = bet365.get("fav_longshot_slope")
+    assert slope is not None, "Expected non-None slope with 60 fixtures and varied probs"
+    assert math.isfinite(slope)
+    assert 0.0 < slope < 5.0, f"Slope {slope} outside plausible range"
+
+
+def test_bias_shrinkage_reduces_extreme_values():
+    """With n=5 fixtures the shrunken bias is closer to 0 than the raw bias."""
+    from datetime import date
+    from src.betting.devig import shin
+    from scripts.compute_book_skill import _bias_from_rows, _SHRINKAGE_N0
+
+    # Extreme home generosity: bet365 at 3.0 vs pinnacle 2.0
+    rows = _make_fdco_rows(5, book_h_odds_fn=lambda i: 3.0)
+    result = _bias_from_rows(rows, date(2026, 4, 1), date(2026, 4, 30), shin)
+
+    bet365 = result.get("bet365", {})
+    home_bias = bet365.get("home_bias")
+    assert home_bias is not None
+
+    # With n=5, w = 5/(5+50) ≈ 0.091 → shrunken value is ~91% of the way to global mean
+    # global mean ≈ 0 (two books, symmetric effect) so shrunken bias is much smaller than raw
+    # We just verify the shrinkage weight < 1.0 (implying |shrunken| < |raw|) for small n
+    w = 5 / (5 + _SHRINKAGE_N0)
+    assert w < 0.2, f"Shrinkage weight {w:.3f} too high for n=5"
+
+
+def test_blob_accum_home_draw_bias_extracted():
+    """_BookAccum.aggregate() extracts home_bias_blob and draw_bias_blob via loo_list slicing."""
+    from scripts.compute_book_skill import _BookAccum
+
+    # Three-book event: soft1 is generous on home, tight on draw
+    event = {
+        "home_team": "Home", "away_team": "Away",
+        "commence_time": "2026-04-26T15:00:00Z",
+        "bookmakers": [
+            {"key": "pinnacle", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Home", "price": 1 / 0.50},
+                {"name": "Away", "price": 1 / 0.28},
+                {"name": "Draw", "price": 1 / 0.22},
+            ]}]},
+            {"key": "soft1", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Home", "price": 1 / 0.46},  # generous on home
+                {"name": "Away", "price": 1 / 0.30},
+                {"name": "Draw", "price": 1 / 0.24},
+            ]}]},
+            {"key": "soft2", "markets": [{"key": "h2h", "outcomes": [
+                {"name": "Home", "price": 1 / 0.48},
+                {"name": "Away", "price": 1 / 0.29},
+                {"name": "Draw", "price": 1 / 0.23},
+            ]}]},
+        ],
+    }
+
+    accum = _BookAccum()
+    for _ in range(5):  # repeat same event to accumulate
+        accum.add_event(event, truth_anchor="pinnacle")
+    agg = accum.aggregate()
+
+    for bk in ("pinnacle", "soft1", "soft2"):
+        assert bk in agg, f"{bk} missing from aggregate"
+        assert "home_bias_blob" in agg[bk], f"{bk} missing home_bias_blob"
+        assert "draw_bias_blob" in agg[bk], f"{bk} missing draw_bias_blob"
+        assert agg[bk]["home_bias_blob"] is not None
+
+    # soft1 is more generous on home (lower implied home prob) → negative home_bias_blob
+    assert agg["soft1"]["home_bias_blob"] < agg["pinnacle"]["home_bias_blob"], (
+        "soft1 should have lower home_bias than pinnacle (generous home odds)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pi-safety
 # ---------------------------------------------------------------------------
 

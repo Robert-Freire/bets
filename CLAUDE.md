@@ -192,6 +192,7 @@ docs/FDCO_INGEST_NOTES.md   Football-data.co.uk ingest details
 docs/AH_FEASIBILITY.md      Asian Handicap feasibility probe (R.9)
 docs/COMMISSIONS.md         Per-book commission rates
 docs/PAID_DATA_WISHLIST.md  Living list of investigations unlocked by paying for Odds API historical access — consult & append whenever a "we don't have enough data" question comes up
+docs/DATA_ACQUISITION_IDEAS.md  Living catalogue of data-source ideas beyond today's stack (provider landscape, steam-chase scraper, Tennis-Data ingest, etc.) — consult & append whenever a "could we get data from X?" question comes up
 docs/PLAN_FIXTURE_CALENDAR.md  Exploratory plan — what becomes possible (cron tailoring, outage detection, closing-line proximity, deterministic bet matching, etc.) if we build a fixture calendar. Origin: issue #7
 data/raw/                   Football-data.co.uk CSVs + Understat xG
 ```
@@ -255,7 +256,9 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Phase 9a (Pi cron cutover) | ✅ done 2026-05-01 |
 | Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |
 | B.0 + B.0.5 + B.0.6 + B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
-| B.1 (bias backfill), B.2 (Brier-vs-close), B.3 (cron), B.4* (downstream variants) | pending |
+| B.1 (bias backfill: fav-longshot slope + home/draw bias + empirical-Bayes shrinkage) | ✅ done 2026-05-03 |
+| B.3 (cron: WSL ✅ 2026-05-03; Pi pending) | partial |
+| B.2 (Brier-vs-close decision gate), B.4* (downstream variants) | pending |
 | Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ dashboard DB-only done 2026-05-02 (PRs #27 + #28); scanner still dual-writes CSV+DB on WSL — CSV write cutover + archive pending |
 | Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |
 | Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |
