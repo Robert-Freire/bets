@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Numerical audit invariants I-1..I-13 over DB + CSV state.
+Numerical audit invariants I-1..I-13 over DB state.
 
 Groups 1–4 ship now; groups 5–6 (I-14, I-15) deferred until book_skill
-rows are populated.  Runs Mon 09:10 BST after FDCO backfill (08:00) and
-compute_book_skill (09:05).
+rows are populated.  Runs Mon 09:10 BST via GitHub Actions after FDCO
+backfill (08:00) and compute_book_skill (09:05).
 
-Requires BETS_DB_WRITE=1 + AZURE_SQL_DSN (or component env vars) — exits
-with code 1 if the DB is unreachable so the cron log captures the failure.
+Requires BETS_DB_WRITE=1 + AZURE_SQL_KV_VAULT/AZURE_SQL_KV_SECRET (fetched
+via `az keyvault secret show` — OIDC login must precede this script in CI).
 
 Exit codes: 0 = all OK/WARN, 1 = ≥1 FAIL or DB unavailable.
 """
@@ -29,7 +29,10 @@ from src.storage.repo import BetRepo
 _NTFY_TOPIC = os.environ.get("NTFY_TOPIC_OVERRIDE", "robert-epl-bets-m4x9k")
 _NTFY_URL = f"https://ntfy.sh/{_NTFY_TOPIC}" if _NTFY_TOPIC else ""
 
+# Config-sourced, not user input — safe to interpolate into SQL.
 _FDCO_SPORT_KEYS = frozenset(e["key"] for e in load_leagues() if "fdco_code" in e)
+if not _FDCO_SPORT_KEYS:
+    sys.exit("[audit] FATAL: no FDCO-covered leagues found in config — check load_leagues()")
 _FDCO_KEYS_SQL = ", ".join(f"'{k}'" for k in _FDCO_SPORT_KEYS)
 
 FAIL = "FAIL"
@@ -69,8 +72,13 @@ def _scalar(cur, sql: str, *params):
 # ---------------------------------------------------------------------------
 
 def _check_i1_pnl(cur) -> tuple[str, str]:
-    """P&L arithmetic: stored pnl matches recomputed value for all settled rows."""
+    """P&L arithmetic: stored pnl matches recomputed value for all settled rows.
+
+    NULL pnl on a settled row is also a FAIL — it means the settlement
+    handler never wrote the value, which is a worse failure than a rounding gap.
+    """
     bad = 0
+    null_pnl = 0
     for table in ("bets", "paper_bets"):
         cur.execute(
             f"SELECT b.result, b.actual_stake, b.odds, b.commission_rate, b.pnl "
@@ -78,7 +86,10 @@ def _check_i1_pnl(cur) -> tuple[str, str]:
             f"WHERE b.actual_stake IS NOT NULL AND b.result IN ('W','L','V')"
         )
         for result, actual_stake, odds, comm_rate, pnl in cur.fetchall():
-            if pnl is None or actual_stake is None or odds is None:
+            if actual_stake is None or odds is None:
+                continue
+            if pnl is None:
+                null_pnl += 1
                 continue
             stake = float(actual_stake)
             o     = float(odds)
@@ -91,8 +102,13 @@ def _check_i1_pnl(cur) -> tuple[str, str]:
                 expected = 0.0
             if abs(float(pnl) - expected) > 0.02:
                 bad += 1
+    parts = []
+    if null_pnl:
+        parts.append(f"{null_pnl} settled rows with NULL pnl")
     if bad:
-        return FAIL, f"{bad} rows have stored pnl mismatching recomputed value (tolerance £0.02)"
+        parts.append(f"{bad} rows with pnl mismatch (tolerance £0.02)")
+    if parts:
+        return FAIL, "; ".join(parts)
     return OK, "pnl arithmetic consistent across all settled rows"
 
 
@@ -112,7 +128,11 @@ def _check_i2_edge(cur) -> tuple[str, str]:
 
 
 def _check_i3_stake(cur) -> tuple[str, str]:
-    """Stake must be ≥5 and divisible by 5 for all non-null stake rows."""
+    """Stake must be ≥5 and divisible by 5 for all non-null stake rows.
+
+    Project convention is whole-£5 stakes only; CAST to BIGINT before % 5
+    to avoid decimal remainder noise (e.g. 10.00 % 5 can be non-zero in SQL).
+    """
     total = 0
     for table in ("bets", "paper_bets"):
         n = _scalar(
@@ -170,12 +190,11 @@ def _check_i5_stake_parity(cur) -> tuple[str, str]:
 
 def _check_i6_stale_pending(cur) -> tuple[str, str]:
     """No bets stuck in 'pending' with kickoff > 7 days ago."""
-    cutoff_sql = "DATEADD(day, -7, GETUTCDATE())"
     n = _scalar(
         cur,
-        f"SELECT COUNT(*) FROM bets b "
-        f"JOIN fixtures f ON f.id = b.fixture_id "
-        f"WHERE b.result = 'pending' AND f.kickoff_utc < {cutoff_sql}",
+        "SELECT COUNT(*) FROM bets b "
+        "JOIN fixtures f ON f.id = b.fixture_id "
+        "WHERE b.result = 'pending' AND f.kickoff_utc < DATEADD(day, -7, GETUTCDATE())",
     ) or 0
     if n:
         return FAIL, f"{n} bets pending with kickoff >7 days ago"
@@ -188,14 +207,13 @@ def _check_i6_stale_pending(cur) -> tuple[str, str]:
 
 def _check_i7_clv_coverage(cur) -> tuple[str, str]:
     """≥70% of settled football bets on FDCO leagues (kickoff >14d) have clv_pct."""
-    cutoff_sql = "DATEADD(day, -14, GETUTCDATE())"
     cur.execute(
         f"SELECT COUNT(*), SUM(CASE WHEN b.clv_pct IS NOT NULL THEN 1 ELSE 0 END) "
         f"FROM bets b "
         f"JOIN fixtures f ON f.id = b.fixture_id "
         f"WHERE b.result IN ('W','L','V') "
         f"  AND f.sport_key IN ({_FDCO_KEYS_SQL}) "
-        f"  AND f.kickoff_utc < {cutoff_sql}",
+        f"  AND f.kickoff_utc < DATEADD(day, -14, GETUTCDATE())",
     )
     row = cur.fetchone()
     total, filled = int(row[0] or 0), int(row[1] or 0)
@@ -222,9 +240,8 @@ def _check_i8_clv_bounds(cur) -> tuple[str, str]:
 def _check_i9_clv_shift(cur) -> tuple[str, str]:
     """Week-over-week avg CLV shift < 10pp (WARNING only, does not page).
 
-    Compares avg clv_pct for settled bets settled in the last 7 days vs the
-    prior 7-day window (7–14 days ago).  All-SQL: no file state needed, so
-    the check works correctly on ephemeral CI runners.
+    Compares avg clv_pct for bets settled in the last 7 days vs the prior
+    7-day window (7–14 days ago).  All-SQL: stateless, works on ephemeral runners.
     """
     cur.execute(
         "SELECT "
@@ -276,7 +293,7 @@ def _check_i10_loo_nonzero(cur) -> tuple[str, str]:
     if avg_abs is None:
         return OK, f"book_skill: no LOO values for window {latest}"
     if float(avg_abs) <= 0.0001:
-        return FAIL, f"LOO regression guard: mean(|edge_vs_consensus_loo|)={float(avg_abs):.6f} ≤ 0.0001 (latest window {latest})"
+        return FAIL, f"LOO regression guard: mean(|edge_vs_consensus_loo|)={float(avg_abs):.6f} ≤ 0.0001 (window {latest})"
     return OK, f"LOO non-zero: mean(|edge_vs_consensus_loo|)={float(avg_abs):.6f} (window {latest})"
 
 
@@ -302,22 +319,26 @@ def _check_i11_divergence(cur) -> tuple[str, str]:
 
 
 def _check_i12_row_pairs(cur) -> tuple[str, str]:
-    """Every (book, league, market, window_end) has exactly 2 rows (shin + multiplicative)."""
+    """Every (book, league, market, window_end) has exactly one shin row and
+    one multiplicative row — checks both cardinality and method identity."""
     total = _scalar(cur, "SELECT COUNT(*) FROM book_skill") or 0
     if total == 0:
         return OK, "book_skill: no rows yet"
     n_bad = _scalar(
         cur,
         "SELECT COUNT(*) FROM ("
-        "  SELECT book, league, market, window_end, COUNT(*) AS cnt "
-        "  FROM book_skill "
-        "  GROUP BY book, league, market, window_end "
+        "  SELECT book, league, market, window_end"
+        "  FROM book_skill"
+        "  GROUP BY book, league, market, window_end"
         "  HAVING COUNT(*) != 2"
+        "       OR COUNT(DISTINCT devig_method) != 2"
+        "       OR SUM(CASE WHEN devig_method = 'shin'           THEN 1 ELSE 0 END) != 1"
+        "       OR SUM(CASE WHEN devig_method = 'multiplicative' THEN 1 ELSE 0 END) != 1"
         ") x",
     ) or 0
     if n_bad:
-        return FAIL, f"{n_bad} (book,league,market,window_end) groups don't have exactly 2 rows"
-    return OK, "all book_skill groups have exactly 2 rows (shin + multiplicative)"
+        return FAIL, f"{n_bad} (book,league,market,window_end) groups missing shin+multiplicative pair"
+    return OK, f"all book_skill groups have exactly one shin + one multiplicative row"
 
 
 def _check_i13_n_fixtures(cur) -> tuple[str, str]:
@@ -345,7 +366,7 @@ def run() -> int:
     repo = BetRepo()
     conn = repo._connect()
     if conn is None:
-        msg = "DB unavailable — set BETS_DB_WRITE=1 + AZURE_SQL_DSN"
+        msg = "DB unavailable — check BETS_DB_WRITE=1 and Azure credentials"
         print(f"[audit] FATAL: {msg}", file=sys.stderr)
         _notify("Bets audit FATAL", msg, priority="high")
         return 1

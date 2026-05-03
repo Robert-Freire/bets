@@ -259,7 +259,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | B.1 (bias backfill: fav-longshot slope + home/draw bias + empirical-Bayes shrinkage) | ✅ done 2026-05-03 |
 | B.3 (cron: WSL ✅ 2026-05-03; Pi pending) | partial |
 | B.2 (Brier-vs-close decision gate), B.4* (downstream variants) | pending |
-| Audit invariants I-1..I-13 (groups 1–4: P&L arithmetic, dashboard parity, CLV pipeline, book_skill) | ✅ done 2026-05-03; GitHub Actions workflow Mon 08:10 UTC; needs `AZURE_SQL_DSN` repo secret; groups 5–6 pending |
+| Audit invariants I-1..I-13 (groups 1–4: P&L arithmetic, dashboard parity, CLV pipeline, book_skill) | ✅ done 2026-05-03; GitHub Actions workflow Mon 08:10 UTC (OIDC + KV, no new secrets); groups 5–6 pending |
 | Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ dashboard DB-only done 2026-05-02 (PRs #27 + #28); scanner still dual-writes CSV+DB on WSL — CSV write cutover + archive pending |
 | Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |
 | Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |

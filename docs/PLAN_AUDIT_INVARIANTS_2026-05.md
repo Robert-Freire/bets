@@ -65,13 +65,15 @@ logs/audit_state.json                    I-9 state (gitignored; written by workf
 
 | Secret | Notes |
 |---|---|
-| `AZURE_SQL_DSN` | Full pyodbc connection string (same as `.env.dev`); new — not yet in repo secrets |
 | `AZURE_CLIENT_ID` | Already present (OIDC deploy workflow) |
 | `AZURE_TENANT_ID` | Already present |
 | `AZURE_SUBSCRIPTION_ID` | Already present |
 
-**Action needed:** add `AZURE_SQL_DSN` to repo secrets before the workflow runs.
-The audit does not use OIDC itself — direct DSN is simpler and sufficient.
+No new secrets needed. The workflow logs in via OIDC then uses
+`AZURE_SQL_KV_VAULT` / `AZURE_SQL_KV_SECRET` (baked into the workflow YAML as
+non-secret env vars) so BetRepo fetches the SQL password from Key Vault at
+runtime via `az keyvault secret show`. `kaunitz-github-actions` SP has
+`get + list` on `kaunitz-dev-kv-rfk1` (added 2026-05-03).
 
 ## Status
 
