@@ -269,3 +269,47 @@ def test_invalid_dsn_does_not_block_paper_or_closing(fresh_env, tmp_path, monkey
     }])
     assert (tmp_path / "paper" / "A_production.csv").exists()
     assert (tmp_path / "closing_lines.csv").exists()
+
+
+def test_connect_retry_succeeds_on_second_attempt(fresh_env, monkeypatch, capsys):
+    """_pyodbc_connect retries after a transient failure and succeeds on attempt 2."""
+    import types
+    import src.storage.repo as repo_mod
+
+    call_count = 0
+
+    class _FakeConn:
+        pass
+
+    def _fake_connect(dsn):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise Exception("HYT00: Login timeout expired")
+        return _FakeConn()
+
+    fake_pyodbc = types.ModuleType("pyodbc")
+    fake_pyodbc.connect = _fake_connect
+    monkeypatch.setitem(sys.modules, "pyodbc", fake_pyodbc)
+    monkeypatch.setattr(repo_mod._time, "sleep", lambda s: None)
+
+    conn = repo_mod._pyodbc_connect("DSN=fake")
+    assert isinstance(conn, _FakeConn)
+    assert call_count == 2
+    captured = capsys.readouterr()
+    assert "attempt 1 failed" in captured.err
+    assert "attempt 2" in captured.err
+
+
+def test_connect_retry_exhausted_raises(fresh_env, monkeypatch):
+    """_pyodbc_connect raises after all attempts are exhausted."""
+    import types
+    import src.storage.repo as repo_mod
+
+    fake_pyodbc = types.ModuleType("pyodbc")
+    fake_pyodbc.connect = lambda dsn: (_ for _ in ()).throw(Exception("always fails"))
+    monkeypatch.setitem(sys.modules, "pyodbc", fake_pyodbc)
+    monkeypatch.setattr(repo_mod._time, "sleep", lambda s: None)
+
+    with pytest.raises(Exception, match="always fails"):
+        repo_mod._pyodbc_connect("DSN=fake")

@@ -35,6 +35,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import time as _time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -88,6 +89,40 @@ DRIFT_FIELDS = [
     "captured_at", "home", "away", "kickoff", "side", "market", "line",
     "book", "t_minus_min", "your_book_odds", "pinnacle_odds", "n_books",
 ]
+
+
+# ---- connection helpers ---------------------------------------------------
+
+_CONNECT_ATTEMPTS = 3
+_CONNECT_BACKOFF = (5, 15)  # seconds between attempt 1→2 and 2→3
+
+
+def _pyodbc_connect(dsn: str):
+    """Connect via pyodbc with retry/backoff for Azure SQL serverless cold starts.
+
+    Returns the connection on success.  Raises the last exception when all
+    attempts are exhausted so callers can fall back or log as appropriate.
+    """
+    import pyodbc  # lazy import (Pi safety)
+    last_exc: Exception | None = None
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+        try:
+            t0 = _time.monotonic()
+            conn = pyodbc.connect(dsn)
+            elapsed = _time.monotonic() - t0
+            if attempt > 1:
+                print(f"[repo] DB connected on attempt {attempt} ({elapsed:.1f}s)", file=sys.stderr)
+            return conn
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _CONNECT_ATTEMPTS:
+                delay = _CONNECT_BACKOFF[attempt - 1]
+                print(
+                    f"[repo] WARN: DB connect attempt {attempt} failed ({exc}); retrying in {delay}s…",
+                    file=sys.stderr,
+                )
+                _time.sleep(delay)
+    raise last_exc
 
 
 # ---- env / DSN resolution -------------------------------------------------
@@ -244,8 +279,7 @@ class BetRepo:
         if self._dsn is None:
             return None
         try:
-            import pyodbc  # lazy import (Pi safety)
-            self._conn = pyodbc.connect(self._dsn)
+            self._conn = _pyodbc_connect(self._dsn)
             self._cur = self._conn.cursor()
             return self._conn
         except Exception as e:
@@ -830,6 +864,8 @@ class BetRepo:
         return rows
 
 
+
+
 # ── FixtureRepo ────────────────────────────────────────────────────────────────
 
 class FixtureRepo:
@@ -872,8 +908,7 @@ class FixtureRepo:
         if self._dsn is None:
             return None
         try:
-            import pyodbc  # lazy import (Pi safety)
-            self._conn = pyodbc.connect(self._dsn)
+            self._conn = _pyodbc_connect(self._dsn)
             self._cur = self._conn.cursor()
             return self._conn
         except Exception as e:
