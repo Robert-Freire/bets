@@ -1,0 +1,49 @@
+name: Audit invariants
+
+on:
+  schedule:
+    # Mon 08:10 UTC = 09:10 BST (summer / UTC+1).
+    # Runs after Pi cron: CLV backfill 08:00 UTC, book_skill 09:05 BST.
+    - cron: '10 8 * * 1'
+  workflow_dispatch:  # manual trigger for testing
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ODBC driver
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list > /dev/null
+          sudo apt-get update -q
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 --no-install-recommends
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Python deps
+        run: pip install pyodbc
+
+      - name: Run audit invariants
+        env:
+          BETS_DB_WRITE: '1'
+          AZURE_SQL_SERVER: kaunitz-dev-sql-uksouth-rfk1.database.windows.net
+          AZURE_SQL_USER: kaunitzadmin
+          AZURE_SQL_DATABASE: kaunitz
+          AZURE_SQL_KV_VAULT: kaunitz-dev-kv-rfk1
+          AZURE_SQL_KV_SECRET: sql-admin-password
+        run: python3 scripts/audit_invariants.py
