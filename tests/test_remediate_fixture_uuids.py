@@ -18,8 +18,9 @@ from src.storage._keys import _NAMESPACE, fixture_uuid as _new_uuid
 import scripts.remediate_fixture_uuids as rem
 
 
-def _old_uuid(kickoff, home, away):
-    return str(uuid.uuid5(_NAMESPACE, "|".join(("fixture", kickoff, home, away))))
+def _u5_old(*parts) -> str:
+    """Reproduces the pre-39cb08f key shape — for test data setup only."""
+    return str(uuid.uuid5(_NAMESPACE, "|".join(parts)))
 
 
 def _make_db():
@@ -73,7 +74,7 @@ def test_remediate_noop_when_all_new_style():
 
 def test_remediate_renames_old_to_new():
     conn = _make_db()
-    old_id = _old_uuid("2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
+    old_id = _u5_old("fixture", "2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
     _insert_fixture(conn, old_id)
     bet_id = _insert_bet(conn, old_id)
 
@@ -93,7 +94,7 @@ def test_remediate_renames_old_to_new():
 def test_remediate_merges_on_collision():
     conn = _make_db()
     now = "2026-05-10T14:00:00.000Z"
-    old_id = _old_uuid("2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
+    old_id = _u5_old("fixture", "2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
     new_id = _new_uuid("soccer_epl", "2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
 
     _insert_fixture(conn, old_id, ingested_at=None)
@@ -122,7 +123,7 @@ def test_remediate_merges_on_collision():
 
 def test_remediate_idempotent():
     conn = _make_db()
-    old_id = _old_uuid("2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
+    old_id = _u5_old("fixture", "2026-05-10T14:00:00+00:00", "Arsenal", "Chelsea")
     _insert_fixture(conn, old_id)
 
     stats1 = rem.remediate(conn, dry_run=False)
@@ -133,18 +134,60 @@ def test_remediate_idempotent():
     assert stats2["skipped_new"] == 1
 
 
-# ── refuses on unknown UUID ───────────────────────────────────────────────────
+# ── rows with unrecognised UUIDs are migrated (not refused) ──────────────────
 
-def test_remediate_refuses_on_unknown_uuid():
+def test_remediate_migrates_unrecognised_uuid():
+    """A row with a UUID that matches neither old nor new derivation is migrated
+    to the correct new UUID — we do not refuse, since refusing would be worse
+    than migrating an unusual row."""
     conn = _make_db()
-    rogue_id = str(uuid.uuid4())  # random — matches neither old nor new
+    rogue_id = str(uuid.uuid4())
     _insert_fixture(conn, rogue_id)
 
     stats = rem.remediate(conn, dry_run=False)
 
-    assert stats["errors"] == 1
-    # Row untouched
-    assert conn.execute("SELECT id FROM fixtures WHERE id=?", (rogue_id,)).fetchone() is not None
+    assert stats["to_migrate"] == 1
+    assert stats["errors"] == 0
+    # New-style UUID now exists
+    new_id = _new_uuid("soccer_epl", "2026-05-10", "Arsenal", "Chelsea")
+    assert conn.execute(
+        "SELECT id FROM fixtures WHERE id=?", (new_id,)
+    ).fetchone() is not None
+    # Rogue row gone
+    assert conn.execute(
+        "SELECT id FROM fixtures WHERE id=?", (rogue_id,)
+    ).fetchone() is None
+
+
+# ── CSV-format kickoff round-trip regression ──────────────────────────────────
+
+def test_remediate_handles_csv_format_kickoff():
+    """Production CSV stores kickoff as '2026-05-09 16:30' (space, no tz).
+    After migrate_csv_to_db, MSSQL stores datetime2 and pyodbc reads back
+    as '2026-05-09 16:30:00' — different from the CSV input that was
+    originally hashed. Remediation must still migrate these rows correctly
+    (the old UUID can't be reconstructed; we migrate by inequality).
+    """
+    conn = _make_db()
+    # The old UUID was derived from the raw CSV string before DB round-trip.
+    csv_format = "2026-05-09 16:30"
+    historic_id = _u5_old("fixture", csv_format, "Arsenal", "Chelsea")
+    # What pyodbc would return after storing datetime2
+    db_format = "2026-05-09 16:30:00"
+    _insert_fixture(conn, historic_id, kickoff=db_format)
+
+    stats = rem.remediate(conn, dry_run=False)
+
+    assert stats["to_migrate"] == 1
+    assert stats["errors"] == 0
+    # New UUID keyed on the date part only
+    new_id = _new_uuid("soccer_epl", "2026-05-09", "Arsenal", "Chelsea")
+    assert conn.execute(
+        "SELECT id FROM fixtures WHERE id=?", (new_id,)
+    ).fetchone() is not None
+    assert conn.execute(
+        "SELECT id FROM fixtures WHERE id=?", (historic_id,)
+    ).fetchone() is None
 
 
 # ── migrate_csv_to_db uses canonical fixture_uuid ────────────────────────────

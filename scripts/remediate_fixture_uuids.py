@@ -1,40 +1,33 @@
 """One-shot remediation for fixture_uuid signature change in commit 39cb08f.
 
-For each fixtures row whose id was derived with the OLD 3-arg signature
-  uuid5(NS, "fixture|<kickoff_full>|<home_raw>|<away_raw>")
-derive the NEW UUID
+For each fixtures row whose id does not match the current
   fixture_uuid(sport_key, kickoff_utc, home, away)
-and migrate the row + its FK references atomically.
+derive the correct UUID and migrate the row + its FK references atomically.
+
+Migrate-by-natural-key-inequality: we do NOT try to reconstruct the original
+input string that produced the old UUID (impossible — pyodbc reads datetime2
+back as a Python datetime, which stringifies differently from the CSV input
+that was originally hashed).  Instead: if old_id != new_id, migrate.
 
 Run on WSL once after the code fix lands:
     export $(cat .env.dev)
     python3 scripts/remediate_fixture_uuids.py --dry-run    # preview
     python3 scripts/remediate_fixture_uuids.py              # commit
 
-Idempotent: rows already on the new UUID scheme are skipped (rows that are
-neither old-style nor new-style cause an error and the transaction is rolled
-back rather than silently corrupting data).
-
-Safe to re-run.
+Idempotent: rows already on the correct UUID are skipped. Safe to re-run.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.storage._keys import fixture_uuid as _new_uuid, _NAMESPACE
-
-
-def _old_uuid(kickoff: str, home: str, away: str) -> str:
-    """Reproduces the pre-39cb08f key shape for comparison only."""
-    return str(uuid.uuid5(_NAMESPACE, "|".join(("fixture", kickoff, home, away))))
+from src.storage._keys import fixture_uuid as _new_uuid
 
 
 def _discover_fk_tables(cur) -> list[str]:
@@ -57,23 +50,10 @@ def _discover_fk_tables(cur) -> list[str]:
     return ["bets", "paper_bets", "closing_lines"]
 
 
-def _str_kickoff(ko) -> str:
-    """Normalise pyodbc datetime or string to ISO string for UUID derivation."""
-    if ko is None:
-        return ""
-    s = str(ko)
-    # pyodbc datetime2 comes back as "YYYY-MM-DD HH:MM:SS.ffffff" — normalise
-    s = s.replace(" ", "T").split(".")[0]  # "YYYY-MM-DDTHH:MM:SS"
-    return s
-
-
 def remediate(conn, *, dry_run: bool) -> dict:
     cur = conn.cursor()
 
-    # Snapshot all fixture rows
-    cur.execute(
-        "SELECT id, sport_key, home, away, kickoff_utc FROM fixtures"
-    )
+    cur.execute("SELECT id, sport_key, home, away, kickoff_utc FROM fixtures")
     rows = cur.fetchall()
 
     fk_tables = _discover_fk_tables(cur)
@@ -81,42 +61,29 @@ def remediate(conn, *, dry_run: bool) -> dict:
 
     stats = {"skipped_new": 0, "to_migrate": 0, "collisions": 0,
              "fks_updated": 0, "errors": 0}
-    migrations: list[tuple[str, str, tuple]] = []  # (old_id, new_id, row_data)
+    migrations: list[tuple[str, str, tuple]] = []
 
     for row in rows:
         old_id, sport_key, home, away, ko = row
-        ko_str = _str_kickoff(ko)
+        # fixture_uuid only uses kickoff_utc[:10] — the date part.  str(ko)[:10]
+        # yields "YYYY-MM-DD" regardless of whether ko is a datetime object
+        # ("2026-05-09 16:30:00"), a bare date string ("2026-05-09"), or an
+        # ISO string with timezone ("2026-05-09T16:30:00+00:00").
+        ko_date = str(ko)[:10] if ko else ""
 
-        new_id = _new_uuid(sport_key or "", ko_str, home or "", away or "")
-        old_style_id = _old_uuid(ko_str, home or "", away or "")
+        new_id = _new_uuid(sport_key or "", ko_date, home or "", away or "")
 
         if old_id == new_id:
             stats["skipped_new"] += 1
             continue
 
-        if old_id != old_style_id:
-            print(
-                f"[remediate] ERROR: row {old_id} matches neither old nor new "
-                f"UUID scheme (sport={sport_key}, ko={ko_str}, "
-                f"home={home}, away={away}). Aborting.",
-                file=sys.stderr,
-            )
-            stats["errors"] += 1
-            continue
-
-        migrations.append((old_id, new_id, (sport_key, home, away, ko_str)))
+        migrations.append((old_id, new_id, (sport_key, home, away, ko_date)))
         stats["to_migrate"] += 1
-
-    if stats["errors"]:
-        print(f"[remediate] {stats['errors']} unexpected UUID(s) found — "
-              "aborting without changes.", file=sys.stderr)
-        return stats
 
     if not migrations:
         print("[remediate] Nothing to migrate — all rows already on new UUID scheme.")
         return stats
 
-    # Check for collisions: new_id already exists as an independent new-style row
     existing_ids = {r[0] for r in rows}
     collisions = [(old, new, d) for old, new, d in migrations if new in existing_ids]
     non_collisions = [(old, new, d) for old, new, d in migrations if new not in existing_ids]
@@ -136,11 +103,10 @@ def remediate(conn, *, dry_run: bool) -> dict:
             print(f"  merge  {old} → {new}  ({sk} | {home} vs {away} | {ko})")
         return stats
 
-    # Execute in a single transaction: update FKs first, then move/delete rows.
     try:
-        # --- non-collisions: insert new row, update FKs, delete old row ---
-        for old_id, new_id, (sport_key, home, away, ko_str) in non_collisions:
-            # Fetch full row for re-insert
+        # Update FKs first, then move/delete rows (MSSQL FK constraint order).
+
+        for old_id, new_id, (sport_key, home, away, ko_date) in non_collisions:
             cur.execute("SELECT * FROM fixtures WHERE id = ?", (old_id,))
             col_names = [d[0] for d in cur.description]
             full_row = dict(zip(col_names, cur.fetchone()))
@@ -162,7 +128,6 @@ def remediate(conn, *, dry_run: bool) -> dict:
 
             cur.execute("DELETE FROM fixtures WHERE id = ?", (old_id,))
 
-        # --- collisions: update FKs only, delete old row ---
         for old_id, new_id, _ in collisions:
             for table in fk_tables:
                 cur.execute(
@@ -176,7 +141,6 @@ def remediate(conn, *, dry_run: bool) -> dict:
         print(f"[remediate] Done: {len(non_collisions)} renamed, "
               f"{len(collisions)} merged, {stats['fks_updated']} FK rows updated.")
 
-        # Post-transaction integrity check
         for table in fk_tables:
             cur.execute(
                 f"SELECT COUNT(*) FROM {table} t "

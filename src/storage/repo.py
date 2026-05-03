@@ -964,7 +964,8 @@ class FixtureRepo:
         from_str = str(from_date)   # "YYYY-MM-DD"
         # Exclusive upper bound: next-day midnight is safe for both SQLite TEXT
         # comparison and MSSQL datetime2 implicit cast from a date string.
-        exclusive_end = str((date.fromisoformat(str(to_date)) if isinstance(to_date, str) else to_date) + timedelta(days=1))
+        to_d = to_date if isinstance(to_date, date) else date.fromisoformat(to_date)
+        exclusive_end = str(to_d + timedelta(days=1))
         try:
             self._cur.execute(
                 "SELECT id, sport_key, league, home, away, kickoff_utc, "
@@ -999,7 +1000,8 @@ class FixtureRepo:
         if not self.db_enabled or self._connect() is None:
             return 0
         from_str = str(from_date)
-        exclusive_end = str((date.fromisoformat(str(to_date)) if isinstance(to_date, str) else to_date) + timedelta(days=1))
+        to_d = to_date if isinstance(to_date, date) else date.fromisoformat(to_date)
+        exclusive_end = str(to_d + timedelta(days=1))
         try:
             self._cur.execute(
                 "SELECT COUNT(*) FROM fixtures "
