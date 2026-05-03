@@ -58,6 +58,7 @@ from src.storage.snapshots import (
 
 _WINDOW_WEEKS = 8
 _BOOTSTRAP_RESAMPLES = 1000
+_SHRINKAGE_N0 = 50  # empirical-Bayes prior strength; w = n/(n+N0) for n<200
 
 # Ordered dict: insertion order is the iteration order; 'shin' first so log
 # lines print naturally, but correctness does NOT depend on order.
@@ -231,6 +232,13 @@ class _BookAccum:
                     self.edge_vs_pinnacle[bk].append(bk_probs[i] - anchor_probs[i])
 
     def aggregate(self) -> dict[str, dict]:
+        # Global means for empirical-Bayes shrinkage of home/draw bias
+        # loo_list interleaves [home_diff, draw_diff, away_diff] per fixture (3 per fixture)
+        all_home = [v for lst in self.edge_vs_consensus_loo.values() for v in lst[0::3]]
+        all_draw = [v for lst in self.edge_vs_consensus_loo.values() for v in lst[1::3]]
+        global_home = sum(all_home) / len(all_home) if all_home else 0.0
+        global_draw = sum(all_draw) / len(all_draw) if all_draw else 0.0
+
         result = {}
         for bk in self.fixture_ids:
             n = len(self.fixture_ids[bk])
@@ -239,11 +247,22 @@ class _BookAccum:
             loo = sum(loo_list) / len(loo_list) if loo_list else None
             evp = sum(evp_list) / len(evp_list) if evp_list else None
             div = (evp - loo) if (evp is not None and loo is not None) else None
+
+            home_vals = loo_list[0::3]
+            draw_vals = loo_list[1::3]
+            raw_home = sum(home_vals) / len(home_vals) if home_vals else None
+            raw_draw = sum(draw_vals) / len(draw_vals) if draw_vals else None
+            w = n / (n + _SHRINKAGE_N0) if n < 200 else 1.0
+            home_bias = raw_home * w + global_home * (1 - w) if raw_home is not None else None
+            draw_bias = raw_draw * w + global_draw * (1 - w) if raw_draw is not None else None
+
             result[bk] = {
                 "n_fixtures_blob": n,
                 "edge_vs_consensus_loo": loo,
                 "edge_vs_pinnacle": evp,
                 "divergence": div,
+                "home_bias_blob": home_bias,
+                "draw_bias_blob": draw_bias,
             }
         return result
 
@@ -402,6 +421,132 @@ def _brier_from_rows(
 
 
 # ---------------------------------------------------------------------------
+# B.1: bias signals from FDCO closing odds
+# ---------------------------------------------------------------------------
+
+def _bias_from_rows(
+    rows: list[dict],
+    since: date,
+    until: date,
+    devig_fn: Callable,
+) -> dict[str, dict]:
+    """Compute fav-longshot slope + home/draw bias from FDCO closing odds.
+
+    Returns dict[book -> {home_bias, draw_bias, fav_longshot_slope}].
+
+    home/draw bias: mean signed deviation of each book's devigged prob from the
+    LOO consensus (book excluded from its own benchmark). Positive = book's
+    implied prob is higher than the LOO consensus (i.e. the book prices that
+    outcome as *more* likely than peers); negative = book is generous on that
+    outcome (higher odds, lower implied prob).
+
+    fav-longshot slope: OLS slope of realised_freq ~ bucket_midpoint across 10
+    equal-width probability buckets. ~1.0 = calibrated; >1 = favourite-biased;
+    <1 = longshot-biased. Requires >= 3 non-empty buckets (>= 3 obs each).
+
+    Empirical-Bayes shrinkage (n < 200): w = n/(n+50). Bias shrunk toward
+    global cross-book mean; slope shrunk toward 1.0 (perfect calibration).
+    """
+    ftr_map = {"H": 0, "D": 1, "A": 2}
+
+    home_devs: dict[str, list[float]] = defaultdict(list)
+    draw_devs: dict[str, list[float]] = defaultdict(list)
+    bucket_obs: dict[str, list[tuple[float, int]]] = defaultdict(list)
+    n_fixtures: dict[str, int] = defaultdict(int)
+
+    for row in rows:
+        d = _parse_fdco_date(row.get("Date", ""))
+        if d is None or not (since <= d <= until):
+            continue
+        ftr = row.get("FTR", "").strip()
+        if ftr not in ftr_map:
+            continue
+        outcome_idx = ftr_map[ftr]
+
+        probs_by_book: dict[str, list[float]] = {}
+        for bk, (ch, cd, ca) in _FDCO_BOOK_COLS.items():
+            try:
+                odds_h = float(row.get(ch, "") or 0)
+                odds_d = float(row.get(cd, "") or 0)
+                odds_a = float(row.get(ca, "") or 0)
+            except (TypeError, ValueError):
+                continue
+            if min(odds_h, odds_d, odds_a) <= 1.0:
+                continue
+            try:
+                fair = devig_fn([1.0 / odds_h, 1.0 / odds_d, 1.0 / odds_a])
+            except Exception:
+                continue
+            probs_by_book[bk] = fair
+
+        if len(probs_by_book) < 2:
+            continue
+
+        for bk, bk_probs in probs_by_book.items():
+            others = [p for k, p in probs_by_book.items() if k != bk]
+            if not others:
+                continue
+            loo = [sum(p[i] for p in others) / len(others) for i in range(3)]
+            home_devs[bk].append(bk_probs[0] - loo[0])
+            draw_devs[bk].append(bk_probs[1] - loo[1])
+            n_fixtures[bk] += 1
+            for i in range(3):
+                bucket_obs[bk].append((bk_probs[i], 1 if i == outcome_idx else 0))
+
+    # Global means for shrinkage prior
+    all_home = [v for vals in home_devs.values() for v in vals]
+    all_draw = [v for vals in draw_devs.values() for v in vals]
+    global_home = sum(all_home) / len(all_home) if all_home else 0.0
+    global_draw = sum(all_draw) / len(all_draw) if all_draw else 0.0
+
+    result: dict[str, dict] = {}
+    for bk in set(home_devs) | set(bucket_obs):
+        n = n_fixtures.get(bk, 0)
+        w = n / (n + _SHRINKAGE_N0) if n < 200 else 1.0
+
+        hd = home_devs.get(bk, [])
+        dd = draw_devs.get(bk, [])
+        raw_home = sum(hd) / len(hd) if hd else None
+        raw_draw = sum(dd) / len(dd) if dd else None
+        home_bias = raw_home * w + global_home * (1 - w) if raw_home is not None else None
+        draw_bias = raw_draw * w + global_draw * (1 - w) if raw_draw is not None else None
+
+        slope = None
+        obs = bucket_obs.get(bk, [])
+        if obs:
+            bucket_hits: dict[int, list[int]] = defaultdict(list)
+            for prob, hit in obs:
+                bucket_hits[min(int(prob * 10), 9)].append(hit)
+            pts = [
+                (i * 0.1 + 0.05, sum(v) / len(v))
+                for i, v in sorted(bucket_hits.items())
+                if len(v) >= 3
+            ]
+            if len(pts) >= 3:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                n_pts = len(pts)
+                sx = sum(xs)
+                sy = sum(ys)
+                sxy = sum(x * y for x, y in zip(xs, ys))
+                sx2 = sum(x * x for x in xs)
+                denom = n_pts * sx2 - sx * sx
+                if abs(denom) > 1e-10:
+                    raw_slope = (n_pts * sxy - sx * sy) / denom
+                    # Shrink toward calibrated null (1.0) not global mean, because
+                    # a slope of 1.0 is the universal no-bias prior for any book.
+                    slope = 1.0 + (raw_slope - 1.0) * w
+
+        result[bk] = {
+            "home_bias": home_bias,
+            "draw_bias": draw_bias,
+            "fav_longshot_slope": slope,
+        }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main computation
 # ---------------------------------------------------------------------------
 
@@ -474,17 +619,22 @@ def compute(
         # ----- B.0.6: load FDCO CSV once, compute under all methods -----
         fdco_rows = _load_fdco_rows(fdco_code, season) if fdco_code else []
         fdco_brier_by_method: dict[str, dict[str, dict]] = {}
+        fdco_bias_by_method: dict[str, dict[str, dict]] = {}
         if fdco_rows:
             for m, fn in _DEVIG_FNS.items():
                 fdco_brier_by_method[m] = _brier_from_rows(
                     fdco_rows, window_start, window_end, fn
                 )
+                fdco_bias_by_method[m] = _bias_from_rows(
+                    fdco_rows, window_start, window_end, fn
+                )
             n_pin = fdco_brier_by_method["shin"].get("pinnacle", {}).get("n_fixtures", 0)
-            print(f"  [B.0.6] FDCO {fdco_code}: "
+            print(f"  [B.0.6/B.1] FDCO {fdco_code}: "
                   f"{n_pin} pinnacle-covered fixtures in window")
         else:
             for m in _DEVIG_FNS:
                 fdco_brier_by_method[m] = {}
+                fdco_bias_by_method[m] = {}
             if fdco_code:
                 print(f"  [B.0.6] No FDCO data for {label}.")
 
@@ -492,11 +642,13 @@ def compute(
         for devig_method in _DEVIG_FNS:
             blob_agg = blob_agg_by_method[devig_method]
             fdco_brier = fdco_brier_by_method[devig_method]
+            fdco_bias = fdco_bias_by_method[devig_method]
 
-            all_books = set(blob_agg) | set(fdco_brier)
+            all_books = set(blob_agg) | set(fdco_brier) | set(fdco_bias)
             for bk in all_books:
                 blob = blob_agg.get(bk, {})
                 fdco = fdco_brier.get(bk, {})
+                bias = fdco_bias.get(bk, {})
 
                 n_fix_blob = blob.get("n_fixtures_blob", 0)
                 n_fix_fdco = fdco.get("n_fixtures", 0)
@@ -521,6 +673,12 @@ def compute(
                 pci = fdco.get("paired_ci", (None, None))
                 lci = fdco.get("log_loss_ci", (None, None))
 
+                # Bias: FDCO (closing odds) preferred over blob (scan-time).
+                # fav_longshot_slope is FDCO-only (blob has no outcomes).
+                home_bias = bias.get("home_bias") if bias else blob.get("home_bias_blob")
+                draw_bias = bias.get("draw_bias") if bias else blob.get("draw_bias_blob")
+                fav_longshot_slope = bias.get("fav_longshot_slope") if bias else None
+
                 row: dict = {
                     "book": bk,
                     "league": label,
@@ -539,9 +697,9 @@ def compute(
                     "log_loss": fdco.get("log_loss_mean"),
                     "log_loss_ci_low": lci[0],
                     "log_loss_ci_high": lci[1],
-                    "fav_longshot_slope": None,
-                    "home_bias": None,
-                    "draw_bias": None,
+                    "fav_longshot_slope": fav_longshot_slope,
+                    "home_bias": home_bias,
+                    "draw_bias": draw_bias,
                     "flag_rate": flag_rate,
                     "mean_flag_edge": mean_flag_edge,
                     "edge_vs_consensus_loo": blob.get("edge_vs_consensus_loo"),
