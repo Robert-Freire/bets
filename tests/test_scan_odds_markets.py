@@ -1,5 +1,6 @@
-"""Verify fetch_odds requests only the h2h market (M.0)."""
+"""Verify fetch_odds requests only the h2h market (M.0) and boot-time guards."""
 import os
+import sys
 
 os.environ.setdefault("ODDS_API_KEY", "test-key")
 
@@ -23,3 +24,13 @@ def test_fetch_odds_requests_only_h2h(monkeypatch):
     assert "," not in captured["params"]["markets"], (
         "markets param must not contain multiple values"
     )
+
+
+def test_main_exits_when_db_write_unset(monkeypatch):
+    """A.9: scan_odds.main() must refuse to run without BETS_DB_WRITE=1."""
+    monkeypatch.delenv("BETS_DB_WRITE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["scan_odds.py"])
+    import pytest
+    with pytest.raises(SystemExit) as exc_info:
+        scan_odds.main()
+    assert exc_info.value.code == 1

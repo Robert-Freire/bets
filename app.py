@@ -3,14 +3,11 @@ Betting dashboard — view suggested bets, log actual stakes and results.
 Run with: python3 app.py
 Then open: http://localhost:5000
 
-A.5: data flow is DB-first via BetRepo when BETS_DB_WRITE=1 + DSN env are
-set, with CSV as automatic fallback. The view renders identically; a
-banner appears only when DB is configured but unreachable.
+A.9: data flow is DB-only via BetRepo (BETS_DB_WRITE=1 + DSN env required).
+A banner appears when DB is configured but unreachable.
 """
 
 import base64
-import csv
-import fcntl
 import json
 import os
 import re
@@ -80,9 +77,6 @@ def _allowlist_check():
     return None
 
 
-BETS_CSV           = Path(__file__).parent / "logs" / "bets.csv"
-BETS_LEGACY_CSV    = Path(__file__).parent / "logs" / "bets_legacy.csv"
-DRIFT_CSV          = Path(__file__).parent / "logs" / "drift.csv"
 RESEARCH_FEED_MD   = Path(__file__).parent / "docs" / "RESEARCH_FEED.md"
 
 
@@ -96,16 +90,6 @@ _RUN_RE = re.compile(
     r"^## Run (\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}\s+UTC)?\s+\(mode:\s*(\w+)\)\s+—\s*(\d+)\s+findings",
     re.MULTILINE,
 )
-
-FIELDS = [
-    "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-    "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
-    "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
-    "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-    "devig_method", "weight_scheme",
-    "stake", "result", "actual_stake", "pnl",
-    "pinnacle_close_prob", "clv_pct",
-]
 
 
 def _normalise_row(row: dict, source: str) -> None:
@@ -129,74 +113,20 @@ def _normalise_row(row: dict, source: str) -> None:
     row.setdefault("weight_scheme", "uniform")
 
 
-def _read_csv_file(path: Path, source: str) -> list[dict]:
-    rows = []
-    with open(path, newline="") as f:
-        fcntl.flock(f, fcntl.LOCK_SH)
-        for row in csv.DictReader(f):
-            _normalise_row(row, source)
-            rows.append(row)
-    return rows
-
-
 def load_bets(repo: BetRepo | None = None) -> list[dict]:
-    """Return all bets (legacy + new) as dicts, in display order.
+    """Return all bets as dicts from DB, ordered by scanned_at ascending.
 
-    Legacy CSV is always read directly — those rows pre-date A.3 and
-    were never imported. New bets come from the DB when available
-    (dual-write keeps DB and CSV in sync; DB is preferred so settle
-    updates routed via repo.update_bet_settle land here too). On DB
-    failure or with the env unset, falls back to the CSV.
+    Returns an empty list when DB is unavailable.
     """
-    db_rows = None
-    if repo is not None:
-        db_rows = repo.get_bets()
-
+    db_rows = repo.get_bets() if repo is not None else None
     bets = []
-    if db_rows is None:
-        # CSV-only mode (Pi, or DB unreachable): read both files.
-        if BETS_LEGACY_CSV.exists():
-            bets.extend(_read_csv_file(BETS_LEGACY_CSV, "legacy"))
-        if BETS_CSV.exists():
-            bets.extend(_read_csv_file(BETS_CSV, "new"))
-    else:
-        # DB mode: legacy rows are in the DB after migration; CSV ignored.
+    if db_rows is not None:
         for row in db_rows:
             _normalise_row(row, row.get("_source", "db"))
         bets.extend(db_rows)
-
     for i, row in enumerate(bets):
         row["id"] = i
     return bets
-
-
-def _save_to_file(path: Path, rows: list[dict]):
-    if not rows:
-        return
-    all_keys = set()
-    for b in rows:
-        all_keys.update(k for k in b.keys() if not k.startswith("_") and k != "id")
-    fieldnames = [f for f in FIELDS if f in all_keys]
-    for f in sorted(all_keys):
-        if f not in fieldnames:
-            fieldnames.append(f)
-
-    tmp = path.with_suffix(".csv.tmp")
-    with open(tmp, "w", newline="") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(tmp, path)
-
-
-def save_bets(bets: list[dict]):
-    legacy_rows = [b for b in bets if b.get("_source") == "legacy"]
-    new_rows    = [b for b in bets if b.get("_source") != "legacy"]
-    if legacy_rows:
-        _save_to_file(BETS_LEGACY_CSV, legacy_rows)
-    if new_rows:
-        _save_to_file(BETS_CSV, new_rows)
 
 
 def calc_pnl(result: str, actual_stake: str, odds: str, commission_rate: str = "0") -> str:
@@ -219,23 +149,12 @@ def calc_pnl(result: str, actual_stake: str, odds: str, commission_rate: str = "
 
 
 def load_drift(repo: BetRepo | None = None) -> dict[tuple, list[dict]]:
-    """Load drift snapshots keyed by (home, away, kickoff, side, market,
-    line). Prefers the DB when available; falls back to drift.csv."""
+    """Load drift snapshots keyed by (home, away, kickoff, side, market, line) from DB."""
     if repo is not None:
         db = repo.get_drift()
         if db is not None:
             return db
-    if not DRIFT_CSV.exists():
-        return {}
-    by_bet: dict[tuple, list[dict]] = {}
-    with open(DRIFT_CSV, newline="") as f:
-        for row in csv.DictReader(f):
-            key = (row["home"], row["away"], row["kickoff"], row["side"],
-                   row.get("market", "h2h"), row.get("line", ""))
-            by_bet.setdefault(key, []).append(row)
-    for rows in by_bet.values():
-        rows.sort(key=lambda r: _safe_t_minus(r.get("t_minus_min")), reverse=True)
-    return by_bet
+    return {}
 
 
 def _safe_t_minus(v) -> int:
@@ -375,18 +294,14 @@ def index():
 def health():
     """Lightweight liveness probe.
 
-    `db` is one of 'ok' (configured + reachable), 'down' (configured
-    but connect or query failed), or 'disabled' (env not set — CSV-only
-    mode by design). `csv` is 'ok' if the bets CSV file exists, else
-    'missing'. Used by external monitoring AND the dashboard itself
-    (the banner reads `db_status`).
+    `db` is one of 'ok' (configured + reachable), 'down' (configured but
+    connect failed), or 'disabled' (env not set). 503 when db=down.
     """
     repo = _repo()
     db = repo.db_status()
     repo.close()
-    csv_state = "ok" if BETS_CSV.exists() or BETS_LEGACY_CSV.exists() else "missing"
     code = 200 if db != "down" else 503
-    return jsonify({"db": db, "csv": csv_state}), code
+    return jsonify({"db": db}), code
 
 
 @app.route("/update/<int:bet_id>", methods=["POST"])
@@ -397,19 +312,14 @@ def update(bet_id: int):
         repo.close()
         return jsonify({"error": "not found"}), 404
 
+    b = bets[bet_id]
     result = request.form.get("result", "").strip().upper()
     actual_stake = request.form.get("actual_stake", "").strip()
     odds = request.form.get("odds", "").strip()
+    pnl = calc_pnl(result, actual_stake, odds or b.get("odds", ""),
+                   b.get("commission_rate", "0"))
 
-    bets[bet_id]["result"] = result
-    bets[bet_id]["actual_stake"] = actual_stake
-    if odds:
-        bets[bet_id]["odds"] = odds
-    bets[bet_id]["pnl"] = calc_pnl(result, actual_stake, bets[bet_id].get("odds", ""), bets[bet_id].get("commission_rate", "0"))
-
-    save_bets(bets)
-    if repo.db_enabled and bets[bet_id].get("_source") != "legacy":
-        b = bets[bet_id]
+    if repo.db_enabled:
         rows_updated = repo.update_bet_settle(
             scan_date=scan_date_of(b.get("scanned_at", "")),
             kickoff=b.get("kickoff", ""),
@@ -419,17 +329,16 @@ def update(bet_id: int):
             line=b.get("line", ""),
             side=b.get("side", ""),
             book=b.get("book", ""),
-            result=b.get("result") or "pending",
-            actual_stake=b.get("actual_stake") or None,
-            pnl=b.get("pnl") or None,
-            odds=b.get("odds") or None,
+            result=result or "pending",
+            actual_stake=actual_stake or None,
+            pnl=pnl or None,
+            odds=odds or None,
         )
         if rows_updated == 0:
-            import sys as _sys
-            _sys.stderr.write(
+            sys.stderr.write(
                 f"[dashboard] WARN: DB update wrote 0 rows for bet {bet_id} "
                 f"({b.get('home')} vs {b.get('away')} {b.get('kickoff')} "
-                f"{b.get('side')} {b.get('book')}); CSV updated but DB unchanged\n"
+                f"{b.get('side')} {b.get('book')})\n"
             )
     repo.close()
     return redirect(url_for("index"))

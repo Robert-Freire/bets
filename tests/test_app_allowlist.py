@@ -23,9 +23,6 @@ def _principal_header(claims_kv: dict[str, str]) -> str:
 
 def _setup(monkeypatch, tmp_path):
     import app as _app
-    monkeypatch.setattr(_app, "BETS_CSV", tmp_path / "bets.csv")
-    monkeypatch.setattr(_app, "BETS_LEGACY_CSV", tmp_path / "bets_legacy.csv")
-    monkeypatch.setattr(_app, "DRIFT_CSV", tmp_path / "drift.csv")
     monkeypatch.setattr(_app, "RESEARCH_FEED_MD", tmp_path / "RESEARCH_FEED.md")
     return _app
 
@@ -49,12 +46,6 @@ def test_allowlist_blocks_missing_principal(monkeypatch, tmp_path):
 def test_allowlist_admits_listed_email_via_name_header(monkeypatch, tmp_path):
     monkeypatch.setenv("DASHBOARD_ALLOWED_EMAILS", "robert.freire@gmail.com")
     _app = _setup(monkeypatch, tmp_path)
-    (tmp_path / "bets.csv").write_text(
-        "scanned_at,sport,market,line,home,away,kickoff,side,book,odds,"
-        "impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,"
-        "consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,outlier_z,"
-        "stake,result\n"
-    )
     with _app.app.test_client() as c:
         r = c.get("/", headers={"X-MS-CLIENT-PRINCIPAL-NAME": "Robert.Freire@gmail.com"})
         assert r.status_code == 200
@@ -63,12 +54,6 @@ def test_allowlist_admits_listed_email_via_name_header(monkeypatch, tmp_path):
 def test_allowlist_admits_listed_email_via_principal_blob(monkeypatch, tmp_path):
     monkeypatch.setenv("DASHBOARD_ALLOWED_EMAILS", "robert.freire@gmail.com")
     _app = _setup(monkeypatch, tmp_path)
-    (tmp_path / "bets.csv").write_text(
-        "scanned_at,sport,market,line,home,away,kickoff,side,book,odds,"
-        "impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,"
-        "consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,outlier_z,"
-        "stake,result\n"
-    )
     header = _principal_header({"emails": "robert.freire@gmail.com"})
     with _app.app.test_client() as c:
         r = c.get("/", headers={"X-MS-CLIENT-PRINCIPAL": header})

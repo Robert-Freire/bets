@@ -1,15 +1,12 @@
-"""Tests for src/storage/repo.py BetRepo (Phase A.4).
+"""Tests for src/storage/repo.py BetRepo (A.9: DB-only).
 
 Coverage:
-- CSV-only mode (Pi case): no env flags → no pyodbc import, no DB connect,
-  CSV is written.
-- Dual-write mode: BETS_DB_WRITE=1 + DSN → CSV row AND DB row land,
-  with the same UUID5 the A.3 importer would compute.
-- Failure isolation: when the DB connection fails mid-run, CSV writes
-  still complete and the scan does not raise.
-- Idempotency: running the same row twice produces ONE DB row (matches
-  the importer's INSERT-IF-NOT-EXISTS contract — no double-writes on
-  cron retries).
+- Pi safety: no env flags → no pyodbc import, add_bets is a no-op.
+- DB write mode: BETS_DB_WRITE=1 + DSN → DB row lands with the same
+  UUID5 the A.3 importer would compute.
+- Idempotency: running the same row twice produces ONE DB row
+  (INSERT-IF-NOT-EXISTS — no double-writes on cron retries).
+- Failure isolation: DB connect failure → no exception raised (silent drop).
 """
 from __future__ import annotations
 
@@ -61,20 +58,18 @@ def _bet_row(scanned_at="2026-04-30 09:00 UTC", side="HOME", book="bet365",
     }
 
 
-# ---- CSV-only mode (Pi safety contract) -----------------------------------
+# ---- Pi safety contract ---------------------------------------------------
 
-def test_pi_safety_no_env_means_csv_only(fresh_env, tmp_path):
-    """Without env flags, BetRepo writes CSV only and never imports pyodbc."""
+def test_pi_safety_no_env_means_no_pyodbc_import(fresh_env, tmp_path):
+    """Without env flags, BetRepo is a no-op and never imports pyodbc."""
     fresh_env.delitem(sys.modules, "pyodbc", raising=False)
 
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
     assert repo.db_enabled is False
 
-    repo.add_bets([_bet_row()])
-    assert (tmp_path / "bets.csv").exists()
+    repo.add_bets([_bet_row()])  # must not raise; silently no-ops
 
-    # The DB code path must not have triggered a pyodbc import.
     assert "pyodbc" not in sys.modules, (
         "pyodbc was imported even though BETS_DB_WRITE was unset — "
         "Pi safety contract violated."
@@ -82,35 +77,11 @@ def test_pi_safety_no_env_means_csv_only(fresh_env, tmp_path):
     repo.close()
 
 
-def test_csv_format_matches_pre_a4_writer(fresh_env, tmp_path):
-    """The CSV header + row order must exactly match what scan_odds.py was
-    producing before A.4. Otherwise downstream tooling (compare_strategies,
-    update_csv_clv, dashboard) breaks."""
-    from src.storage.repo import BetRepo, BETS_FIELDS
-    BetRepo(logs_dir=tmp_path).add_bets([_bet_row()])
-    header = (tmp_path / "bets.csv").read_text().splitlines()[0]
-    assert header == ",".join(BETS_FIELDS)
-
-
-def test_paper_csv_path_and_format(fresh_env, tmp_path):
-    from src.storage.repo import BetRepo, PAPER_FIELDS
-    repo = BetRepo(logs_dir=tmp_path)
-    paper_row = {
-        **_bet_row(), "strategy": "A_production",
-        "code_sha": "abc123", "strategy_config_hash": "h1",
-        "pinnacle_close_prob": "", "clv_pct": "",
-    }
-    repo.add_paper_bets("A_production", [paper_row])
-    p = tmp_path / "paper" / "A_production.csv"
-    assert p.exists()
-    assert p.read_text().splitlines()[0] == ",".join(PAPER_FIELDS)
-
-
 def test_db_disabled_when_only_flag_set(fresh_env, tmp_path):
     """BETS_DB_WRITE=1 without a DSN must NOT enable DB writes."""
     fresh_env.setenv("BETS_DB_WRITE", "1")
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
     assert repo.db_enabled is False
 
 
@@ -133,9 +104,8 @@ class _SqliteRepo:
         self.repo._connect = lambda: conn  # type: ignore[method-assign]
 
 
-def test_dual_write_csv_and_db_with_matching_uuids(fresh_env, tmp_path):
-    """A single add_bets call writes the CSV row AND the DB row, and the
-    DB UUID matches what the A.3 importer would compute for the same key."""
+def test_db_write_produces_matching_uuid(fresh_env, tmp_path):
+    """add_bets writes to DB with the same UUID5 the A.3 importer computes."""
     db = _make_db()
     helper = _SqliteRepo(db, tmp_path)
     repo = helper.repo
@@ -143,11 +113,9 @@ def test_dual_write_csv_and_db_with_matching_uuids(fresh_env, tmp_path):
     row = _bet_row()
     repo.add_bets([row])
 
-    assert (tmp_path / "bets.csv").exists()
     db_rows = db.execute("SELECT id FROM bets").fetchall()
     assert len(db_rows) == 1
 
-    # The UUID must match what _keys.bet_uuid produces for this row.
     from src.storage._keys import bet_uuid, scan_date_of, normalise_line
     expected = bet_uuid(
         scan_date_of(row["scanned_at"]),
@@ -158,11 +126,9 @@ def test_dual_write_csv_and_db_with_matching_uuids(fresh_env, tmp_path):
     assert db_rows[0][0] == expected
 
 
-def test_dual_write_idempotent_on_retry(fresh_env, tmp_path):
-    """Calling add_bets twice with the same row produces 2 CSV rows
-    (the scanner's job to dedup CSVs by scan_date) but only 1 DB row,
-    because the deterministic UUID + INSERT-IF-NOT-EXISTS makes the
-    second DB insert a no-op."""
+def test_db_write_idempotent_on_retry(fresh_env, tmp_path):
+    """Calling add_bets twice with the same row produces exactly 1 DB row:
+    deterministic UUID + INSERT-IF-NOT-EXISTS makes the second insert a no-op."""
     db = _make_db()
     helper = _SqliteRepo(db, tmp_path)
     repo = helper.repo
@@ -236,30 +202,23 @@ def test_dual_write_drift(fresh_env, tmp_path):
 
 # ---- Failure isolation ----------------------------------------------------
 
-def test_db_connect_failure_falls_back_to_csv(fresh_env, tmp_path, monkeypatch):
-    """A bogus DSN must NOT raise — the CSV write succeeds and a warning
-    is emitted to stderr."""
-    monkeypatch.setenv("BETS_DB_WRITE", "1")
-    monkeypatch.setenv("AZURE_SQL_DSN", "Driver={Nonexistent};Server=nope;")
-    # Force a fresh import so the module re-reads env at import time… but
-    # repo doesn't read env at import; it reads in __init__. Just construct.
-    from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
-    assert repo.db_enabled is True  # env says yes; failure latches inside
-    # The actual connect happens lazily on the first DB section. Provoke it.
-    repo.add_bets([_bet_row()])
-    # CSV must still be written.
-    assert (tmp_path / "bets.csv").exists()
-    # DB latched as failed; subsequent writes are CSV-only.
-    assert repo.db_enabled is False
-
-
-def test_invalid_dsn_does_not_block_paper_or_closing(fresh_env, tmp_path, monkeypatch):
-    """Same as above but checks paper_bets + closing_lines paths."""
+def test_db_connect_failure_does_not_raise(fresh_env, tmp_path, monkeypatch):
+    """A bogus DSN must NOT raise — write silently drops and latches db_failed."""
     monkeypatch.setenv("BETS_DB_WRITE", "1")
     monkeypatch.setenv("AZURE_SQL_DSN", "Driver={Nonexistent};Server=nope;")
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
+    assert repo.db_enabled is True  # env says yes; failure latches on first connect
+    repo.add_bets([_bet_row()])  # must not raise
+    assert repo.db_enabled is False  # latched after failed connect
+
+
+def test_invalid_dsn_does_not_raise_on_paper_or_closing(fresh_env, tmp_path, monkeypatch):
+    """Same as above but for paper_bets + closing_lines paths."""
+    monkeypatch.setenv("BETS_DB_WRITE", "1")
+    monkeypatch.setenv("AZURE_SQL_DSN", "Driver={Nonexistent};Server=nope;")
+    from src.storage.repo import BetRepo
+    repo = BetRepo()
     repo.add_paper_bets("A_production", [{**_bet_row(), "strategy": "A_production"}])
     repo.add_closing_lines([{
         "captured_at": "2026-05-10 14:55 UTC",
@@ -267,8 +226,8 @@ def test_invalid_dsn_does_not_block_paper_or_closing(fresh_env, tmp_path, monkey
         "side": "HOME", "market": "h2h", "line": "",
         "pinnacle_devig_prob": 0.5,
     }])
-    assert (tmp_path / "paper" / "A_production.csv").exists()
-    assert (tmp_path / "closing_lines.csv").exists()
+    # No exception raised; DB latched as failed
+    assert repo.db_enabled is False
 
 
 def test_connect_retry_succeeds_on_second_attempt(fresh_env, monkeypatch, capsys):

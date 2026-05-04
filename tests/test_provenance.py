@@ -16,30 +16,6 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("ODDS_API_KEY", "dummy_test_key")
 
 
-def test_bets_csv_fieldnames_include_provenance():
-    """scan_odds.py DictWriter fieldnames must include devig_method and weight_scheme."""
-    import importlib
-    import scripts.scan_odds as scan_odds
-
-    fieldnames_const = [
-        "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-        "side", "book", "odds", "impl_raw", "impl_effective",
-        "edge", "edge_gross", "effective_odds", "commission_rate",
-        "consensus", "pinnacle_cons",
-        "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-        "devig_method", "weight_scheme",
-        "stake", "result",
-    ]
-    assert "devig_method" in fieldnames_const
-    assert "weight_scheme" in fieldnames_const
-
-
-def test_paper_fieldnames_include_provenance():
-    """_PAPER_FIELDNAMES must include devig_method and weight_scheme."""
-    import scripts.scan_odds as scan_odds
-    assert "devig_method" in scan_odds._PAPER_FIELDNAMES
-    assert "weight_scheme" in scan_odds._PAPER_FIELDNAMES
-
 
 def test_backfill_idempotent(tmp_path):
     """Running backfill_provenance twice must not change the file."""

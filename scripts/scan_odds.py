@@ -5,8 +5,6 @@ Reads ODDS_API_KEY from environment. Run with:
 """
 
 import argparse
-import csv
-import fcntl
 import functools
 import json
 import os
@@ -36,9 +34,8 @@ try:
 except ImportError:
     _DEVIG = False
 
-# A.4: BetRepo dual-writes CSV + (optionally) Azure SQL. Pi-safe: the
-# DB code path stays dormant unless BETS_DB_WRITE=1 + DSN env are set.
-from src.storage.repo import BetRepo, PAPER_FIELDS as _PAPER_FIELDS_REPO
+# A.9: BetRepo writes to Azure SQL only. Requires BETS_DB_WRITE=1 + DSN.
+from src.storage.repo import BetRepo
 
 # A.5.5: SnapshotArchive captures every raw API response to Azure Blob
 # Storage when BLOB_ARCHIVE=1 + connection inputs are set. Pi-safe: lazy
@@ -623,18 +620,6 @@ def _mark_notified(bets: list[dict], notified: dict, now_dt: datetime):
         }
 
 
-_PAPER_DIR = Path(__file__).parent.parent / "logs" / "paper"
-
-_PAPER_FIELDNAMES = [
-    "scanned_at", "strategy", "sport", "market", "line", "home", "away", "kickoff",
-    "side", "book", "odds", "impl_raw", "impl_effective", "edge", "edge_gross",
-    "effective_odds", "commission_rate", "consensus", "pinnacle_cons",
-    "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-    "devig_method", "weight_scheme", "code_sha", "strategy_config_hash",
-    "stake", "pinnacle_close_prob", "clv_pct",
-]
-
-
 @functools.lru_cache(maxsize=1)
 def _git_sha() -> str:
     """Short SHA of git HEAD at scan time. Cached for process lifetime.
@@ -647,30 +632,6 @@ def _git_sha() -> str:
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return ""
 
-
-def _ensure_paper_schema(log_file: Path) -> None:
-    """Migrate an existing paper CSV to the current _PAPER_FIELDNAMES schema.
-    Idempotent — no-op if the header already matches. Pre-R.11 rows get empty
-    strings for code_sha / strategy_config_hash, forming a 'pre-R.11' window
-    that compare_strategies handles separately from current-config rows."""
-    if not log_file.exists():
-        return
-    expected = ",".join(_PAPER_FIELDNAMES)
-    with open(log_file, newline="") as f:
-        first = f.readline().strip()
-        if first == expected:
-            return
-        f.seek(0)
-        old_rows = list(csv.DictReader(f))
-    print(f"[paper:schema] migrating {log_file.name} → {len(_PAPER_FIELDNAMES)}-col schema (added: code_sha, strategy_config_hash)")
-    tmp = log_file.with_suffix(".csv.tmp")
-    with open(tmp, "w", newline="") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        writer = csv.DictWriter(f, fieldnames=_PAPER_FIELDNAMES, extrasaction="ignore")
-        writer.writeheader()
-        for row in old_rows:
-            writer.writerow({k: row.get(k, "") for k in _PAPER_FIELDNAMES})
-    tmp.replace(log_file)
 
 _H2H_SIDE = {"H": "HOME", "D": "DRAW", "A": "AWAY"}
 
@@ -696,37 +657,14 @@ def _paper_provenance(strategy) -> tuple[str, str]:
 def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
                       sport_label: str, now: str, scan_date: str, bankroll: float = 1000.0,
                       strategy=None, repo: "BetRepo | None" = None):
-    """Write paper strategy bets to logs/paper/<strategy_name>.csv (and DB if `repo` is dual-write)."""
-    if not paper_bets:
+    """Record paper strategy bets to DB via repo."""
+    if not paper_bets or repo is None:
         return
-    _PAPER_DIR.mkdir(exist_ok=True)
-    log_file = _PAPER_DIR / f"{strategy_name}.csv"
-    _ensure_paper_schema(log_file)
-
-    existing_keys: set = set()
-    if log_file.exists():
-        with open(log_file, newline="") as f:
-            for row in csv.DictReader(f):
-                if row.get("scanned_at", "")[:10] == scan_date:
-                    existing_keys.add((
-                        row.get("kickoff", ""),
-                        row.get("home", ""),
-                        row.get("away", ""),
-                        row.get("side", ""),
-                        row.get("book", ""),
-                        row.get("market", "h2h"),
-                        str(row.get("line", "")),
-                    ))
-
-    new_rows = []
+    rows = []
     for vb in paper_bets:
         dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
         side = _H2H_SIDE.get(vb["side"], vb["side"])
-        key = (dt, vb["home"], vb["away"], side, vb["book"],
-               vb.get("market", "h2h"), str(vb.get("line", "")))
-        if key in existing_keys:
-            continue
-        new_rows.append({
+        rows.append({
             "scanned_at": now,
             "strategy": strategy_name,
             "sport": sport_label,
@@ -755,27 +693,14 @@ def _append_paper_csv(strategy_name: str, paper_bets: list[dict],
             "weight_scheme": _paper_provenance(strategy)[1] if strategy else "uniform",
             "code_sha": _git_sha(),
             "strategy_config_hash": strategy.config_hash() if strategy else "",
-            # Per-bet Kelly stake — uses strategy's kelly_fraction (default 0.5 = half-Kelly)
             "stake": round(_compute_raw_stake(vb["cons"], vb["odds"], bankroll, vb["book"],
                                               vb.get("kelly_fraction", 0.5)), 2),
             "pinnacle_close_prob": "",
             "clv_pct": "",
         })
-
-    if not new_rows:
-        return
-
-    if repo is not None:
-        repo.add_paper_bets(strategy_name, new_rows)
-    else:
-        write_header = not log_file.exists()
-        with open(log_file, "a", newline="") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            writer = csv.DictWriter(f, fieldnames=_PAPER_FIELDNAMES, extrasaction="ignore")
-            if write_header:
-                writer.writeheader()
-            writer.writerows(new_rows)
-    print(f"[paper:{strategy_name}] {len(new_rows)} bet(s) → logs/paper/{strategy_name}.csv")
+    if rows:
+        repo.add_paper_bets(strategy_name, rows)
+    print(f"[paper:{strategy_name}] {len(rows)} bet(s) → DB")
 
 
 SPORT_GROUPS = {
@@ -839,6 +764,16 @@ def main():
                         help="Cap number of active tennis tournaments to scan (saves API quota)")
     args = parser.parse_args()
 
+    # A.9: Refuse to run without DB — bets would be silently dropped.
+    if os.environ.get("BETS_DB_WRITE", "").strip() != "1":
+        print(
+            "[scan] ERROR: scan_odds requires BETS_DB_WRITE=1 + AZURE_SQL_* env vars. "
+            "Without them bets are not stored anywhere. "
+            "Set BETS_DB_WRITE=1 + AZURE_SQL_DSN (or the SERVER/USER/DATABASE/KV quintet).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     BANKROLL = _get_bankroll() if _RISK else float(os.environ.get("BANKROLL", 1000.0))
 
     now_dt = datetime.now(timezone.utc)
@@ -849,13 +784,8 @@ def main():
 
     all_sports = build_sport_list(args.sports, args.max_tennis)
 
-    # A.4: BetRepo handles CSV writes (always) + Azure SQL writes (only when
-    # BETS_DB_WRITE=1 and DSN env are set — i.e. WSL dev side, not the Pi).
     repo = BetRepo()
-    if repo.db_enabled:
-        print("[scan] Dual-write mode: CSV + Azure SQL")
-    else:
-        print("[scan] CSV-only mode (BETS_DB_WRITE not set)")
+    print("[scan] DB mode: Azure SQL")
 
     # Pre-flight health check (free, 0 credits): logs which football leagues
     # /sports/ reports active. Evidence-only — does not gate the scan.
@@ -987,7 +917,9 @@ def main():
     n_pre_risk = len(output_bets)
     dd_mult = 1.0
     if _RISK:
-        current_br, high_water = _load_drawdown_state(BANKROLL)
+        current_br, high_water = _load_drawdown_state(
+            BANKROLL, settled_pnl=repo.get_settled_pnl()
+        )
         dd_mult = _drawdown_multiplier(current_br, high_water)
         if dd_mult < 1.0:
             print(f"[risk] Drawdown brake active: bankroll £{current_br:.0f} vs high water £{high_water:.0f} "
@@ -1032,33 +964,11 @@ def main():
                   f"{ms_label} | Stake £{vb['stake']} | {dt}")
     print()
 
-    # Write bets to CSV log — deduped against same-day entries
-    log_file = Path(__file__).parent.parent / "logs" / "bets.csv"
-    existing_keys: set = set()
-    if log_file.exists():
-        with open(log_file, newline="") as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            for row in csv.DictReader(f):
-                row_date = row.get("scanned_at", "")[:10]
-                if row_date == scan_date:
-                    existing_keys.add((
-                        row.get("kickoff", ""),
-                        row.get("home", ""),
-                        row.get("away", ""),
-                        row.get("side", ""),
-                        row.get("book", ""),
-                        row.get("market", "h2h"),
-                        str(row.get("line", "")),
-                    ))
-
+    # Record bets to DB — dedup handled by INSERT-IF-NOT-EXISTS (deterministic UUIDs)
     new_rows = []
     for vb in output_bets:
         dt = datetime.fromisoformat(vb["commence"].replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
         side = {"H": "HOME", "D": "DRAW", "A": "AWAY"}.get(vb["side"], vb["side"])
-        key = (dt, vb["home"], vb["away"], side, vb["book"],
-               vb.get("market", "h2h"), str(vb.get("line", "")))
-        if key in existing_keys:
-            continue
         new_rows.append({
             "scanned_at": now,
             "sport": vb["sport"],
@@ -1088,12 +998,9 @@ def main():
             "stake": vb["stake"],
             "result": "",
         })
-
     if new_rows:
         repo.add_bets(new_rows)
-    skipped = len(output_bets) - len(new_rows)
-    print(f"[log] {len(new_rows)} bets appended to logs/bets.csv"
-          + (f" ({skipped} duplicate(s) skipped)" if skipped else ""))
+    print(f"[log] {len(new_rows)} bet(s) → DB")
 
     # Kaunitz bets (≥3%): notify by confidence tier, with dedupe
     notified = _load_notified()

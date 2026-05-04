@@ -268,18 +268,8 @@ class _BookAccum:
 
 
 # ---------------------------------------------------------------------------
-# B.0.5: flag signals — DB-first, CSV fallback
+# B.0.5: flag signals — DB-only
 # ---------------------------------------------------------------------------
-
-def _read_bets_csv(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            return list(csv.DictReader(f))
-    except OSError:
-        return []
-
 
 def _load_flag_signals(
     repo: BetRepo,
@@ -287,10 +277,8 @@ def _load_flag_signals(
     since: date,
     until: date,
 ) -> dict[tuple[str, str, str], dict]:
-    """Return flag stats per (book, league, market). DB-first, CSV fallback."""
-    raw_rows: list[dict] | None = repo.get_bets()
-    if raw_rows is None:
-        raw_rows = _read_bets_csv(logs_dir / "bets.csv")
+    """Return flag stats per (book, league, market) from DB."""
+    raw_rows: list[dict] = repo.get_bets() or []
 
     stats: dict[tuple[str, str, str], dict] = defaultdict(
         lambda: {"n_flags": 0, "edge_sum": 0.0}
