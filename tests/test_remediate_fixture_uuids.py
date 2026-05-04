@@ -197,7 +197,7 @@ def test_migrate_csv_to_db_uses_canonical_fixture_uuid():
     conn = _make_db()
     conn.execute("PRAGMA foreign_keys = OFF")
 
-    from scripts.migrate_csv_to_db import Importer
+    from scripts.archive.migrate_csv_to_db import Importer
     importer = Importer.__new__(Importer)
     importer.cur = conn.cursor()
     importer.summary = type("S", (), {

@@ -1,7 +1,6 @@
 """
 Risk management: stake rounding, per-fixture cap, portfolio cap, drawdown brake.
 """
-import csv
 import json
 import os
 from pathlib import Path
@@ -13,7 +12,6 @@ except ImportError:
 
 _LOGS_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
 _BANKROLL_STATE = _LOGS_DIR / "bankroll.json"
-_BETS_CSV = _LOGS_DIR / "bets.csv"
 
 STAKE_ROUNDING = 5           # round to nearest £5
 MAX_FIXTURE_FRACTION = 0.05  # cap total exposure per fixture
@@ -52,28 +50,12 @@ def round_stake(stake: float, rounding: int = STAKE_ROUNDING) -> float:
     return float(round(stake / rounding) * rounding)
 
 
-def _settled_pnl() -> float:
-    if not _BETS_CSV.exists():
-        return 0.0
-    total = 0.0
-    try:
-        with open(_BETS_CSV, newline="") as f:
-            for row in csv.DictReader(f):
-                raw = row.get("pnl", "")
-                if raw:
-                    try:
-                        total += float(raw)
-                    except ValueError:
-                        pass
-    except Exception:
-        pass
-    return total
+def load_drawdown_state(bankroll: float,
+                        settled_pnl: float = 0.0) -> tuple[float, float]:
+    """Returns (current_bankroll, high_water). Reads and updates logs/bankroll.json.
 
-
-def load_drawdown_state(bankroll: float) -> tuple[float, float]:
-    """
-    Returns (current_bankroll, high_water). Reads and updates logs/bankroll.json.
-    current_bankroll = initial + all settled P&L from bets.csv.
+    Pass settled_pnl from the DB (e.g. repo.get_settled_pnl()) so the
+    drawdown brake reflects real P&L. Defaults to 0.0 when DB is unavailable.
     """
     state: dict = {}
     if _BANKROLL_STATE.exists():
@@ -84,7 +66,7 @@ def load_drawdown_state(bankroll: float) -> tuple[float, float]:
 
     initial = float(state.get("initial_bankroll", bankroll))
     high_water = float(state.get("high_water", initial))
-    current = initial + _settled_pnl()
+    current = initial + settled_pnl
 
     if current > high_water:
         high_water = current

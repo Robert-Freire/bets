@@ -189,47 +189,24 @@ def test_update_bet_settle_returns_false_when_db_disabled(fresh_env, tmp_path):
 
 # ---- /health + dashboard fallback -----------------------------------------
 
-def test_health_endpoint_disabled_csv_present(fresh_env, tmp_path, monkeypatch):
-    """Without DB env, /health → 200 db=disabled csv=ok|missing."""
-    bets = tmp_path / "bets.csv"
-    bets.write_text(
-        "scanned_at,sport,market,line,home,away,kickoff,side,book,odds,"
-        "impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,"
-        "consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,"
-        "outlier_z,devig_method,weight_scheme,stake,result\n"
-    )
+def test_health_endpoint_disabled(fresh_env, tmp_path, monkeypatch):
+    """Without DB env, /health → 200 db=disabled."""
     import app as _app
-    monkeypatch.setattr(_app, "BETS_CSV", bets)
-    monkeypatch.setattr(_app, "BETS_LEGACY_CSV", tmp_path / "bets_legacy.csv")
     client = _app.app.test_client()
     rsp = client.get("/health")
     assert rsp.status_code == 200
     body = rsp.get_json()
     assert body["db"] == "disabled"
-    assert body["csv"] in ("ok", "missing")
+    assert "csv" not in body
 
 
 def test_dashboard_renders_when_db_disabled(fresh_env, tmp_path, monkeypatch):
-    """Dashboard must still render with no DB env (Pi path)."""
-    bets = tmp_path / "bets.csv"
-    bets.write_text(
-        "scanned_at,sport,market,line,home,away,kickoff,side,book,odds,"
-        "impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,"
-        "consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,"
-        "outlier_z,devig_method,weight_scheme,stake,result\n"
-        "2026-04-28 10:00 UTC,EPL,h2h,,A,B,2026-05-01 15:00,HOME,bet365,2.0,"
-        "0.5,0.5,0.05,0.05,2.0,0.0,0.55,0.5,30,HIGH,?,0.0,0.0,shin,uniform,5,\n"
-    )
+    """Dashboard renders (empty bets list) when DB env is not set."""
     import app as _app
-    monkeypatch.setattr(_app, "BETS_CSV", bets)
-    monkeypatch.setattr(_app, "BETS_LEGACY_CSV", tmp_path / "bets_legacy.csv")
-    monkeypatch.setattr(_app, "DRIFT_CSV", tmp_path / "drift.csv")
-
     client = _app.app.test_client()
     rsp = client.get("/")
     assert rsp.status_code == 200
     assert b"Betting Dashboard" in rsp.data
-    # Banner must NOT be visible in disabled mode (only "down" triggers it).
     assert b"DB unreachable" not in rsp.data
 
 
@@ -238,22 +215,10 @@ def test_dashboard_shows_banner_when_db_down(fresh_env, tmp_path, monkeypatch):
     monkeypatch.setenv("BETS_DB_WRITE", "1")
     monkeypatch.setenv("AZURE_SQL_DSN", "Driver={Nonexistent};Server=nope;")
 
-    bets = tmp_path / "bets.csv"
-    bets.write_text(
-        "scanned_at,sport,market,line,home,away,kickoff,side,book,odds,"
-        "impl_raw,impl_effective,edge,edge_gross,effective_odds,commission_rate,"
-        "consensus,pinnacle_cons,n_books,confidence,model_signal,dispersion,"
-        "outlier_z,devig_method,weight_scheme,stake,result\n"
-    )
     import app as _app
-    monkeypatch.setattr(_app, "BETS_CSV", bets)
-    monkeypatch.setattr(_app, "BETS_LEGACY_CSV", tmp_path / "bets_legacy.csv")
-    monkeypatch.setattr(_app, "DRIFT_CSV", tmp_path / "drift.csv")
-
     client = _app.app.test_client()
     rsp = client.get("/")
     assert rsp.status_code == 200
     assert b"DB unreachable" in rsp.data
     rsp = client.get("/health")
-    # 503 because db=down
     assert rsp.status_code == 503

@@ -1,7 +1,7 @@
-"""Storage repo: dual-writer for bets / paper_bets / closing_lines / drift.
+"""Storage repo: DB writer for bets / paper_bets / closing_lines / drift.
 
-CSV writers are always-on. DB writers are gated by env so that the same
-codebase runs unchanged on the Pi (CSV-only) and on WSL (CSV + DB).
+DB writes are gated by env so that the same codebase runs unchanged on
+the Pi (no-op when env flags unset) and on WSL (DB writes active).
 
 Activation rule (BOTH must hold for DB writes):
   - BETS_DB_WRITE=1
@@ -15,23 +15,19 @@ Pi safety contract:
   - Module imports nothing beyond stdlib at top level. pyodbc and the
     Azure CLI are touched only inside `_connect()` which is only called
     when the env flags are set. After `git pull` on the Pi (no env flags),
-    the DB code path stays dormant; behavior is byte-identical to the
-    pre-A.4 inline CSV writers.
+    the DB code path stays dormant; no data is written.
 
 Failure isolation:
   - DB inserts run inside try/except. If the DB is unreachable mid-scan,
-    the CSV append still happens and the error is logged; the scan does
-    not abort. A repeated failure surfaces via stderr but doesn't crash.
+    the error is logged; the scan does not abort.
 
 UUID determinism:
   - Bet/fixture IDs come from `src.storage._keys`, the same module the
     A.3 importer uses. So a row written live and the same row imported
-    from CSV later produce the same UUID — no duplicates.
+    from a legacy CSV produce the same UUID — no duplicates.
 """
 from __future__ import annotations
 
-import csv
-import fcntl
 import os
 import subprocess
 import sys
@@ -39,7 +35,6 @@ import time as _time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
 
 from src.storage._keys import (
     LABEL_TO_KEY,
@@ -52,43 +47,10 @@ from src.storage._keys import (
 )
 
 # Reverse lookup so DB-side sport_key joins back to the human label the
-# dashboard / CSV format expects ("EPL", "Bundesliga", etc.). Tennis labels
-# are dynamic and stored as the label itself in sport_key, so the reverse
+# dashboard format expects ("EPL", "Bundesliga", etc.). Tennis labels are
+# dynamic and stored as the label itself in sport_key, so the reverse
 # falls through unchanged.
 KEY_TO_LABEL: dict[str, str] = {v: k for k, v in LABEL_TO_KEY.items()}
-
-# ---- field schemas (mirror the existing inline writers verbatim) ----------
-
-BETS_FIELDS = [
-    "scanned_at", "sport", "market", "line", "home", "away", "kickoff",
-    "side", "book", "odds", "impl_raw", "impl_effective",
-    "edge", "edge_gross", "effective_odds", "commission_rate",
-    "consensus", "pinnacle_cons",
-    "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-    "devig_method", "weight_scheme",
-    "stake", "result",
-]
-
-PAPER_FIELDS = [
-    "scanned_at", "strategy", "sport", "market", "line", "home", "away",
-    "kickoff", "side", "book", "odds", "impl_raw", "impl_effective",
-    "edge", "edge_gross", "effective_odds", "commission_rate",
-    "consensus", "pinnacle_cons",
-    "n_books", "confidence", "model_signal", "dispersion", "outlier_z",
-    "devig_method", "weight_scheme", "code_sha", "strategy_config_hash",
-    "stake", "pinnacle_close_prob", "clv_pct",
-]
-
-CLOSING_FIELDS = [
-    "captured_at", "home", "away", "kickoff", "side", "market", "line",
-    "pinnacle_devig_prob", "pinnacle_raw_odds",
-    "your_book_flagged_odds", "your_book_close_odds", "clv_pct",
-]
-
-DRIFT_FIELDS = [
-    "captured_at", "home", "away", "kickoff", "side", "market", "line",
-    "book", "t_minus_min", "your_book_odds", "pinnacle_odds", "n_books",
-]
 
 
 # ---- connection helpers ---------------------------------------------------
@@ -180,23 +142,6 @@ def _resolve_dsn() -> str | None:
     )
 
 
-# ---- CSV helpers ----------------------------------------------------------
-
-def _atomic_append_csv(path: Path, fields: list[str], rows: Iterable[dict]) -> None:
-    """Append rows to `path`; write header if file is new. fcntl-locked."""
-    rows = list(rows)
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_hdr = not path.exists()
-    with open(path, "a", newline="") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        if write_hdr:
-            w.writeheader()
-        w.writerows(rows)
-
-
 # ---- BetRepo --------------------------------------------------------------
 
 def _f(s):
@@ -240,7 +185,7 @@ def _parse_dt(s):
 
 
 class BetRepo:
-    """Dual-write repo: CSV always, DB if env allows.
+    """DB-backed repo for bets / paper_bets / closing_lines / drift.
 
     A BetRepo holds the DB connection (when enabled) for its lifetime,
     so a single scan run reuses one pyodbc connection across all rows.
@@ -249,15 +194,11 @@ class BetRepo:
 
     def __init__(self, logs_dir: Path | None = None,
                  dsn: str | None = "__resolve__"):
-        self.logs_dir = Path(logs_dir) if logs_dir else (
-            Path(__file__).resolve().parents[2] / "logs"
-        )
-        self.bets_csv = self.logs_dir / "bets.csv"
-        self.paper_dir = self.logs_dir / "paper"
-        self.closing_csv = self.logs_dir / "closing_lines.csv"
-        self.drift_csv = self.logs_dir / "drift.csv"
+        # logs_dir is accepted but unused — retained for backward compatibility
+        # with callers that pass it. Removed from active use in A.9.
+        _ = logs_dir
 
-        # Pass dsn=None explicitly to force CSV-only (used by tests).
+        # Pass dsn=None explicitly to force no-op (used by tests).
         # Sentinel "__resolve__" means: read env at construction time.
         if dsn == "__resolve__":
             dsn = _resolve_dsn()
@@ -402,7 +343,6 @@ class BetRepo:
 
     def add_bets(self, rows: list[dict]) -> None:
         rows = list(rows)
-        _atomic_append_csv(self.bets_csv, BETS_FIELDS, rows)
         if not rows or not self.db_enabled:
             return
         with self._db_section() as cur:
@@ -440,15 +380,13 @@ class BetRepo:
         "outlier_z", "devig_method", "weight_scheme", "stake", "result",
     )
 
-    def add_paper_bets(self, strategy_name: str, rows: list[dict]) -> Path:
+    def add_paper_bets(self, strategy_name: str, rows: list[dict]) -> None:
         rows = list(rows)
-        path = self.paper_dir / f"{strategy_name}.csv"
-        _atomic_append_csv(path, PAPER_FIELDS, rows)
         if not rows or not self.db_enabled:
-            return path
+            return
         with self._db_section() as cur:
             if cur is None:
-                return path
+                return
             cols = ", ".join(self._PAPER_COLS)
             placeholders = ", ".join(["?"] * len(self._PAPER_COLS))
             insert_sql = (
@@ -474,13 +412,11 @@ class BetRepo:
                 # Splice strategy_id at index 1 — order matches _PAPER_COLS.
                 values = (bet_vals[0], sid) + bet_vals[1:]
                 cur.execute(insert_sql, (*values, pid))
-        return path
 
     # --- closing lines -----------------------------------------------------
 
     def add_closing_lines(self, rows: list[dict]) -> None:
         rows = list(rows)
-        _atomic_append_csv(self.closing_csv, CLOSING_FIELDS, rows)
         if not rows or not self.db_enabled:
             return
         with self._db_section() as cur:
@@ -523,7 +459,6 @@ class BetRepo:
 
     def add_drift_snapshot(self, rows: list[dict]) -> None:
         rows = list(rows)
-        _atomic_append_csv(self.drift_csv, DRIFT_FIELDS, rows)
         if not rows or not self.db_enabled:
             return
         with self._db_section() as cur:
@@ -562,12 +497,24 @@ class BetRepo:
                     fid, side, market, line_pk, bk, t_minus,
                 ))
 
-    # --- read API (A.5: dashboard reads DB-first with CSV fallback) -------
+    # --- read API ---------------------------------------------------------
+
+    def get_settled_pnl(self) -> float:
+        """Return total settled P&L from the bets table. 0.0 if DB unavailable."""
+        if not self.db_enabled or self._connect() is None:
+            return 0.0
+        try:
+            self._cur.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM bets WHERE pnl IS NOT NULL"
+            )
+            return float(self._cur.fetchone()[0])
+        except Exception as e:
+            print(f"[repo] WARN: get_settled_pnl failed: {e}", file=sys.stderr)
+            return 0.0
 
     def db_status(self) -> str:
         """One of 'ok' (configured + reachable), 'down' (configured but
-        connect failed), 'disabled' (no env flags). The dashboard uses
-        this to decide whether to render the fallback banner."""
+        connect failed), 'disabled' (no env flags)."""
         if self._dsn is None:
             return "disabled"
         if self._db_failed:

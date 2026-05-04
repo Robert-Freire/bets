@@ -37,7 +37,7 @@ export $(cat .env.dev) && python3 scripts/compare_strategies.py   # writes docs/
 6. Flags bets where a **UK-licensed** bookmaker's devigged prob is ≥3% below consensus (Kaunitz), or ≥2% with CatBoost model agreement.
 7. Sizes bets with half-Kelly + risk pipeline: £5 rounding, per-fixture 5% cap, 15% portfolio cap, drawdown brake.
 8. Sends ntfy push (topic `robert-epl-bets-m4x9k`), deduped via `logs/notified.json` (12h per bet key).
-9. Appends to `logs/bets.csv` (deduped) and to each `logs/paper/<variant>.csv` for the 16 paper-portfolio strategies. WSL also dual-writes to Azure SQL via `BetRepo` (A.4) and archives raw API responses to Azure Blob via `SnapshotArchive` (A.5.5).
+9. Writes bets to Azure SQL via `BetRepo` (A.9: DB-only; no CSV writes) and archives raw API responses to Azure Blob via `SnapshotArchive` (A.5.5).
 
 ## Sports actively scanned
 
@@ -82,7 +82,7 @@ NTFY_TOPIC_OVERRIDE=   # empty = silence ntfy on test stream
 
 **Never** run manual scans on the Pi against the prod key (one exception: the post-cutover validation run on 2026-05-01).
 
-### A.4 dual-write to Azure SQL — WSL only (Pi must NOT set these)
+### A.9 DB-only writes to Azure SQL — WSL only (Pi must NOT set these)
 
 ```bash
 BETS_DB_WRITE=1
@@ -129,7 +129,7 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 0  2  * * 1     Mon 02:00           — fixture calendar ingest (fixtures table in Azure SQL)
 0  8  * * 1     Mon 08:00           — football-data.co.uk CLV backfill
 0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
-0  3  * * *     Daily 3am           — bets.csv snapshot to bets.csv.bak.<date> (14d retention on snapshots only — live file untouched)
+0  3  * * *     Daily 3am           — (bets.csv backup cron removed; DB is now sole source of truth)
 
 # Pi only (WSL would conflict on git-tracked outputs)
 0  6  * * 1     Mon 06:00           — refresh logs/team_xg.json from Understat
@@ -149,7 +149,7 @@ scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.j
 scripts/check_sports.py     Sports discovery (bi-weekly)
 scripts/model_signals.py    CatBoost signal cache generator
 scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
-scripts/migrate_csv_to_db.py  One-shot CSV → DB importer (deterministic UUIDs; idempotent)
+scripts/archive/migrate_csv_to_db.py  One-shot CSV → DB importer (archived; used once for A.3 backfill)
 scripts/compute_book_skill.py  Per-(book, league, market) skill + bias signals → book_skill table (B.0.5 + B.0.6)
 scripts/ingest_fixtures.py  Mon 02:00 fixture calendar ingest → fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
 
@@ -161,7 +161,7 @@ src/storage/schema.sql      Canonical MSSQL schema (8 tables: fixtures, books, s
 src/storage/schema_sqlite.sql  SQLite mirror for in-memory smoke tests
 src/storage/migrate.py      Idempotent migration runner
 src/storage/_keys.py        Deterministic UUID5 + sport-label helpers (don't change the namespace)
-src/storage/repo.py         BetRepo dual-writer (A.4) + FixtureRepo calendar read/write; lazy pyodbc import
+src/storage/repo.py         BetRepo DB writer (A.9: DB-only) + FixtureRepo calendar read/write; lazy pyodbc import
 src/storage/snapshots.py    SnapshotArchive: gzipped raw API responses → Azure Blob (A.5.5; lazy azure-storage-blob import; logs/snapshots/ buffer on failure)
 src/data/fixture_calendar.py  Forward fixture lookup from fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
 src/betting/devig.py        Shin / proportional / power de-vigging
@@ -169,17 +169,13 @@ src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
 src/betting/strategies.py   16 paper variants (A–P; A_production live, B–P shadow) + evaluate_strategy()
 src/betting/walk_forward.py  Walk-forward backtest primitive (TimeSeriesSplit)
 
-logs/bets.csv               All suggested bets + results + CLV
-logs/paper/                 Paper strategy CSVs (one per variant)
 logs/team_xg.json           Per-team avg xG + q25 threshold (weekly; feeds K_draw_bias)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state
 logs/scan.log               Scanner output
 logs/backfill_clv.log       FDCO backfill output
 logs/ingest_fixtures.log    Fixture ingest output
-logs/closing_lines.csv      (frozen; closing_line.py paused — historical only)
-logs/drift.csv              (frozen; same)
-logs/closing_line.log       (frozen; same)
+logs/closing_line.log       (frozen; closing_line.py paused — historical only)
 
 tests/                      pytest suite (439 tests across 36 files; run with `pytest`)
 
@@ -213,7 +209,7 @@ Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg 
 
 Three bet sections: **Placed — awaiting result** · **Suggested — not yet placed** · **Settled** (with P&L + CLV%).
 
-The public Azure dashboard at `kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io` reads exclusively from Azure SQL — no CSVs are baked into the Docker image (A.8 partial, 2026-05-02). The local dashboard (`python3 app.py`) reads from DB when `BETS_DB_WRITE=1` is set, or falls back to CSV (Pi / DB-unreachable). Pi data is not visible in the Azure dashboard until A.10 — only Pi-local `python3 app.py` shows it.
+Both the public Azure dashboard and the local `python3 app.py` read exclusively from Azure SQL (A.9: DB-only, no CSV fallback). Pi data is not visible in either dashboard until A.10 onboards Pi to its own DB.
 
 ## Risk management
 
@@ -234,7 +230,7 @@ CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD
 **Source-swap rationale (2026-05-01):** the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
 
 **Trade-offs vs the previous closing_line.py path:**
-- No drift (T-60/T-15/T-1 snapshots disabled). `logs/drift.csv` is frozen.
+- No drift (T-60/T-15/T-1 snapshots disabled; drift.csv removed in A.9).
 - Top-6 leagues only: EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2.
 - Totals only on the 2.5 line; no BTTS (FDCO doesn't carry it; system has 0 BTTS bets anyway).
 - ≥1-day delay vs at-close capture — fine for weekly review, useless for live tracking.
@@ -266,8 +262,8 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | B.3 (cron: WSL ✅ 2026-05-03; Pi pending) | partial |
 | B.2 (Brier-vs-close decision gate), B.4* (downstream variants) | pending |
 | Audit invariants I-1..I-13 (groups 1–4: P&L arithmetic, dashboard parity, CLV pipeline, book_skill) | ✅ done 2026-05-03; GitHub Actions workflow Mon 08:10 UTC (OIDC + KV, no new secrets); groups 5–6 pending |
-| Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ dashboard DB-only done 2026-05-02 (PRs #27 + #28); scanner still dual-writes CSV+DB on WSL — CSV write cutover + archive pending |
-| Phase 9 / A.9 (decommission CSV path) | pending (after A.8 + 1 wk) |
+| Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ done 2026-05-02 (PRs #27 + #28) |
+| Phase 9 / A.9 (decommission CSV path) | ✅ done 2026-05-04 — DB is sole source of truth; bets.csv + paper/*.csv removed |
 | Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |
 | Phase 10 (long-term: syndicate, multi-account) | open |
 | Phase 11 (research scanner) | ✅ done |
