@@ -219,6 +219,58 @@ def test_settle_paper_bet_result_one_shot(fresh_env, tmp_path):
     assert abs(row[2] - 0.50) < 1e-6  # CLV refreshed
 
 
+def test_settle_bet_clv_first_then_result(fresh_env, tmp_path):
+    """CLV write with result=None works; subsequent result write settles cleanly."""
+    db = _make_db()
+    helper = _SqliteRepo(db, tmp_path)
+    repo = helper.repo
+
+    repo.add_bets([_bet_row()])
+    fid = db.execute("SELECT fixture_id FROM bets").fetchone()[0]
+    bk = "bet365"
+
+    # CLV-only write first
+    ok1 = repo.settle_bet(fid, "HOME", "h2h", None, bk,
+                          result=None, pnl=None, pin_prob=0.42, clv_pct=0.03)
+    assert ok1 is True
+
+    row = db.execute("SELECT result, settled_at, pinnacle_close_prob FROM bets").fetchone()
+    assert row[0] == "pending"    # result not changed
+    assert row[1] is None         # settled_at not set
+    assert abs(row[2] - 0.42) < 1e-6
+
+    # Now settle result
+    ok2 = repo.settle_bet(fid, "HOME", "h2h", None, bk,
+                          result="W", pnl=10.5, pin_prob=None, clv_pct=None)
+    assert ok2 is True
+
+    row = db.execute("SELECT result, pnl, settled_at, pinnacle_close_prob FROM bets").fetchone()
+    assert row[0] == "W"
+    assert abs(row[1] - 10.5) < 1e-6
+    assert row[2] is not None     # settled_at now set
+    assert abs(row[3] - 0.42) < 1e-6  # CLV unchanged
+
+
+def test_settle_bet_clv_write_idempotent(fresh_env, tmp_path):
+    """Second CLV write with identical value → guard fires → rowcount=0 → False."""
+    db = _make_db()
+    helper = _SqliteRepo(db, tmp_path)
+    repo = helper.repo
+
+    repo.add_bets([_bet_row()])
+    fid = db.execute("SELECT fixture_id FROM bets").fetchone()[0]
+    bk = "bet365"
+
+    ok1 = repo.settle_bet(fid, "HOME", "h2h", None, bk,
+                          result=None, pnl=None, pin_prob=0.42, clv_pct=0.03)
+    assert ok1 is True
+
+    # Same pin_prob → ABS guard fires, rowcount=0
+    ok2 = repo.settle_bet(fid, "HOME", "h2h", None, bk,
+                          result=None, pnl=None, pin_prob=0.42, clv_pct=0.03)
+    assert ok2 is False
+
+
 # ── iter_unsettled_or_no_clv ──────────────────────────────────────────────────
 
 def test_iter_unsettled_yields_past_kickoff_rows(fresh_env, tmp_path):

@@ -4,7 +4,6 @@ Tests for scripts/compare_strategies.py (DB-backed rewrite, Phase S.4).
 Data injection: uses a SQLite BetRepo fixture instead of CSV files.
 build_report() accepts an optional `repo` argument for testing.
 """
-import csv
 import math
 import os
 import sqlite3
@@ -132,73 +131,6 @@ def _paper_row_dict(
 ])
 def test_model_bucket(signal, expected):
     assert cs._model_bucket(signal) == expected
-
-
-# ── _load_drift_index (reads frozen drift.csv) ────────────────────────────────
-
-def _drift_row(
-    *,
-    home="Arsenal",
-    away="Chelsea",
-    kickoff="2026-05-02 15:00",
-    side="HOME",
-    market="h2h",
-    line="",
-    t_minus_min="60",
-    pinnacle_odds="2.10",
-):
-    return {
-        "captured_at": "2026-05-02 14:00 UTC",
-        "home": home, "away": away, "kickoff": kickoff,
-        "side": side, "market": market, "line": line,
-        "book": "pinnacle", "t_minus_min": t_minus_min,
-        "your_book_odds": "", "pinnacle_odds": pinnacle_odds,
-        "n_books": "30",
-    }
-
-
-def _write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        path.touch()
-        return
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-
-
-def test_drift_index_returns_none_when_no_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(cs, "DRIFT_CSV", tmp_path / "nonexistent.csv")
-    assert cs._load_drift_index() is None
-
-
-def test_drift_index_pairs_t60_with_t1_only(monkeypatch, tmp_path):
-    drift = tmp_path / "drift.csv"
-    monkeypatch.setattr(cs, "DRIFT_CSV", drift)
-    rows = [
-        _drift_row(home="Arsenal", away="Chelsea", t_minus_min="60", pinnacle_odds="2.10"),
-        _drift_row(home="Arsenal", away="Chelsea", t_minus_min="1",  pinnacle_odds="1.95"),
-        _drift_row(home="Liverpool", away="Tottenham Hotspur", t_minus_min="60", pinnacle_odds="3.40"),
-    ]
-    _write_csv(drift, rows)
-    idx = cs._load_drift_index()
-    assert idx is not None
-    arsenal_key = ("2026-05-02 15:00", "Arsenal", "Chelsea", "h2h", "", "HOME")
-    assert arsenal_key in idx
-    liverpool_key = ("2026-05-02 15:00", "Liverpool", "Tottenham Hotspur", "h2h", "", "AWAY")
-    assert liverpool_key not in idx
-
-
-def test_drift_index_skips_unparseable_rows(monkeypatch, tmp_path):
-    drift = tmp_path / "drift.csv"
-    monkeypatch.setattr(cs, "DRIFT_CSV", drift)
-    rows = [
-        _drift_row(t_minus_min="60", pinnacle_odds=""),
-        _drift_row(t_minus_min="60", pinnacle_odds="not_a_num"),
-        _drift_row(t_minus_min="abc", pinnacle_odds="2.10"),
-    ]
-    _write_csv(drift, rows)
-    assert cs._load_drift_index() is None
 
 
 # ── _stats math ───────────────────────────────────────────────────────────────

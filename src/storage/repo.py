@@ -839,23 +839,27 @@ class BetRepo:
                     )
                 if cur.rowcount > 0:
                     affected = True
-            # UPDATE 2: CLV (no pending guard — overwrite is fine)
+            # UPDATE 2: CLV (no pending guard; guard skips if value unchanged)
             if pin_prob is not None:
                 if line_val is None:
                     cur.execute(
                         "UPDATE bets SET pinnacle_close_prob=?, clv_pct=? "
                         "WHERE fixture_id=? AND side=? AND market=? "
-                        "  AND line IS NULL AND book_id=?",
+                        "  AND line IS NULL AND book_id=? "
+                        "  AND (pinnacle_close_prob IS NULL "
+                        "       OR ABS(pinnacle_close_prob - ?) > 1e-9)",
                         (pin_prob, clv_pct,
-                         fixture_id, side, market, book_id),
+                         fixture_id, side, market, book_id, pin_prob),
                     )
                 else:
                     cur.execute(
                         "UPDATE bets SET pinnacle_close_prob=?, clv_pct=? "
                         "WHERE fixture_id=? AND side=? AND market=? "
-                        "  AND line=? AND book_id=?",
+                        "  AND line=? AND book_id=? "
+                        "  AND (pinnacle_close_prob IS NULL "
+                        "       OR ABS(pinnacle_close_prob - ?) > 1e-9)",
                         (pin_prob, clv_pct,
-                         fixture_id, side, market, line_val, book_id),
+                         fixture_id, side, market, line_val, book_id, pin_prob),
                     )
                 if cur.rowcount > 0:
                     affected = True
@@ -906,23 +910,27 @@ class BetRepo:
                     )
                 if cur.rowcount > 0:
                     affected = True
-            # UPDATE 2: CLV (no pending guard)
+            # UPDATE 2: CLV (no pending guard; guard skips if value unchanged)
             if pin_prob is not None:
                 if line_val is None:
                     cur.execute(
                         "UPDATE paper_bets SET pinnacle_close_prob=?, clv_pct=? "
                         "WHERE strategy_id=? AND fixture_id=? AND side=? AND market=? "
-                        "  AND line IS NULL AND book_id=?",
+                        "  AND line IS NULL AND book_id=? "
+                        "  AND (pinnacle_close_prob IS NULL "
+                        "       OR ABS(pinnacle_close_prob - ?) > 1e-9)",
                         (pin_prob, clv_pct,
-                         sid, fixture_id, side, market, book_id),
+                         sid, fixture_id, side, market, book_id, pin_prob),
                     )
                 else:
                     cur.execute(
                         "UPDATE paper_bets SET pinnacle_close_prob=?, clv_pct=? "
                         "WHERE strategy_id=? AND fixture_id=? AND side=? AND market=? "
-                        "  AND line=? AND book_id=?",
+                        "  AND line=? AND book_id=? "
+                        "  AND (pinnacle_close_prob IS NULL "
+                        "       OR ABS(pinnacle_close_prob - ?) > 1e-9)",
                         (pin_prob, clv_pct,
-                         sid, fixture_id, side, market, line_val, book_id),
+                         sid, fixture_id, side, market, line_val, book_id, pin_prob),
                     )
                 if cur.rowcount > 0:
                     affected = True
@@ -942,7 +950,7 @@ class BetRepo:
             return
         if now_utc is None:
             now_utc = datetime.utcnow()
-        now_str = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
+        now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S")
         sql = (
             "SELECT b.id, b.market, b.line, b.side, b.book_id, bk.name AS book, "
             "       b.odds, b.effective_odds, b.stake, b.actual_stake, "
@@ -954,6 +962,8 @@ class BetRepo:
             "JOIN books bk   ON bk.id = b.book_id "
             "WHERE f.kickoff_utc < ? "
             "  AND (b.result = 'pending' OR b.pinnacle_close_prob IS NULL) "
+            "  AND b.market <> 'btts' "
+            "  AND (b.market <> 'totals' OR b.line = 2.5) "
             "UNION ALL "
             "SELECT p.id, p.market, p.line, p.side, p.book_id, bk.name AS book, "
             "       p.odds, p.effective_odds, p.stake, p.actual_stake, "
@@ -965,7 +975,9 @@ class BetRepo:
             "JOIN books bk     ON bk.id = p.book_id "
             "JOIN strategies s ON s.id = p.strategy_id "
             "WHERE f.kickoff_utc < ? "
-            "  AND (p.result = 'pending' OR p.pinnacle_close_prob IS NULL)"
+            "  AND (p.result = 'pending' OR p.pinnacle_close_prob IS NULL) "
+            "  AND p.market <> 'btts' "
+            "  AND (p.market <> 'totals' OR p.line = 2.5)"
         )
         _KEYS = (
             "id", "market", "line", "side", "book_id", "book",
@@ -1008,7 +1020,12 @@ class BetRepo:
                 "home", "away", "kickoff_utc", "line", "book_id",
                 "sport_key",
             )
-            return [dict(zip(keys, row)) for row in self._cur.fetchall()]
+            out = []
+            for row_tuple in self._cur.fetchall():
+                d = dict(zip(keys, row_tuple))
+                d["sport"] = KEY_TO_LABEL.get(d["sport_key"], d["sport_key"])
+                out.append(d)
+            return out
         except Exception as e:
             print(f"[repo] WARN: fetch_paper_bets_for_compare failed: {e}",
                   file=sys.stderr)

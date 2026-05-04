@@ -196,17 +196,6 @@ def _clv_from_fdco(row: dict, fdco_row: dict) -> tuple[float | None, float | Non
     return round(pin_prob, 6), round(clv_pct, 6)
 
 
-# ── Repo factory (monkeypatchable in tests) ───────────────────────────────────
-
-def _make_repo(BetRepo):
-    """Construct BetRepo pointed at the project logs dir.
-
-    Separate function so tests can monkeypatch _make_repo to inject a
-    pre-wired SQLite repo without importing BetRepo at module level.
-    """
-    return BetRepo(logs_dir=_ROOT / "logs")
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -250,7 +239,7 @@ def main() -> None:
         print(f"  [fdco] {league}: {len(fdco_by_league[league])} fixtures indexed")
 
     from src.storage.repo import BetRepo as _BetRepo
-    repo = _make_repo(_BetRepo)
+    repo = _BetRepo(logs_dir=_ROOT / "logs")
 
     # Counters
     bet_w = bet_l = bet_void = 0
@@ -258,22 +247,12 @@ def main() -> None:
     clv_bets = 0
     clv_paper = 0
     no_match = 0
-    already_complete = 0
 
     # T5: driver loop
     for row in repo.iter_unsettled_or_no_clv(now_utc=now_utc.replace(tzinfo=None)):
         market = row.get("market", "h2h")
         side = row.get("side", "")
         is_paper = row.get("strategy_name") is not None
-
-        # Skip BTTS (no FDCO column)
-        if market == "btts":
-            continue
-        # Skip totals on non-2.5 lines
-        if market == "totals":
-            line_val = row.get("line")
-            if line_val is None or abs(float(line_val) - 2.5) > 0.001:
-                continue
 
         # --since filter
         if since:
@@ -321,7 +300,7 @@ def main() -> None:
 
         # Skip rows that need no update
         if new_result is None and pin_prob is None:
-            already_complete += 1
+            no_match += 1
             continue
 
         if args.dry_run:
@@ -387,7 +366,7 @@ def main() -> None:
         f"       clv backfilled: bets={clv_bets} paper={clv_paper}"
     )
     print(
-        f"       no FDCO match: {no_match} | already complete: {already_complete}"
+        f"       no FDCO match or no signal: {no_match}"
     )
 
 

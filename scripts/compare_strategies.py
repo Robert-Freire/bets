@@ -15,7 +15,6 @@ import math
 import os
 import statistics
 import sys
-from collections import Counter
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -25,9 +24,6 @@ if str(_ROOT) not in sys.path:
 from src.betting.strategies import STRATEGIES  # noqa: E402
 
 OUT_DOC = _ROOT / "docs" / "STRATEGY_COMPARISON.md"
-
-# Kept for backward-compat: drift index still uses the frozen drift.csv
-DRIFT_CSV = _ROOT / "logs" / "drift.csv"
 
 # Buckets for favourite-longshot bias slice. Bounds are [lo, hi).
 PROB_BUCKETS: list[tuple[float, float, str]] = [
@@ -40,57 +36,7 @@ PROB_BUCKETS: list[tuple[float, float, str]] = [
 ]
 
 
-# ── drift index (unchanged — reads frozen drift.csv) ─────────────────────────
-
-def _read_csv_if_exists(path: Path) -> list[dict]:
-    import csv
-    if not path.exists():
-        return []
-    with open(path, newline="") as f:
-        return list(csv.DictReader(f))
-
-
-def _load_drift_index() -> dict[tuple, tuple[float, float]] | None:
-    """Return {(kickoff, home, away, market, line, side): (prob_t60, prob_close)} or None."""
-    if not DRIFT_CSV.exists():
-        return None
-
-    t60: dict[tuple, float] = {}
-    t1:  dict[tuple, float] = {}
-
-    for row in _read_csv_if_exists(DRIFT_CSV):
-        pin_odds_str = row.get("pinnacle_odds", "")
-        if not pin_odds_str:
-            continue
-        try:
-            pin_prob = 1.0 / float(pin_odds_str)
-        except (ValueError, ZeroDivisionError):
-            continue
-
-        key = (
-            row.get("kickoff", ""),
-            row.get("home", ""),
-            row.get("away", ""),
-            row.get("market", ""),
-            str(row.get("line", "")),
-            row.get("side", ""),
-        )
-        t = row.get("t_minus_min", "")
-        try:
-            t_int = int(t)
-        except (ValueError, TypeError):
-            continue
-
-        if t_int == 60:
-            t60[key] = pin_prob
-        elif t_int == 1:
-            t1[key] = pin_prob
-
-    index = {k: (t60[k], t1[k]) for k in t60 if k in t1}
-    return index if index else None
-
-
-# ── _filter_to_current_window (kept for --all-history logic; no-op for DB rows) ─
+# ── _filter_to_current_window (no-op for DB rows) ────────────────────────────
 
 def _filter_to_current_window(rows: list[dict]) -> list[dict]:
     """No-op: DB rows don't carry strategy_config_hash; all rows are current."""
@@ -99,7 +45,7 @@ def _filter_to_current_window(rows: list[dict]) -> list[dict]:
 
 # ── stats ─────────────────────────────────────────────────────────────────────
 
-def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
+def _stats(rows: list[dict]) -> dict:
     n_bets = len(rows)
     clv_rows = [r for r in rows if r.get("clv_pct") not in ("", None)]
     n_with_clv = len(clv_rows)
@@ -154,35 +100,6 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
         total_pnl = sum(pnl_vals)
         roi_pct = (total_pnl / stake_sum * 100) if stake_sum > 0 else None
 
-    # Drift-toward-you
-    drift_pct = None
-    if drift_index:
-        moved_toward = 0
-        total_with_drift = 0
-        for r in rows:
-            key = (
-                r.get("kickoff", "") or r.get("kickoff_utc", ""),
-                r.get("home", ""),
-                r.get("away", ""),
-                r.get("market", ""),
-                str(r.get("line", "")),
-                r.get("side", ""),
-            )
-            if key in drift_index:
-                prob_t60, prob_close = drift_index[key]
-                total_with_drift += 1
-                if prob_close > prob_t60:
-                    moved_toward += 1
-        if total_with_drift:
-            drift_pct = moved_toward / total_with_drift
-
-    book_counter: Counter = Counter()
-    for r in clv_rows:
-        b = r.get("book", "")
-        if b:
-            book_counter[b] += 1
-    top_books = ", ".join(f"{b}({c})" for b, c in book_counter.most_common(3))
-
     return {
         "n_bets": n_bets,
         "n_with_clv": n_with_clv,
@@ -191,9 +108,6 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
         "ci95_half": ci95_half,
         "pos_clv": pos_clv,
         "avg_edge": avg_edge,
-        "book_dist": top_books,
-        "drift_pct": drift_pct,
-        # P&L
         "settled": settled,
         "wins": wins,
         "win_pct": win_pct,
@@ -393,11 +307,9 @@ def build_report(repo=None, all_history: bool = False) -> str:
     if not entries:
         return "No data found. Run the scanner first.\n"
 
-    drift_index = _load_drift_index()
-
     results = []
     for name, rows in entries:
-        s = _stats(rows, drift_index=drift_index)
+        s = _stats(rows)
         results.append((name, s))
     results.sort(key=lambda x: (
         x[1]["n_bets"] == 0,
@@ -426,19 +338,10 @@ def build_report(repo=None, all_history: bool = False) -> str:
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
 
-    drift_warnings: list[str] = []
-
     for name, s in results:
         marker = " ★" if name == best_name else ""
         low_n = s["n_with_clv"] < 10
         prefix = "[low n] " if low_n else ""
-
-        dp = s.get("drift_pct")
-        if dp is not None and s["n_bets"] >= 10 and dp in (0.0, 1.0):
-            drift_warnings.append(
-                f"⚠️ `{name}` drift={dp:.0%} with n={s['n_bets']} — likely sign error in drift direction."
-            )
-
         pnl_cols = _fmt_pnl_cols(s)
 
         if s["n_bets"] == 0:
@@ -450,9 +353,6 @@ def build_report(repo=None, all_history: bool = False) -> str:
                 f"{clv_ci} | {_fmt(s['median_clv'])} | {_fmt(s['pos_clv'])} | "
                 f"{_fmt(s['avg_edge'])} | {pnl_cols} |"
             )
-
-    if drift_warnings:
-        lines += ["", "**Drift sanity warnings:**"] + [f"- {w}" for w in drift_warnings]
 
     lines += [
         "",

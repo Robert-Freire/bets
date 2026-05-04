@@ -170,9 +170,10 @@ def test_main_settles_paper_bet_via_db(fresh_env, monkeypatch, tmp_path):
                         if (raw / f"{league}_2526.csv").exists() else None)
     monkeypatch.setattr(sys, "argv", ["backfill_clv_from_fdco.py", "--leagues", "E0"])
 
-    # Inject the pre-wired SQLite repo; patch close() to preserve conn for assertions
+    # Inject the pre-wired SQLite repo via module-level BetRepo patch
+    import src.storage.repo as repo_mod
     repo.close = lambda: None
-    monkeypatch.setattr(bf, "_make_repo", lambda BetRepoClass: repo)
+    monkeypatch.setattr(repo_mod, "BetRepo", lambda *a, **kw: repo)
 
     bf.main()
 
@@ -192,8 +193,9 @@ def _run_backfill_with_repo(monkeypatch, tmp_path, raw, repo, *argv):
                         lambda league: raw / f"{league}_2526.csv"
                         if (raw / f"{league}_2526.csv").exists() else None)
     monkeypatch.setattr(sys, "argv", ["backfill_clv_from_fdco.py", *argv])
+    import src.storage.repo as repo_mod
     repo.close = lambda: None  # prevent closing the shared SQLite conn
-    monkeypatch.setattr(bf, "_make_repo", lambda BetRepoClass: repo)
+    monkeypatch.setattr(repo_mod, "BetRepo", lambda *a, **kw: repo)
     bf.main()
 
 
