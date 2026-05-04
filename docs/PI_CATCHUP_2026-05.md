@@ -1,88 +1,124 @@
-# Pi Catch-up + Azure Onboarding Runbook — post-weekend 2026-05
+# Pi Catch-up + Azure A.10 Onboarding — Runbook
 
-One-time runbook. Delete after execution.
-
-**Timing:** do this Monday morning after the weekend scan data has landed, so Pi's historical CSVs are complete before the prod-DB import.
+**This file is a one-time runbook. Delete it after the final acceptance check passes.** Status tracked in CLAUDE.md "Implementation status" → A.10.
 
 ---
 
-## What needs doing
+## Context — read first, do not modify
 
-| Item | Type | Source doc |
+This section answers two questions the user explicitly raised before handing off:
+
+1. *Which fixes are deployed where?*
+2. *What data are we actually getting, and where does it live?*
+
+### Topology today
+
+| Surface | Code state | Data state |
 |---|---|---|
-| `git pull` + verify edge formula fix | Code sync | PR #23 |
-| B.3 cron (compute_book_skill) | Cron | PR #32 |
-| Stand up `kaunitz-prod-rg` + prod SQL DB | Azure A.10 step 1 | `PLAN_AZURE_2026-05.md` §A.10 |
-| Deploy prod dashboard (Container App) | Azure A.10 step 1 | same |
-| Open Pi firewall on prod SQL | Azure A.10 step 2 | same |
-| Set Pi env vars for DB write | Azure A.10 step 2 | same |
-| Run schema migration against prod DB | Azure A.10 step 2 | same |
-| Import Pi historical CSVs into prod DB | Azure A.10 step 2 | same |
-| Verify Pi rows appear in prod dashboard | Verification | same |
+| **WSL (dev)** at `/home/rfreire/projects/bets/`, branch `main` | Up-to-date with `main` (post-PR #38, #39). Scanner / FDCO backfill / dashboard / `compare_strategies` all **refuse to run without `BETS_DB_WRITE=1`**. CSV writes have been removed from BetRepo. | All bets / paper_bets / fixtures / book_skill rows live in **dev DB** `kaunitz-dev-sql-uksouth-rfk1.database.windows.net / kaunitz`. CSVs under `logs/` are gone for live data; only operational state JSONs remain (`bankroll.json`, `notified.json`, `team_xg.json`, `model_signals.json`). |
+| **Pi (prod)** at `robert@192.168.0.28:~/projects/bets/` | **HEAD unknown** — Pi has not been pulled in this sprint cycle. Phase 0 captures it. Critically: **Pi has not pulled `main` since A.9**, so Pi still has the pre-A.9 dual-write code (CSV + DB). Pulling `main` onto Pi *now* would break the cron because the scanner would refuse to run without env vars. | All bets / paper_bets live in **Pi-local CSVs** at `~/projects/bets/logs/`. None of this has ever been imported into any DB. The dev DB does not contain Pi data. |
+| **Dev dashboard** (Azure Container App `kaunitz-dev-dashboard-rfk1`) | Reads dev DB only. | Shows the WSL test stream only. Has never shown Pi production data. |
+| **Prod dashboard** | Does not exist. To be provisioned in Phase 1. | n/a |
+
+### Recently-merged changes that affect Pi when it eventually pulls
+
+| PR | Change | Pi impact when it pulls |
+|---|---|---|
+| #34 / #35 | Fixture calendar — `fixtures` table, `scripts/ingest_fixtures.py`, `FixtureRepo`. Mon 02:00 cron on WSL. | Dormant on Pi until env vars set. After Phase 4, Pi reads from prod DB via `FixtureRepo` automatically; no Pi-side ingest cron needed. |
+| #36 | Pyodbc connect retry with backoff (cold-start handling). | Active when DB writes are enabled. |
+| #37 | (Same as #36 — duplicate merge.) | Same. |
+| #38 (S.1–S.4) | DB-only result + CLV backfill. `backfill_clv_from_fdco.py` queries pending rows from DB and writes `result`/`pnl`/`settled_at`/`pinnacle_close_prob`/`clv_pct` back. | **Critical:** Pi's current cron runs the *old* CSV-walking version of this script. Once Pi pulls, it switches to DB-driven, which means Pi's CSV-only history needs to have been imported to DB first or the backfill won't see those rows. |
+| #39 (A.9) | CSV path decommissioned. Scanner / backfill / dashboard / `compare_strategies` exit 1 without `BETS_DB_WRITE=1`. | **Critical:** Pi's cron breaks until env vars are set. This is why Phase 4 sets env vars *before* Phase 6 pulls main. |
+
+### What's still uncertain until Phase 0 runs
+
+- The exact commit SHA on Pi.
+- Whether Pi has any uncommitted local edits (e.g. `config.json` divergence — historically Pi has had a hand-edited books array).
+- Pi's last successful cron run timestamp.
+- Whether the Pi has working `pyodbc` + ODBC Driver 18 (probably not — never installed because Pi has been CSV-only).
+
+Phase 0 captures all of this and writes it to a snapshot before any change.
 
 ---
 
-## Part 1 — Code sync on Pi
+## Bot execution rules
 
-```bash
-cd ~/projects/bets
-git pull
-pip install -r requirements.txt   # no new packages; harmless re-run
-```
-
-**Verify config.json books array landed (PR #25):**
-
-```bash
-python3 -c "from src.config import load_config; c = load_config(); print(len(c.get('books', [])), 'books')"
-# expect: 20 books
-```
-
-If 0, Pi has a locally-edited `config.json` that predates PR #25 — copy the `books` array from WSL.
-
-**Verify edge formula fix (PR #23) — critical:**
-
-Pi has been filtering/sizing bets with the wrong edge formula since before the cutover.
-Dry-run a scan to confirm flagged bets show edge values in the expected 2–8% range:
-
-```bash
-export $(cat .env) && python3 scripts/scan_odds.py --sports football --dry-run 2>&1 | grep -E "edge=|flagged|value bet"
-```
-
-No data to fix retroactively — past bets are recorded as-is. Going forward the formula is correct.
+- **Execute phases in order.** Each phase has pre-conditions, steps, acceptance criteria, and abort conditions. If a phase's acceptance fails, **stop and surface to the user** — do not proceed.
+- **Never `git pull` on Pi before Phase 6.** A.9 will break Pi's cron without env vars set.
+- **Never delete Pi CSVs.** They are the only copy of prod data until Phase 3 imports them. Phase 7 covers archiving.
+- **Branches.** Any Azure-side changes (e.g. infra-as-code if you choose to script it) go on `azure-A-10-<slug>`. Commits prefixed `A.10:`. Doc edits to CLAUDE.md / PLAN_AZURE land in the same branch.
+- **`BLOB_ARCHIVE=1` on Pi is OUT OF SCOPE.** This runbook only sets `BETS_DB_WRITE=1`. Pi blob archival is a separate sprint.
 
 ---
 
-## Part 2 — B.3 cron on Pi
+## Phase 0 — Pre-flight inventory (no changes) — ~15 min
 
-Without `BETS_DB_WRITE=1` + `BLOB_ARCHIVE=1`, `compute_book_skill.py` prints rows but doesn't persist.
-Add it now so it runs after A.10 activates DB write on Pi — it will auto-persist once the env vars are set.
+**Goal.** Capture Pi state before doing anything, so post-execution diff is clear and rollback is possible.
+
+### Steps
 
 ```bash
-# run on Pi:
-( crontab -l; echo "# book_skill compute — Monday 09:05 BST (after CLV backfill)"; echo "5 9 * * 1 cd ~/projects/bets && set -a && . ./.env && set +a && python3 scripts/compute_book_skill.py >> logs/book_skill.log 2>&1" ) | crontab -
-crontab -l | grep book_skill   # verify
+# From WSL
+mkdir -p /tmp/pi-snapshot-$(date +%Y-%m-%d)
+SNAP=/tmp/pi-snapshot-$(date +%Y-%m-%d)
+
+# 1. Pi git state
+ssh robert@192.168.0.28 'cd ~/projects/bets && git rev-parse HEAD' > "$SNAP/pi-head.txt"
+ssh robert@192.168.0.28 'cd ~/projects/bets && git status --short' > "$SNAP/pi-git-status.txt"
+ssh robert@192.168.0.28 'cd ~/projects/bets && git log --oneline -10' > "$SNAP/pi-git-log.txt"
+
+# 2. Compare Pi HEAD against current main
+PI_HEAD=$(cat "$SNAP/pi-head.txt")
+git -C ~/projects/bets log --oneline "$PI_HEAD..origin/main" > "$SNAP/pi-behind-main.txt"
+# This shows commits Pi will get when it eventually pulls. Sanity-check there are
+# no surprises — should be the PRs listed in the Context section above.
+
+# 3. Pi cron
+ssh robert@192.168.0.28 'crontab -l' > "$SNAP/pi-crontab.txt"
+
+# 4. Pi data
+ssh robert@192.168.0.28 'cd ~/projects/bets/logs && ls -la' > "$SNAP/pi-logs-listing.txt"
+ssh robert@192.168.0.28 'cd ~/projects/bets/logs && wc -l bets.csv paper/*.csv 2>/dev/null' > "$SNAP/pi-row-counts.txt"
+ssh robert@192.168.0.28 'cd ~/projects/bets/logs && tail -1 scan.log 2>/dev/null' > "$SNAP/pi-last-scan.txt"
+
+# 5. Pi runtime — pyodbc availability
+ssh robert@192.168.0.28 'python3 -c "import pyodbc; print(pyodbc.drivers())"' \
+  > "$SNAP/pi-pyodbc.txt" 2>&1 || echo "(pyodbc not installed — Phase 4a will install)" >> "$SNAP/pi-pyodbc.txt"
 ```
+
+### Acceptance
+
+- [ ] All seven snapshot files exist and are non-empty.
+- [ ] `pi-behind-main.txt` lists at least the A.9 commit (`ed3cbf2`) and the S.1–S.4 commit (`30334aa`). If it doesn't, Pi may have been pulled mid-sprint — surface to user.
+- [ ] `pi-row-counts.txt` shows non-zero `bets.csv` row count. If zero, **abort** — there is no data to migrate, and the user needs to investigate why.
+
+### Abort conditions
+
+- Pi unreachable over SSH → confirm laptop is on the right network.
+- `git status` on Pi shows uncommitted changes → surface to user; don't proceed until those are committed or stashed by the user.
 
 ---
 
-## Part 3 — Stand up `kaunitz-prod-rg` (Azure A.10 step 1)
+## Phase 1 — Provision `kaunitz-prod-rg` — ~45 min
 
-Run from WSL (the `az` CLI is there). All naming follows the dev pattern with `prod` substituted.
+**Goal.** Stand up the prod Azure stack: RG, SQL server + DB, Key Vault. Container App for the dashboard is **deferred to Phase 7** so we don't spend it on the critical path.
 
-### 3a. Resource group
+**Pre-conditions.**
+- Phase 0 acceptance met.
+- WSL has `az` CLI authenticated to the subscription.
+- A fresh password generated for the prod SQL admin (save in Bitwarden as **"Azure SQL — kaunitz prod DB"** before running).
+
+### 1a. Resource group
 
 ```bash
 az group create -n kaunitz-prod-rg -l uksouth \
   --tags env=prod project=kaunitz owner=rfreire
 ```
 
-### 3b. SQL server + DB
-
-Use `--use-free-limit` here — this is the once-per-subscription free offer, reserved for prod per the architecture decision in `PLAN_AZURE_2026-05.md`.
+### 1b. SQL server + DB
 
 ```bash
-# Generate a password, save it in Bitwarden as "Azure SQL — kaunitz prod DB" before running
-PROD_SQL_PASSWORD=<generate>
+PROD_SQL_PASSWORD=<paste from Bitwarden>
 
 az sql server create -g kaunitz-prod-rg \
   -n kaunitz-prod-sql-uksouth-rfk1 \
@@ -90,6 +126,7 @@ az sql server create -g kaunitz-prod-rg \
   --admin-user kaunitzadmin \
   --admin-password "$PROD_SQL_PASSWORD"
 
+# Try free tier first
 az sql db create -g kaunitz-prod-rg \
   -s kaunitz-prod-sql-uksouth-rfk1 \
   -n kaunitz \
@@ -97,10 +134,9 @@ az sql db create -g kaunitz-prod-rg \
   --free-limit-exhaustion-behavior AutoPause
 ```
 
-If `--use-free-limit` is unavailable (quota gone), fall back to serverless with a longer pause delay:
+If `--use-free-limit` fails (quota already used by dev), fall back to serverless:
 
 ```bash
-# Fallback only:
 az sql db create -g kaunitz-prod-rg \
   -s kaunitz-prod-sql-uksouth-rfk1 \
   -n kaunitz \
@@ -109,70 +145,364 @@ az sql db create -g kaunitz-prod-rg \
   --backup-storage-redundancy Local
 ```
 
-### 3c. Firewall rules
+### 1c. Firewall rules
 
 ```bash
-# Azure services
 az sql server firewall-rule create -g kaunitz-prod-rg \
   -s kaunitz-prod-sql-uksouth-rfk1 \
   -n AllowAzureServices --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
 
-# WSL (for migrations + admin queries)
-MY_IP=$(curl -s https://api.ipify.org)
+# WSL (for migration + admin)
+WSL_IP=$(curl -s https://api.ipify.org)
 az sql server firewall-rule create -g kaunitz-prod-rg \
   -s kaunitz-prod-sql-uksouth-rfk1 \
-  -n AllowWSL --start-ip-address "$MY_IP" --end-ip-address "$MY_IP"
+  -n AllowWSL --start-ip-address "$WSL_IP" --end-ip-address "$WSL_IP"
 
-# Pi public IP (needed for dual-write) — find it first:
+# Pi (needed in Phase 4)
 PI_IP=$(ssh robert@192.168.0.28 'curl -s https://api.ipify.org')
 az sql server firewall-rule create -g kaunitz-prod-rg \
   -s kaunitz-prod-sql-uksouth-rfk1 \
   -n AllowPi --start-ip-address "$PI_IP" --end-ip-address "$PI_IP"
+
+echo "WSL_IP=$WSL_IP"; echo "PI_IP=$PI_IP"   # save these for the snapshot dir
 ```
 
-### 3d. Key Vault + secrets
+### 1d. Key Vault + secrets
 
 ```bash
 az keyvault create -g kaunitz-prod-rg \
   -n kaunitz-prod-kv-rfk1 \
   -l uksouth
 
-az keyvault secret set \
-  --vault-name kaunitz-prod-kv-rfk1 \
-  -n sql-admin-password \
-  --value "$PROD_SQL_PASSWORD"
+az keyvault secret set --vault-name kaunitz-prod-kv-rfk1 \
+  -n sql-admin-password --value "$PROD_SQL_PASSWORD"
 
-# Full pyodbc DSN for app container and Pi:
 PROD_DSN="Driver={ODBC Driver 18 for SQL Server};Server=tcp:kaunitz-prod-sql-uksouth-rfk1.database.windows.net,1433;Database=kaunitz;Uid=kaunitzadmin;Pwd=${PROD_SQL_PASSWORD};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
-az keyvault secret set \
-  --vault-name kaunitz-prod-kv-rfk1 \
-  -n sql-dsn \
-  --value "$PROD_DSN"
+
+az keyvault secret set --vault-name kaunitz-prod-kv-rfk1 \
+  -n sql-dsn --value "$PROD_DSN"
 ```
 
-### 3e. Schema migration
+### 1e. Schema migration
 
 ```bash
 export AZURE_SQL_DSN="$PROD_DSN"
 python3 src/storage/migrate.py --dsn "$AZURE_SQL_DSN"
-# expect: "+N tables"; second run: "no changes"
+# expected: "+N tables"
+
 python3 src/storage/migrate.py --dsn "$AZURE_SQL_DSN"
+# expected on second run: "no changes"
 ```
 
-### 3f. Prod dashboard (Container App)
+### Acceptance
 
-Mirror the dev setup. Reuse the same ACR image (`kaunitzdevacrrfk1`) — rebuild only if app.py changed significantly.
+- [ ] `az sql db show -g kaunitz-prod-rg -s kaunitz-prod-sql-uksouth-rfk1 -n kaunitz --query status` returns `Online` (or `Paused`, both fine).
+- [ ] `python3 -c "import pyodbc; pyodbc.connect('$PROD_DSN').execute('SELECT 1')"` from WSL returns without error.
+- [ ] `python3 -c "import pyodbc; print([r[0] for r in pyodbc.connect('$PROD_DSN').execute('SELECT name FROM sys.tables').fetchall()])"` lists at least: `bets`, `paper_bets`, `fixtures`, `books`, `strategies`, `closing_lines`, `drift`, `book_skill`.
+
+### Abort
+
+- SQL server provisioning fails → check subscription quota; user may need to provision in a different region.
+
+---
+
+## Phase 2 — Backup Pi data — ~10 min
+
+**Goal.** Defensive snapshot of Pi CSVs to a place that survives anything in Phases 3–6.
 
 ```bash
-# Container Apps environment
-az containerapp env create \
-  -g kaunitz-prod-rg \
-  -n kaunitz-prod-env \
-  -l uksouth
+SNAP=/tmp/pi-snapshot-$(date +%Y-%m-%d)
+rsync -av robert@192.168.0.28:~/projects/bets/logs/ "$SNAP/pi-logs/"
 
-# Container app (system-assigned identity for KV access)
-az containerapp create \
-  -g kaunitz-prod-rg \
+# Tar it
+tar -C "$SNAP" -czf "$SNAP/pi-logs.tgz" pi-logs/
+
+# Upload to prod blob (create container first if needed)
+az storage account create -g kaunitz-prod-rg \
+  -n kaunitzprodstrfk1 -l uksouth --sku Standard_LRS
+
+az storage container create --account-name kaunitzprodstrfk1 \
+  -n pi-csv-archive --auth-mode login
+
+az storage blob upload --account-name kaunitzprodstrfk1 \
+  --container-name pi-csv-archive \
+  -f "$SNAP/pi-logs.tgz" \
+  -n "pi-logs-$(date +%Y-%m-%d).tgz" \
+  --auth-mode login
+```
+
+### Acceptance
+
+- [ ] `pi-logs.tgz` exists locally, is at least 100KB.
+- [ ] Blob upload completes; `az storage blob list --account-name kaunitzprodstrfk1 -c pi-csv-archive --auth-mode login` shows the file.
+
+---
+
+## Phase 3 — Import Pi historical CSVs into prod DB — ~20 min
+
+**Goal.** Every Pi CSV row becomes a row in prod DB before Pi starts writing live.
+
+The migrator was archived in PR #39 to `scripts/archive/migrate_csv_to_db.py`. It still works — the move was about discoverability, not deprecation.
+
+```bash
+SNAP=/tmp/pi-snapshot-$(date +%Y-%m-%d)
+export AZURE_SQL_DSN="$PROD_DSN"   # same DSN as Phase 1
+export BETS_DB_WRITE=1
+
+# Sanity: dry-run first to see what would be inserted
+python3 scripts/archive/migrate_csv_to_db.py \
+  --bets-csv "$SNAP/pi-logs/bets.csv" \
+  --paper-dir "$SNAP/pi-logs/paper/" \
+  --dsn "$AZURE_SQL_DSN" \
+  --dry-run
+
+# Real run
+python3 scripts/archive/migrate_csv_to_db.py \
+  --bets-csv "$SNAP/pi-logs/bets.csv" \
+  --paper-dir "$SNAP/pi-logs/paper/" \
+  --dsn "$AZURE_SQL_DSN"
+```
+
+### Acceptance
+
+```bash
+# Row counts: DB should match CSVs (within 1–2 of duplicates skipped)
+python3 -c "
+import pyodbc, csv
+c = pyodbc.connect('$PROD_DSN')
+db_bets = c.execute('SELECT COUNT(*) FROM bets').fetchone()[0]
+db_paper = c.execute('SELECT COUNT(*) FROM paper_bets').fetchone()[0]
+csv_bets = sum(1 for _ in open('$SNAP/pi-logs/bets.csv')) - 1
+print(f'bets: csv={csv_bets} db={db_bets}')
+print(f'paper_bets: db={db_paper}')
+"
+```
+
+- [ ] DB `bets` count is within 5 of CSV `bets.csv` count (small delta acceptable from header / blank lines / dedup).
+- [ ] DB `paper_bets` count > 0.
+- [ ] `python3 scripts/archive/migrate_csv_to_db.py --dsn ... --dry-run` re-run reports zero new inserts (idempotency check).
+
+### Abort
+
+- DB count is dramatically smaller than CSV count → migrator may have hit an error mid-run; check stderr, fix, re-run (idempotent).
+
+---
+
+## Phase 4 — Set Pi env vars + open firewall — ~15 min
+
+**Goal.** Pi starts dual-writing to prod DB **without changing Pi code yet**. Pi is on pre-A.9 code that still has dual-write paths, so simply setting the env vars activates DB writes alongside the existing CSV writes.
+
+This phase is the riskiest — it's the moment Pi starts touching the network mid-cron. Pi continues writing CSVs, so worst-case rollback is just unsetting the env vars.
+
+### 4a. Install ODBC Driver 18 on Pi if needed
+
+If Phase 0 captured `pi-pyodbc.txt` showing `pyodbc not installed`:
+
+```bash
+ssh robert@192.168.0.28 << 'EOF'
+sudo apt-get update
+sudo apt-get install -y unixodbc-dev
+# Microsoft repo for ODBC Driver 18 — Raspberry Pi OS Trixie / Debian 13:
+curl https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+echo "deb [arch=arm64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/13/prod trixie main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
+sudo apt-get update
+sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+pip install pyodbc
+python3 -c "import pyodbc; print('OK', pyodbc.drivers())"
+EOF
+```
+
+### 4b. Smoke-test Pi → prod DB connection
+
+```bash
+ssh robert@192.168.0.28 << EOF
+python3 -c "
+import pyodbc
+c = pyodbc.connect('$PROD_DSN')
+print('connected:', c.execute('SELECT 1').fetchone()[0])
+"
+EOF
+```
+
+If this fails: most likely the firewall rule from Phase 1c didn't pin the right Pi IP (e.g. ISP rotated). Re-run the Pi-IP detection and `firewall-rule create`.
+
+### 4c. Add env vars to Pi `.env`
+
+```bash
+# Append to Pi's .env. Use a heredoc to avoid escape pain.
+ssh robert@192.168.0.28 "cat >> ~/projects/bets/.env << 'EOF'
+
+# A.10: Azure prod DB writes (added $(date +%Y-%m-%d))
+BETS_DB_WRITE=1
+AZURE_SQL_DSN=${PROD_DSN}
+EOF"
+
+# Verify
+ssh robert@192.168.0.28 'tail -5 ~/projects/bets/.env'
+```
+
+### 4d. Trigger ad-hoc scan to verify dual-write
+
+```bash
+ssh robert@192.168.0.28 'cd ~/projects/bets && export $(grep -v "^#" .env | xargs) && python3 scripts/scan_odds.py --sports football --dry-run' 2>&1 | tail -20
+```
+
+Expect:
+- `[scan] Dual-write mode: CSV + Azure SQL` (Pi is still on pre-A.9 code).
+- No `pyodbc` errors.
+
+### Acceptance
+
+- [ ] Pi's next scheduled cron (next slot in Phase 0's `pi-crontab.txt`) writes rows to **both** CSVs and prod DB.
+- [ ] `python3 -c "import pyodbc; c = pyodbc.connect('$PROD_DSN'); print(c.execute('SELECT COUNT(*) FROM bets WHERE scanned_at >= CAST(SYSUTCDATETIME() AS DATE)').fetchone()[0])"` returns ≥1 after Pi's first post-Phase-4 cron.
+- [ ] Pi CSVs continue growing (run `wc -l ~/projects/bets/logs/bets.csv` before and after a cron — count must increase).
+
+### Rollback
+
+- If anything goes wrong after Phase 4c: `ssh robert@192.168.0.28 'sed -i "/^BETS_DB_WRITE=/d; /^AZURE_SQL_DSN=/d" ~/projects/bets/.env'`. Pi reverts to CSV-only.
+
+---
+
+## Phase 5 — Soak (24–48 hours, no action) — wait
+
+**Goal.** Watch two consecutive Pi crons land in DB cleanly before any code change.
+
+Monitor at a glance:
+
+```bash
+# Run from WSL
+python3 -c "
+import pyodbc
+c = pyodbc.connect('$PROD_DSN')
+print('Pi rows by day:')
+for r in c.execute('''
+  SELECT CAST(scanned_at AS DATE) AS day, COUNT(*)
+  FROM bets GROUP BY CAST(scanned_at AS DATE) ORDER BY day DESC
+''').fetchmany(7):
+  print(' ', r[0], r[1])
+"
+```
+
+### Acceptance (do not proceed until ALL hold)
+
+- [ ] At least 2 cron-driven scans on Pi have landed rows in DB.
+- [ ] CSV row counts and DB row counts (filtered to those days) match within 5.
+- [ ] Mon 08:10 UTC audit-invariants GH Actions workflow has run since Phase 4c and passed.
+
+### Abort during soak
+
+- DB rows missing for a Pi cron → check Pi's cron mail for pyodbc errors; verify firewall hasn't rotated; verify SQL DB hasn't auto-paused for too long.
+
+---
+
+## Phase 6 — Pull `main` onto Pi (A.9 alignment) — ~15 min
+
+**Goal.** Pi runs identical code to WSL. After this, Pi is DB-only — CSVs are no longer written.
+
+**Pre-conditions.**
+- Phase 5 acceptance met.
+- Pi env vars confirmed set (re-check with `ssh robert@192.168.0.28 'grep BETS_DB_WRITE ~/projects/bets/.env'`).
+- A pre-pull SHA captured for rollback: `PRE_PULL_SHA=$(cat $SNAP/pi-head.txt)`.
+
+### Steps
+
+```bash
+ssh robert@192.168.0.28 << EOF
+cd ~/projects/bets
+PRE_PULL_SHA=\$(git rev-parse HEAD)
+echo "\$PRE_PULL_SHA" > .pre-A10-sha   # rollback marker
+
+git pull
+pip install -r requirements.txt   # in case Azure SDK pins changed
+
+# Sanity: scanner refuses without env (proving A.9 guard works)
+python3 scripts/scan_odds.py --sports football --dry-run 2>&1 | head -5
+# expected: ERROR + sys.exit(1) IF env not loaded
+# (the cron loads env explicitly, so this is informational only)
+
+# With env: should run
+export \$(grep -v "^#" .env | xargs)
+python3 scripts/scan_odds.py --sports football --dry-run 2>&1 | tail -5
+# expected: "[scan] DB mode: Azure SQL" — no errors
+EOF
+```
+
+### 6a. Add Mon 02:00 fixture-calendar ingest cron — NO
+
+After Phase 4c sets `BETS_DB_WRITE=1` on Pi, `FixtureRepo` is active. The Mon 02:00 ingest stays on **WSL only** (writes to dev DB) — Pi reads `fixtures` from prod DB but does not need to ingest. Verify:
+
+```bash
+ssh robert@192.168.0.28 "cd ~/projects/bets && export \$(grep -v '^#' .env | xargs) && python3 -c 'from src.data.fixture_calendar import calendar_available; print(calendar_available())'"
+# expected: True (prod DB is reachable and has fixtures)
+```
+
+If this returns False, the fixtures table in prod DB is empty — Phase 1e ran the schema but no ingest. Run a one-shot WSL → prod ingest:
+
+```bash
+export AZURE_SQL_DSN="$PROD_DSN"
+export BETS_DB_WRITE=1
+python3 scripts/ingest_fixtures.py
+unset AZURE_SQL_DSN BETS_DB_WRITE
+```
+
+### 6b. Add B.3 `compute_book_skill` cron on Pi (now active because BETS_DB_WRITE=1)
+
+```bash
+ssh robert@192.168.0.28 << 'EOF'
+( crontab -l 2>/dev/null
+  echo "# A.10: book_skill compute — Mon 09:05 UTC (after Mon 08:00 CLV backfill)"
+  echo "5 9 * * 1 cd ~/projects/bets && set -a && . ./.env && set +a && python3 scripts/compute_book_skill.py 2>&1" ) | crontab -
+crontab -l | grep book_skill
+EOF
+```
+
+### Acceptance
+
+- [ ] `ssh ... 'cd ~/projects/bets && git rev-parse HEAD'` matches origin/main.
+- [ ] First post-pull cron run on Pi writes to DB (`SELECT COUNT(*) FROM bets WHERE scanned_at >= ...` increments).
+- [ ] No new `.csv` files appear in `~/projects/bets/logs/` after Phase 6 (CSV write paths are gone in A.9). Existing files frozen — that's fine.
+- [ ] `pi-logs/scan.log` shows `[scan] DB mode: Azure SQL` line, no pyodbc errors.
+
+### Rollback
+
+```bash
+ssh robert@192.168.0.28 << EOF
+cd ~/projects/bets
+git reset --hard \$(cat .pre-A10-sha)
+EOF
+# Pi reverts to pre-A.9 code; dual-write resumes; CSVs grow again.
+```
+
+---
+
+## Phase 7 — Cleanup + (optional) prod dashboard — ~30 min
+
+### 7a. Mark A.10 done
+
+Edit `CLAUDE.md` "Implementation status" — replace the A.10 row with:
+
+```
+| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | ✅ done <YYYY-MM-DD> — Pi writes to prod DB; identical code to WSL |
+```
+
+Edit `docs/PLAN_AZURE_2026-05.md` phase tracker similarly. Add the prod resource names to a "Prod stack" subsection if not already there.
+
+### 7b. Delete this file
+
+```bash
+git rm docs/PI_CATCHUP_2026-05.md
+```
+
+Memory pointers (`memory/MEMORY.md`) referencing this doc need cleanup too — search for `PI_CATCHUP` and update.
+
+### 7c. (Optional) Provision prod dashboard
+
+Reuse the dev ACR image (`kaunitzdevacrrfk1.azurecr.io/dashboard:latest`) — there's nothing prod-specific in the image, the connection string is wired via env vars.
+
+```bash
+az containerapp env create -g kaunitz-prod-rg -n kaunitz-prod-env -l uksouth
+
+az containerapp create -g kaunitz-prod-rg \
   -n kaunitz-prod-dashboard-rfk1 \
   --environment kaunitz-prod-env \
   --image kaunitzdevacrrfk1.azurecr.io/dashboard:latest \
@@ -182,120 +512,39 @@ az containerapp create \
   --cpu 0.25 --memory 0.5Gi \
   --system-assigned
 
-# Grant identity access to ACR + KV
 IDENTITY=$(az containerapp show -g kaunitz-prod-rg -n kaunitz-prod-dashboard-rfk1 \
   --query "identity.principalId" -o tsv)
 ACR_ID=$(az acr show -n kaunitzdevacrrfk1 --query id -o tsv)
-KV_ID=$(az keyvault show -n kaunitz-prod-kv-rfk1 --query id -o tsv)
 
 az role assignment create --assignee "$IDENTITY" --role AcrPull --scope "$ACR_ID"
 az keyvault set-policy -n kaunitz-prod-kv-rfk1 \
   --object-id "$IDENTITY" --secret-permissions get list
 
-# Wire KV secret into container env
+DSN_SECRET_ID=$(az keyvault secret show --vault-name kaunitz-prod-kv-rfk1 -n sql-dsn --query id -o tsv)
 az containerapp secret set -g kaunitz-prod-rg -n kaunitz-prod-dashboard-rfk1 \
-  --secrets "sql-dsn=keyvaultref:$(az keyvault secret show --vault-name kaunitz-prod-kv-rfk1 -n sql-dsn --query id -o tsv),identityref:system"
+  --secrets "sql-dsn=keyvaultref:${DSN_SECRET_ID},identityref:system"
 
 az containerapp update -g kaunitz-prod-rg -n kaunitz-prod-dashboard-rfk1 \
   --set-env-vars "BETS_DB_WRITE=1" "AZURE_SQL_DSN=secretref:sql-dsn"
-
-# Auth (reuse same Google OAuth client — just add new redirect URI in Google Cloud Console first)
-az containerapp auth google update \
-  -g kaunitz-prod-rg -n kaunitz-prod-dashboard-rfk1 \
-  --client-id <same-google-client-id-as-dev> \
-  --client-secret-name sql-dsn   # temp placeholder — update after wiring google secret
-
-# TODO: wire google-client-secret into KV and container the same way as dev (A.7)
-
-PROD_FQDN=$(az containerapp show -g kaunitz-prod-rg -n kaunitz-prod-dashboard-rfk1 \
-  --query "properties.configuration.ingress.fqdn" -o tsv)
-echo "Prod dashboard: https://$PROD_FQDN"
 ```
+
+Wire Google OIDC the same way A.7 did for dev. **Memory note `project_container_apps_auth`** has the gotchas — `az containerapp auth update` has no `--allowed-principals` flag; allowlist is enforced at app level.
+
+### 7d. (Optional, post-soak ≥1 week) Archive Pi CSVs and stop writing them
+
+Pi is on A.9 code now; CSVs have stopped growing. The historical CSVs are already imported (Phase 3) and backed up to blob (Phase 2). Safe to delete Pi-side:
+
+```bash
+ssh robert@192.168.0.28 'cd ~/projects/bets/logs && tar -czf /tmp/pi-logs-final.tgz bets.csv paper/ closing_lines.csv drift.csv 2>/dev/null && rm -f bets.csv && rm -rf paper/ && rm -f closing_lines.csv drift.csv'
+```
+
+Don't do this in the same sprint as A.10 lands. Wait at least one full weekend cycle of clean DB writes.
 
 ---
 
-## Part 4 — Onboard Pi to prod DB (Azure A.10 step 2)
+## What this runbook deliberately does NOT do
 
-### 4a. Verify ODBC Driver 18 on Pi
-
-```bash
-ssh robert@192.168.0.28 'python3 -c "import pyodbc; print(pyodbc.drivers())"'
-# expect: ODBC Driver 18 for SQL Server in list
-# if not: install from Microsoft repo
-```
-
-### 4b. Import Pi historical CSVs into prod DB
-
-Run from WSL, pointing at Pi's CSV files over SSH or after a local rsync:
-
-```bash
-# Option A: rsync Pi CSVs to a temp dir, then import
-rsync -av robert@192.168.0.28:~/projects/bets/logs/ /tmp/pi-logs/
-
-export AZURE_SQL_DSN="$PROD_DSN"
-python3 scripts/migrate_csv_to_db.py \
-  --bets-csv /tmp/pi-logs/bets.csv \
-  --paper-dir /tmp/pi-logs/paper/ \
-  --dsn "$AZURE_SQL_DSN"
-# Idempotent — safe to re-run; uses deterministic UUIDs
-```
-
-### 4c. Add env vars to Pi's `.env`
-
-```bash
-ssh robert@192.168.0.28 'cat >> ~/projects/bets/.env << EOF
-
-# A.10: Azure prod DB dual-write (added 2026-05-XX)
-BETS_DB_WRITE=1
-AZURE_SQL_DSN=Driver={ODBC Driver 18 for SQL Server};Server=tcp:kaunitz-prod-sql-uksouth-rfk1.database.windows.net,1433;Database=kaunitz;Uid=kaunitzadmin;Pwd=REPLACE_WITH_PASSWORD;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;
-EOF'
-# Then edit the file on Pi to replace REPLACE_WITH_PASSWORD with the actual password from Bitwarden
-```
-
-**Pi-safety contract: do NOT set `BLOB_ARCHIVE=1` or any `AZURE_BLOB_*` vars on Pi yet** — blob archival for Pi is separate (A.10 extension, deferred).
-
-### 4d. Smoke-test Pi dual-write
-
-```bash
-ssh robert@192.168.0.28 'cd ~/projects/bets && export $(cat .env) && python3 scripts/scan_odds.py --sports football --dry-run 2>&1 | tail -10'
-# expect: no pyodbc / DB errors; "[scan] DB write active" or similar confirmation line
-```
-
----
-
-## Part 5 — Verification
-
-```bash
-# Pi rows visible in prod DB
-python3 -c "
-import pyodbc
-c = pyodbc.connect('$PROD_DSN')
-print('bets:', c.execute('SELECT COUNT(*) FROM bets').fetchone()[0])
-print('paper_bets:', c.execute('SELECT COUNT(*) FROM paper_bets').fetchone()[0])
-"
-
-# Prod dashboard renders Pi data
-curl -s "https://$PROD_FQDN/health"   # expect 200 {"db":"ok","csv":"ok"}
-# Browser: sign in → confirm bet rows appear
-```
-
----
-
-## What stays deferred (do NOT do this week)
-
-- **A.9** (decommission Pi CSV writes) — do after ≥1 week of clean dual-write on Pi
-- **Blob archive on Pi** (`BLOB_ARCHIVE=1`) — separate step after A.10 is stable
-- **`migrate_csv_to_db.py` pointing at `--check-sports` output** — not urgent
-- **compute_book_skill.py persistence on Pi** — will auto-activate once `BETS_DB_WRITE=1` is in `.env` (Part 4c above) and `BLOB_ARCHIVE` is later set
-- **Fixture calendar on Pi** — after A.10 onboards Pi to prod SQL, no Pi-side ingest is needed.
-  Pi reads `fixtures` from prod SQL automatically via `FixtureRepo` (activated by the same `BETS_DB_WRITE=1` + DSN env vars set in Part 4c).
-  Verify post-A.10 with:
-  ```
-  python3 -c 'from src.data.fixture_calendar import calendar_available; print(calendar_available())'
-  ```
-  The Mon 02:00 ingest cron on Pi is not needed — WSL remains the sole ingester until A.10; after A.10 the same WSL cron writes to prod SQL which Pi reads.
-
-## After completing
-
-Delete this file. Update CLAUDE.md A.10 status to ✅ Done with date and the prod resource names.
-Update `PLAN_AZURE_2026-05.md` phase tracker for A.10.
+- **Doesn't enable `BLOB_ARCHIVE=1` on Pi.** Raw API archival from Pi is a separate sprint (provision a Pi-accessible blob container, decide on lifecycle).
+- **Doesn't migrate Pi state JSONs (`bankroll.json`, `notified.json`, etc.) to DB.** That's the F.* file-decommission sprint (`docs/PLAN_FILE_DECOMMISSION_2026-05.md`).
+- **Doesn't unify the Pi cron with WSL cron.** Pi keeps its `refresh_xg.py` and `research_scan.py` slots; WSL keeps the `ingest_fixtures.py` slot. Cron divergence stays per `project_dev_prod_split` memory.
+- **Doesn't touch dev DB.** The dev stack continues running independently as a parallel test stream.

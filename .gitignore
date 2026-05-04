@@ -17,3 +17,4 @@ logs/paper/*.csv
 logs/*.json
 logs/model_eval/*.csv
 logs/bets.csv
+docs/BOOKS.md

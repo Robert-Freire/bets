@@ -82,7 +82,9 @@ NTFY_TOPIC_OVERRIDE=   # empty = silence ntfy on test stream
 
 **Never** run manual scans on the Pi against the prod key (one exception: the post-cutover validation run on 2026-05-01).
 
-### A.9 DB-only writes to Azure SQL — WSL only (Pi must NOT set these)
+### Azure SQL DB writes — WSL only (Pi must NOT set these)
+
+After A.9, these env vars are **required** for the scanner, FDCO backfill, dashboard, and `compare_strategies` — those scripts now exit with an error if `BETS_DB_WRITE` is unset.
 
 ```bash
 BETS_DB_WRITE=1
@@ -109,7 +111,7 @@ AZURE_BLOB_CONN="DefaultEndpointsProtocol=https;AccountName=kaunitzdevstrfk1;...
 # AZURE_BLOB_CONTAINER=raw-api-snapshots
 ```
 
-**Pi-safety contract.** Without these env vars, `BetRepo` and `SnapshotArchive` stay dormant and never import `pyodbc` / `azure.storage.blob`. After `git pull` on Pi, behavior is byte-identical to pre-A.4/A.5.5. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
+**Pi-safety contract (post-A.9).** `BetRepo` and `SnapshotArchive` import lazily and stay dormant when env vars are unset. **However**, after A.9 the scanner (`scan_odds.main`) and the FDCO backfill (`backfill_clv_from_fdco`) **refuse to run** without `BETS_DB_WRITE=1` — silent CSV fallback is gone. If the Pi pulls main without env vars set, those scripts will exit with a clear error rather than drop bets silently. A.10 onboards Pi to its own DB; until then, do not pull main onto the Pi. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
 
 API budget: free tier 500 credits/month per key. Cost per call = `regions × markets`; each league fetch is `uk,eu × h2h,totals` = 4 credits. Current schedule: 5 scans/wk × 6 leagues × 4 cr × 4.345 wk ≈ **~520/mo theoretical ceiling**, less in practice (canary skip on empty-fixture days saves ~20 cr/scan; off-season league windows reduce further). Bi-weekly sports check adds ~20 cr/mo. The BTTS follow-up call 422s on free tier without charging. Migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
 
@@ -127,9 +129,8 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 
 # CLV + housekeeping (both machines)
 0  2  * * 1     Mon 02:00           — fixture calendar ingest (fixtures table in Azure SQL)
-0  8  * * 1     Mon 08:00           — football-data.co.uk CLV backfill
+0  8  * * 1     Mon 08:00           — football-data.co.uk CLV + result backfill (DB-only since S.4)
 0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
-0  3  * * *     Daily 3am           — (bets.csv backup cron removed; DB is now sole source of truth)
 
 # Pi only (WSL would conflict on git-tracked outputs)
 0  6  * * 1     Mon 06:00           — refresh logs/team_xg.json from Understat
@@ -152,6 +153,7 @@ scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMP
 scripts/archive/migrate_csv_to_db.py  One-shot CSV → DB importer (archived; used once for A.3 backfill)
 scripts/compute_book_skill.py  Per-(book, league, market) skill + bias signals → book_skill table (B.0.5 + B.0.6)
 scripts/ingest_fixtures.py  Mon 02:00 fixture calendar ingest → fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
+scripts/remediate_fixture_uuids.py  One-shot UUID remediation; reference for any future fixture-key shape change
 
 app.py                      Flask dashboard
 templates/index.html        Dashboard UI
@@ -177,7 +179,7 @@ logs/backfill_clv.log       FDCO backfill output
 logs/ingest_fixtures.log    Fixture ingest output
 logs/closing_line.log       (frozen; closing_line.py paused — historical only)
 
-tests/                      pytest suite (439 tests across 36 files; run with `pytest`)
+tests/                      pytest suite (469 tests across 37 files; run with `pytest`)
 
 docs/PLAN.md                Phased improvement roadmap (Phases 0–10, foundation — historical for done phases)
 docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)
@@ -195,8 +197,8 @@ docs/AH_FEASIBILITY.md      Asian Handicap feasibility probe (R.9)
 docs/COMMISSIONS.md         Per-book commission rates
 docs/PAID_DATA_WISHLIST.md  Living list of investigations unlocked by paying for Odds API historical access — consult & append whenever a "we don't have enough data" question comes up
 docs/DATA_ACQUISITION_IDEAS.md  Living catalogue of data-source ideas beyond today's stack (provider landscape, steam-chase scraper, Tennis-Data ingest, etc.) — consult & append whenever a "could we get data from X?" question comes up
-docs/PLAN_FIXTURE_CALENDAR.md  Exploratory plan — what becomes possible (cron tailoring, outage detection, closing-line proximity, deterministic bet matching, etc.) if we build a fixture calendar. Origin: issue #7
-data/raw/                   Football-data.co.uk CSVs + Understat xG
+docs/CONFIG_BOUNDARY.md     Static reference data vs tuning vs observed signals — read before adding constants/tables/config keys
+data/raw/                   Football-data.co.uk CSVs + Understat xG (external reference, not system state)
 ```
 
 ## Dashboard
@@ -210,6 +212,17 @@ Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg 
 Three bet sections: **Placed — awaiting result** · **Suggested — not yet placed** · **Settled** (with P&L + CLV%).
 
 Both the public Azure dashboard and the local `python3 app.py` read exclusively from Azure SQL (A.9: DB-only, no CSV fallback). Pi data is not visible in either dashboard until A.10 onboards Pi to its own DB.
+
+## Data state — where things live (post-A.9, pre-A.10)
+
+| Surface | Code | Data |
+|---|---|---|
+| WSL (`main`) | DB-only after A.9. Scanner / FDCO backfill / dashboard / `compare_strategies` exit 1 without `BETS_DB_WRITE=1`. | All bets live in dev DB `kaunitz-dev-sql-uksouth-rfk1.database.windows.net / kaunitz`. CSV files under `logs/` no longer track live data — only operational state JSONs (`bankroll.json`, `notified.json`, `team_xg.json`, `model_signals.json`). |
+| Pi (`robert@192.168.0.28`) | **Behind `main`** until A.10 lands. Still on pre-A.9 code with the dual-write paths. Pulling main onto Pi *now* would break cron — see PI_CATCHUP runbook. | Pi-local CSVs at `~/projects/bets/logs/` are the **only** copy of prod data. Not yet imported into any DB. |
+| Dev dashboard (`kaunitz-dev-dashboard-rfk1.orangebush-...`) | Reads dev DB. | Shows WSL test stream only — has never seen Pi production data. |
+| Prod dashboard | Does not exist yet (Phase A.10). | n/a |
+
+**What this means in practice.** When you look at `STRATEGY_COMPARISON.md` or the dashboard, you are seeing the WSL test stream, not the canonical Pi-side production data. Pi data merges into a single picture only after A.10 (`docs/PI_CATCHUP_2026-05.md`).
 
 ## Risk management
 
@@ -263,8 +276,9 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | B.2 (Brier-vs-close decision gate), B.4* (downstream variants) | pending |
 | Audit invariants I-1..I-13 (groups 1–4: P&L arithmetic, dashboard parity, CLV pipeline, book_skill) | ✅ done 2026-05-03; GitHub Actions workflow Mon 08:10 UTC (OIDC + KV, no new secrets); groups 5–6 pending |
 | Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ done 2026-05-02 (PRs #27 + #28) |
-| Phase 9 / A.9 (decommission CSV path) | ✅ done 2026-05-04 — DB is sole source of truth; bets.csv + paper/*.csv removed |
-| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | deferred — separate sprint |
+| Phase 9 / A.9 (decommission CSV path) | ✅ done 2026-05-04 (PR #39) — DB is sole source of truth; scanner / backfill / dashboard refuse to run without `BETS_DB_WRITE=1` |
+| S.1–S.4 (DB-only result + CLV backfill) | ✅ done 2026-05-04 (PR #38) — `backfill_clv_from_fdco` reads pending rows from DB, writes `result`/`pnl`/`settled_at`/`pinnacle_close_prob`/`clv_pct` back; `compare_strategies` reads from DB |
+| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | pending — runbook in `docs/PI_CATCHUP_2026-05.md` |
 | Phase 10 (long-term: syndicate, multi-account) | open |
 | Phase 11 (research scanner) | ✅ done |
 | R.0–R.3 + R.5.5a/b + R.7–R.9 + R.11 (2026-04 research sprint) | ✅ done |
