@@ -34,8 +34,7 @@ try:
 except ImportError:
     _DEVIG = False
 
-# A.4: BetRepo dual-writes CSV + (optionally) Azure SQL. Pi-safe: the
-# DB code path stays dormant unless BETS_DB_WRITE=1 + DSN env are set.
+# A.9: BetRepo writes to Azure SQL only. Requires BETS_DB_WRITE=1 + DSN.
 from src.storage.repo import BetRepo
 
 # A.5.5: SnapshotArchive captures every raw API response to Azure Blob
@@ -765,6 +764,16 @@ def main():
                         help="Cap number of active tennis tournaments to scan (saves API quota)")
     args = parser.parse_args()
 
+    # A.9: Refuse to run without DB — bets would be silently dropped.
+    if os.environ.get("BETS_DB_WRITE", "").strip() != "1":
+        print(
+            "[scan] ERROR: scan_odds requires BETS_DB_WRITE=1 + AZURE_SQL_* env vars. "
+            "Without them bets are not stored anywhere. "
+            "Set BETS_DB_WRITE=1 + AZURE_SQL_DSN (or the SERVER/USER/DATABASE/KV quintet).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     BANKROLL = _get_bankroll() if _RISK else float(os.environ.get("BANKROLL", 1000.0))
 
     now_dt = datetime.now(timezone.utc)
@@ -775,13 +784,8 @@ def main():
 
     all_sports = build_sport_list(args.sports, args.max_tennis)
 
-    # A.4: BetRepo handles CSV writes (always) + Azure SQL writes (only when
-    # BETS_DB_WRITE=1 and DSN env are set — i.e. WSL dev side, not the Pi).
     repo = BetRepo()
-    if repo.db_enabled:
-        print("[scan] Dual-write mode: CSV + Azure SQL")
-    else:
-        print("[scan] CSV-only mode (BETS_DB_WRITE not set)")
+    print("[scan] DB mode: Azure SQL")
 
     # Pre-flight health check (free, 0 credits): logs which football leagues
     # /sports/ reports active. Evidence-only — does not gate the scan.

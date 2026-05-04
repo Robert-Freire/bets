@@ -23,8 +23,8 @@ Failure isolation:
 
 UUID determinism:
   - Bet/fixture IDs come from `src.storage._keys`, the same module the
-    A.3 importer uses. So a row written live and the same row imported
-    from a legacy CSV produce the same UUID — no duplicates.
+    A.3 importer (archived at scripts/archive/) used. A row written live
+    and the same row imported from that importer produce the same UUID.
 """
 from __future__ import annotations
 
@@ -504,9 +504,7 @@ class BetRepo:
         if not self.db_enabled or self._connect() is None:
             return 0.0
         try:
-            self._cur.execute(
-                "SELECT COALESCE(SUM(pnl), 0) FROM bets WHERE pnl IS NOT NULL"
-            )
+            self._cur.execute("SELECT COALESCE(SUM(pnl), 0) FROM bets")
             return float(self._cur.fetchone()[0])
         except Exception as e:
             print(f"[repo] WARN: get_settled_pnl failed: {e}", file=sys.stderr)
