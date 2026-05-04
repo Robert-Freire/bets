@@ -789,6 +789,234 @@ class BetRepo:
 
     # --- update settle --------------------------------------------------------
 
+    # --- settlement (S.1) -----------------------------------------------------
+
+    def settle_bet(
+        self,
+        fixture_id: str,
+        side: str,
+        market: str,
+        line,
+        book: str,
+        *,
+        result: str | None,
+        pnl: float | None,
+        pin_prob: float | None,
+        clv_pct: float | None,
+    ) -> bool:
+        """Update result/CLV on an existing bets row.
+
+        result write: guarded by AND result='pending' (one-shot).
+        CLV write:    no pending guard — FDCO is authoritative, refresh is OK.
+        Returns True if either UPDATE affected rows.
+        """
+        if not self.db_enabled:
+            return False
+        line_val = _f(line)
+        settled_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        affected = False
+        with self._db_section() as cur:
+            if cur is None:
+                return False
+            book_id = self._book_id(book)
+            # UPDATE 1: result (one-shot — pending guard)
+            if result is not None:
+                if line_val is None:
+                    cur.execute(
+                        "UPDATE bets SET result=?, pnl=?, settled_at=? "
+                        "WHERE fixture_id=? AND side=? AND market=? "
+                        "  AND line IS NULL AND book_id=? AND result='pending'",
+                        (result, pnl, settled_at,
+                         fixture_id, side, market, book_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bets SET result=?, pnl=?, settled_at=? "
+                        "WHERE fixture_id=? AND side=? AND market=? "
+                        "  AND line=? AND book_id=? AND result='pending'",
+                        (result, pnl, settled_at,
+                         fixture_id, side, market, line_val, book_id),
+                    )
+                if cur.rowcount > 0:
+                    affected = True
+            # UPDATE 2: CLV (no pending guard — overwrite is fine)
+            if pin_prob is not None:
+                if line_val is None:
+                    cur.execute(
+                        "UPDATE bets SET pinnacle_close_prob=?, clv_pct=? "
+                        "WHERE fixture_id=? AND side=? AND market=? "
+                        "  AND line IS NULL AND book_id=?",
+                        (pin_prob, clv_pct,
+                         fixture_id, side, market, book_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bets SET pinnacle_close_prob=?, clv_pct=? "
+                        "WHERE fixture_id=? AND side=? AND market=? "
+                        "  AND line=? AND book_id=?",
+                        (pin_prob, clv_pct,
+                         fixture_id, side, market, line_val, book_id),
+                    )
+                if cur.rowcount > 0:
+                    affected = True
+        return affected
+
+    def settle_paper_bet(
+        self,
+        strategy_name: str,
+        fixture_id: str,
+        side: str,
+        market: str,
+        line,
+        book: str,
+        *,
+        result: str | None,
+        pnl: float | None,
+        pin_prob: float | None,
+        clv_pct: float | None,
+    ) -> bool:
+        """Same as settle_bet but scoped to a strategy via strategy_id."""
+        if not self.db_enabled:
+            return False
+        line_val = _f(line)
+        settled_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        affected = False
+        with self._db_section() as cur:
+            if cur is None:
+                return False
+            book_id = self._book_id(book)
+            sid = self._strategy_id(strategy_name)
+            # UPDATE 1: result (one-shot — pending guard)
+            if result is not None:
+                if line_val is None:
+                    cur.execute(
+                        "UPDATE paper_bets SET result=?, pnl=?, settled_at=? "
+                        "WHERE strategy_id=? AND fixture_id=? AND side=? AND market=? "
+                        "  AND line IS NULL AND book_id=? AND result='pending'",
+                        (result, pnl, settled_at,
+                         sid, fixture_id, side, market, book_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE paper_bets SET result=?, pnl=?, settled_at=? "
+                        "WHERE strategy_id=? AND fixture_id=? AND side=? AND market=? "
+                        "  AND line=? AND book_id=? AND result='pending'",
+                        (result, pnl, settled_at,
+                         sid, fixture_id, side, market, line_val, book_id),
+                    )
+                if cur.rowcount > 0:
+                    affected = True
+            # UPDATE 2: CLV (no pending guard)
+            if pin_prob is not None:
+                if line_val is None:
+                    cur.execute(
+                        "UPDATE paper_bets SET pinnacle_close_prob=?, clv_pct=? "
+                        "WHERE strategy_id=? AND fixture_id=? AND side=? AND market=? "
+                        "  AND line IS NULL AND book_id=?",
+                        (pin_prob, clv_pct,
+                         sid, fixture_id, side, market, book_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE paper_bets SET pinnacle_close_prob=?, clv_pct=? "
+                        "WHERE strategy_id=? AND fixture_id=? AND side=? AND market=? "
+                        "  AND line=? AND book_id=?",
+                        (pin_prob, clv_pct,
+                         sid, fixture_id, side, market, line_val, book_id),
+                    )
+                if cur.rowcount > 0:
+                    affected = True
+        return affected
+
+    def iter_unsettled_or_no_clv(self, now_utc=None):
+        """Yield bets + paper_bets rows that need result or CLV filled.
+
+        Yields dicts with keys: id, market, line, side, book_id, book, odds,
+        effective_odds, stake, actual_stake, result, pinnacle_close_prob,
+        fixture_id, sport_key, kickoff_utc, home, away, strategy_id,
+        strategy_name (None for production bets).
+
+        Only yields rows whose fixture kickoff_utc is in the past.
+        """
+        if not self.db_enabled or self._connect() is None:
+            return
+        if now_utc is None:
+            now_utc = datetime.utcnow()
+        now_str = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
+        sql = (
+            "SELECT b.id, b.market, b.line, b.side, b.book_id, bk.name AS book, "
+            "       b.odds, b.effective_odds, b.stake, b.actual_stake, "
+            "       b.result, b.pinnacle_close_prob, "
+            "       f.id AS fixture_id, f.sport_key, f.kickoff_utc, f.home, f.away, "
+            "       NULL AS strategy_id, NULL AS strategy_name "
+            "FROM bets b "
+            "JOIN fixtures f ON f.id = b.fixture_id "
+            "JOIN books bk   ON bk.id = b.book_id "
+            "WHERE f.kickoff_utc < ? "
+            "  AND (b.result = 'pending' OR b.pinnacle_close_prob IS NULL) "
+            "UNION ALL "
+            "SELECT p.id, p.market, p.line, p.side, p.book_id, bk.name AS book, "
+            "       p.odds, p.effective_odds, p.stake, p.actual_stake, "
+            "       p.result, p.pinnacle_close_prob, "
+            "       f.id, f.sport_key, f.kickoff_utc, f.home, f.away, "
+            "       p.strategy_id, s.name "
+            "FROM paper_bets p "
+            "JOIN fixtures f   ON f.id = p.fixture_id "
+            "JOIN books bk     ON bk.id = p.book_id "
+            "JOIN strategies s ON s.id = p.strategy_id "
+            "WHERE f.kickoff_utc < ? "
+            "  AND (p.result = 'pending' OR p.pinnacle_close_prob IS NULL)"
+        )
+        _KEYS = (
+            "id", "market", "line", "side", "book_id", "book",
+            "odds", "effective_odds", "stake", "actual_stake",
+            "result", "pinnacle_close_prob",
+            "fixture_id", "sport_key", "kickoff_utc", "home", "away",
+            "strategy_id", "strategy_name",
+        )
+        try:
+            self._cur.execute(sql, (now_str, now_str))
+            for row in self._cur.fetchall():
+                yield dict(zip(_KEYS, row))
+        except Exception as e:
+            print(f"[repo] WARN: iter_unsettled_or_no_clv failed: {e}",
+                  file=sys.stderr)
+            self._db_failed = True
+
+    def fetch_paper_bets_for_compare(self) -> list[dict] | None:
+        """Return all paper_bets rows joined with strategy name.
+
+        Used by compare_strategies.py. Returns None on failure.
+        """
+        if not self.db_enabled or self._connect() is None:
+            return None
+        try:
+            self._cur.execute(
+                "SELECT s.name AS strategy_name, p.result, p.stake, p.pnl, "
+                "       p.clv_pct, p.edge, p.n_books, p.confidence, "
+                "       p.market, p.consensus, p.model_signal, p.side, "
+                "       f.home, f.away, f.kickoff_utc, p.line, p.book_id, "
+                "       f.sport_key "
+                "FROM paper_bets p "
+                "JOIN strategies s ON s.id = p.strategy_id "
+                "JOIN fixtures f   ON f.id = p.fixture_id"
+            )
+            keys = (
+                "strategy_name", "result", "stake", "pnl",
+                "clv_pct", "edge", "n_books", "confidence",
+                "market", "consensus", "model_signal", "side",
+                "home", "away", "kickoff_utc", "line", "book_id",
+                "sport_key",
+            )
+            return [dict(zip(keys, row)) for row in self._cur.fetchall()]
+        except Exception as e:
+            print(f"[repo] WARN: fetch_paper_bets_for_compare failed: {e}",
+                  file=sys.stderr)
+            self._db_failed = True
+            return None
+
+    # --- legacy settle (kept for dashboard/app.py result entry) ---------------
+
     def update_bet_settle(self, scan_date: str, kickoff: str, home: str,
                           away: str, market: str, line: str, side: str,
                           book: str, *, result: str, actual_stake: float | str | None,

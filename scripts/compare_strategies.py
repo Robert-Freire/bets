@@ -1,16 +1,18 @@
 """
 Strategy comparison report.
 
-Reads logs/paper/*.csv and logs/bets.csv. Prints a Markdown table to stdout
+Reads paper_bets from Azure SQL via BetRepo. Prints a Markdown table to stdout
 and writes docs/STRATEGY_COMPARISON.md.
+
+Requires BETS_DB_WRITE=1 + AZURE_SQL_* env vars (see CLAUDE.md A.4).
 
 Usage:
     python3 scripts/compare_strategies.py
 """
 
 import argparse
-import csv
 import math
+import os
 import statistics
 import sys
 from collections import Counter
@@ -22,13 +24,12 @@ if str(_ROOT) not in sys.path:
 
 from src.betting.strategies import STRATEGIES  # noqa: E402
 
-BETS_CSV  = _ROOT / "logs" / "bets.csv"
-PAPER_DIR = _ROOT / "logs" / "paper"
+OUT_DOC = _ROOT / "docs" / "STRATEGY_COMPARISON.md"
+
+# Kept for backward-compat: drift index still uses the frozen drift.csv
 DRIFT_CSV = _ROOT / "logs" / "drift.csv"
-OUT_DOC   = _ROOT / "docs" / "STRATEGY_COMPARISON.md"
 
 # Buckets for favourite-longshot bias slice. Bounds are [lo, hi).
-# The top bucket uses 1.01 to keep prob=1.0 inclusive.
 PROB_BUCKETS: list[tuple[float, float, str]] = [
     (0.00, 0.20, "0–20% (longshots)"),
     (0.20, 0.35, "20–35%"),
@@ -39,25 +40,14 @@ PROB_BUCKETS: list[tuple[float, float, str]] = [
 ]
 
 
-def _read_csv(path: Path) -> list[dict]:
+# ── drift index (unchanged — reads frozen drift.csv) ─────────────────────────
+
+def _read_csv_if_exists(path: Path) -> list[dict]:
+    import csv
     if not path.exists():
         return []
     with open(path, newline="") as f:
         return list(csv.DictReader(f))
-
-
-def _filter_to_current_window(rows: list[dict]) -> list[dict]:
-    """Keep only rows whose strategy_config_hash matches the most-recent hash in the file.
-    Rows without the column (pre-R.11) collapse into one 'pre-R.11' window with hash=''.
-    Returns input unchanged if no rows have any hash field at all (full pre-R.11 file)."""
-    if not rows:
-        return rows
-    hashes = {r.get("strategy_config_hash", "") for r in rows}
-    if hashes == {""}:
-        return rows  # entirely pre-R.11; nothing to filter
-    rows_sorted = sorted(rows, key=lambda r: r.get("scanned_at", ""))
-    current_hash = rows_sorted[-1].get("strategy_config_hash", "")
-    return [r for r in rows if r.get("strategy_config_hash", "") == current_hash]
 
 
 def _load_drift_index() -> dict[tuple, tuple[float, float]] | None:
@@ -65,11 +55,10 @@ def _load_drift_index() -> dict[tuple, tuple[float, float]] | None:
     if not DRIFT_CSV.exists():
         return None
 
-    # Collect T-60 and T-1 Pinnacle odds per bet key
     t60: dict[tuple, float] = {}
     t1:  dict[tuple, float] = {}
 
-    for row in _read_csv(DRIFT_CSV):
+    for row in _read_csv_if_exists(DRIFT_CSV):
         pin_odds_str = row.get("pinnacle_odds", "")
         if not pin_odds_str:
             continue
@@ -97,17 +86,25 @@ def _load_drift_index() -> dict[tuple, tuple[float, float]] | None:
         elif t_int == 1:
             t1[key] = pin_prob
 
-    # Build index only for keys that have both T-60 and T-1 readings
     index = {k: (t60[k], t1[k]) for k in t60 if k in t1}
     return index if index else None
 
+
+# ── _filter_to_current_window (kept for --all-history logic; no-op for DB rows) ─
+
+def _filter_to_current_window(rows: list[dict]) -> list[dict]:
+    """No-op: DB rows don't carry strategy_config_hash; all rows are current."""
+    return rows
+
+
+# ── stats ─────────────────────────────────────────────────────────────────────
 
 def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
     n_bets = len(rows)
     clv_rows = [r for r in rows if r.get("clv_pct") not in ("", None)]
     n_with_clv = len(clv_rows)
 
-    clv_values = []
+    clv_values: list[float] = []
     for r in clv_rows:
         try:
             clv_values.append(float(r["clv_pct"]))
@@ -123,9 +120,8 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
         se = statistics.stdev(clv_values) / math.sqrt(len(clv_values))
         ci95_half = 1.96 * se
 
-    edge_values = []
+    edge_values: list[float] = []
     for r in rows:
-        # Prefer edge (true value: cons − effective_implied_prob); fall back to edge_gross for pre-fix rows
         v = r.get("edge") or r.get("edge_gross")
         if v in ("", None):
             continue
@@ -135,14 +131,37 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
             pass
     avg_edge = sum(edge_values) / len(edge_values) if edge_values else None
 
-    # Drift-toward-you: compare Pinnacle implied prob at T-60 vs T-1
+    # Settled P&L stats
+    settled_rows = [r for r in rows if r.get("result") in ("W", "L", "void")]
+    settled = len(settled_rows)
+    wins = sum(1 for r in settled_rows if r.get("result") == "W")
+    win_pct = wins / settled if settled > 0 else None
+
+    total_pnl: float | None = None
+    roi_pct: float | None = None
+    if settled > 0:
+        pnl_vals = []
+        stake_sum = 0.0
+        for r in settled_rows:
+            try:
+                pnl_vals.append(float(r.get("pnl") or 0))
+            except (TypeError, ValueError):
+                pnl_vals.append(0.0)
+            try:
+                stake_sum += float(r.get("stake") or 0)
+            except (TypeError, ValueError):
+                pass
+        total_pnl = sum(pnl_vals)
+        roi_pct = (total_pnl / stake_sum * 100) if stake_sum > 0 else None
+
+    # Drift-toward-you
     drift_pct = None
     if drift_index:
         moved_toward = 0
         total_with_drift = 0
         for r in rows:
             key = (
-                r.get("kickoff", ""),
+                r.get("kickoff", "") or r.get("kickoff_utc", ""),
                 r.get("home", ""),
                 r.get("away", ""),
                 r.get("market", ""),
@@ -157,7 +176,6 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
         if total_with_drift:
             drift_pct = moved_toward / total_with_drift
 
-    # book_dist scoped to CLV rows so the denominator matches avg_clv
     book_counter: Counter = Counter()
     for r in clv_rows:
         b = r.get("book", "")
@@ -175,6 +193,12 @@ def _stats(rows: list[dict], drift_index: dict | None = None) -> dict:
         "avg_edge": avg_edge,
         "book_dist": top_books,
         "drift_pct": drift_pct,
+        # P&L
+        "settled": settled,
+        "wins": wins,
+        "win_pct": win_pct,
+        "total_pnl": total_pnl,
+        "roi_pct": roi_pct,
     }
 
 
@@ -194,6 +218,18 @@ def _fmt_clv_ci(avg_clv, ci95_half) -> str:
     if ci95_half is None:
         return base
     return f"{base} ± {format(ci95_half, '.2%')}"
+
+
+def _fmt_pnl_cols(s: dict) -> str:
+    """Format Settled | Win % | ROI % columns."""
+    settled = s.get("settled", 0)
+    if not settled:
+        return "— | — | —"
+    settled_str = str(settled)
+    win_pct_str = _fmt(s.get("win_pct"), ".0%") if settled >= 5 else "—"
+    roi = s.get("roi_pct")
+    roi_str = f"{roi:+.1f}%" if (settled >= 5 and roi is not None) else "—"
+    return f"{settled_str} | {win_pct_str} | {roi_str}"
 
 
 def _bucket_for(p: float) -> str | None:
@@ -232,17 +268,11 @@ def _bucket_stats(rows: list[dict]) -> list[dict]:
 
 
 def _per_sport_rows(entries: list[tuple[str, list[dict]]]) -> list[dict]:
-    """Return qualifying (sport, variant) rows for the per-sport table.
-
-    Includes A_production for any sport where it has ≥1 CLV bet, and all other
-    variants where n_with_clv ≥ 10 in that sport.
-    """
-    # Group rows by (variant, sport)
     from collections import defaultdict
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for name, rows in entries:
         for r in rows:
-            sport = r.get("sport", "")
+            sport = r.get("sport") or r.get("sport_key", "")
             if sport:
                 grouped[(name, sport)].append(r)
 
@@ -259,7 +289,6 @@ def _per_sport_rows(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     if not out:
         return []
 
-    # EPL first, then alphabetical; within sport sort by avg_clv desc (None last)
     def _sport_key(row):
         sport_order = 0 if row["sport"] == "EPL" else 1
         return (sport_order, row["sport"], row["avg_clv"] is None, -(row["avg_clv"] or 0))
@@ -268,9 +297,9 @@ def _per_sport_rows(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     return out
 
 
-_CONF_ORDER  = {"HIGH": 0, "MED": 1, "LOW": 2}
-_MKT_ORDER   = {"h2h": 0, "totals": 1, "btts": 2}
-_SIG_ORDER   = {"agrees": 0, "disagrees": 1, "no_signal": 2}
+_CONF_ORDER = {"HIGH": 0, "MED": 1, "LOW": 2}
+_MKT_ORDER  = {"h2h": 0, "totals": 1, "btts": 2}
+_SIG_ORDER  = {"agrees": 0, "disagrees": 1, "no_signal": 2}
 
 
 def _model_bucket(signal) -> str:
@@ -287,7 +316,6 @@ def _sliced_rows(
     key_fn,
     threshold: int = 5,
 ) -> list[dict]:
-    """Group rows by (variant, slice_key), return rows where n_with_clv >= threshold."""
     from collections import defaultdict
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for name, rows in entries:
@@ -305,17 +333,17 @@ def _sliced_rows(
 
 
 def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
-    """Pool unique bets across all paper strategies (one bet may flag in multiple strategies)."""
+    """Pool unique bets across all paper strategies, deduped by natural key."""
     seen: set[tuple] = set()
     pooled: list[dict] = []
     for _, rows in entries:
         for r in rows:
             key = (
-                r.get("kickoff", ""),
+                r.get("kickoff", "") or r.get("kickoff_utc", ""),
                 r.get("home", ""),
                 r.get("away", ""),
                 r.get("market", ""),
-                r.get("line", ""),
+                str(r.get("line", "")),
                 r.get("side", ""),
                 r.get("book", ""),
             )
@@ -326,23 +354,37 @@ def _dedupe_pool(entries: list[tuple[str, list[dict]]]) -> list[dict]:
     return pooled
 
 
-def build_report(all_history: bool = False) -> str:
-    entries: list[tuple[str, list[dict]]] = []
-    filter_summary: list[tuple[str, int, int]] = []  # (variant, current_n, total_n) when they differ
+def build_report(repo=None, all_history: bool = False) -> str:
+    """Build the strategy comparison Markdown report.
 
-    # Paper strategy CSVs (A_production is the canonical proxy for production)
-    if PAPER_DIR.exists():
-        for path in sorted(PAPER_DIR.glob("*.csv")):
-            rows = _read_csv(path)
-            if rows:
-                if not all_history:
-                    filtered = _filter_to_current_window(rows)
-                    if len(filtered) != len(rows):
-                        filter_summary.append((path.stem, len(filtered), len(rows)))
-                    rows = filtered
-                entries.append((path.stem, rows))
+    repo: a BetRepo instance (or None to construct one internally).
+    """
+    # T4: refuse without DB
+    if os.environ.get("BETS_DB_WRITE", "").strip() != "1":
+        print(
+            "compare_strategies.py reads from Azure SQL only. "
+            "Set BETS_DB_WRITE=1 + AZURE_SQL_* env vars.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-    # C.1: include configured variants with no CSV yet (0-bet rows)
+    from src.storage.repo import BetRepo
+    if repo is None:
+        repo = BetRepo(logs_dir=_ROOT / "logs")
+
+    raw_rows = repo.fetch_paper_bets_for_compare()
+    if raw_rows is None:
+        return "No data found. Run the scanner first.\n"
+
+    # Group by strategy_name
+    from collections import defaultdict
+    by_strategy: dict[str, list[dict]] = defaultdict(list)
+    for r in raw_rows:
+        by_strategy[r["strategy_name"]].append(r)
+
+    entries: list[tuple[str, list[dict]]] = list(by_strategy.items())
+
+    # Include configured variants with no DB rows yet (0-bet)
     seen_names = {name for name, _ in entries}
     for s in STRATEGIES:
         if s.name not in seen_names:
@@ -353,7 +395,6 @@ def build_report(all_history: bool = False) -> str:
 
     drift_index = _load_drift_index()
 
-    # Compute stats and sort: active variants by avg_clv desc, then no-CLV, then 0-bet
     results = []
     for name, rows in entries:
         s = _stats(rows, drift_index=drift_index)
@@ -372,72 +413,54 @@ def build_report(all_history: bool = False) -> str:
         "Sorted by average CLV descending. Only rows with a Pinnacle close prob contribute to CLV stats.",
         "Run `python3 scripts/compare_strategies.py` to refresh.",
         "",
-        # R.11: eval-window filter transparency
-        ("> **Eval-window filter:** showing CURRENT config window per variant only "
-         "(rows whose `strategy_config_hash` matches the most recent scan). "
-         "Pass `--all-history` to include older config windows / pre-R.11 rows."
-         if not all_history else
-         "> **Eval-window filter:** showing ALL HISTORY (`--all-history`). "
-         "May mix rows generated under different strategy configs — interpret with care."),
+        "> **Data source:** Azure SQL `paper_bets` table.",
         "",
-    ]
-    if filter_summary and not all_history:
-        lines.append("> Variants with hidden older-window rows: " +
-                     ", ".join(f"`{v}` ({c}/{t})" for v, c, t in filter_summary) +
-                     " — format: `current/total`.")
-        lines.append("")
-    lines += [
-        # C.9: sample-size warning
         "> **Sample size note.** Variants with `<10` CLV bets in this report are"
         " indicative only. Per `RESEARCH_NOTES_2026-04.md` §6, graduation requires"
         " ≥30 CLV bets across ≥3 weekends with positive Avg CLV CI bracket.",
         "",
-        # C.1: note about 0-bet variants
         "> Variants with 0 bets this period are listed for completeness; if a variant"
-        " you expect to fire shows 0, check its filter wiring (e.g. `K_draw_bias`"
-        " requires `logs/team_xg.json` and an alias-resolved team name).",
+        " you expect to fire shows 0, check its filter wiring.",
         "",
-        "| Strategy | Bets | CLV bets | Avg CLV ± 95% CI | Med CLV | CLV >0 % | Drift→you % | Avg Edge | Top books |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Strategy | Bets | CLV bets | Avg CLV ± 95% CI | Med CLV | CLV >0 % | Avg Edge | Settled | Win % | ROI % |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
 
     drift_warnings: list[str] = []
 
     for name, s in results:
         marker = " ★" if name == best_name else ""
-        # C.9: low-n marker
         low_n = s["n_with_clv"] < 10
         prefix = "[low n] " if low_n else ""
 
-        # C.4: sanity-flag extreme drift values
-        dp = s["drift_pct"]
+        dp = s.get("drift_pct")
         if dp is not None and s["n_bets"] >= 10 and dp in (0.0, 1.0):
             drift_warnings.append(
                 f"⚠️ `{name}` drift={dp:.0%} with n={s['n_bets']} — likely sign error in drift direction."
             )
 
+        pnl_cols = _fmt_pnl_cols(s)
+
         if s["n_bets"] == 0:
-            # C.1: 0-bet row
-            lines.append(f"| {prefix}{name} | 0 | — | — | — | — | — | — | — |")
+            lines.append(f"| {prefix}{name} | 0 | — | — | — | — | — | — | — | — |")
         else:
             clv_ci = _fmt_clv_ci(s["avg_clv"], s["ci95_half"])
             lines.append(
                 f"| {prefix}{name}{marker} | {s['n_bets']} | {s['n_with_clv']} | "
                 f"{clv_ci} | {_fmt(s['median_clv'])} | {_fmt(s['pos_clv'])} | "
-                f"{_fmt(dp)} | {_fmt(s['avg_edge'])} | {s['book_dist'] or '—'} |"
+                f"{_fmt(s['avg_edge'])} | {pnl_cols} |"
             )
 
     if drift_warnings:
         lines += ["", "**Drift sanity warnings:**"] + [f"- {w}" for w in drift_warnings]
 
-    # C.2: note about CI interpretation
     lines += [
         "",
         "*95% CI is `±1.96·σ/√n`. A variant whose CI bracket includes 0 has not yet"
         " shown a statistically distinguishable signal.*",
     ]
 
-    # ---- C.3: Per-sport breakdown ------------------------------------------
+    # Per-sport breakdown
     sport_rows = _per_sport_rows(entries)
     if sport_rows:
         lines += [
@@ -456,7 +479,7 @@ def build_report(all_history: bool = False) -> str:
                 f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
             )
 
-    # ---- C.5: Per-confidence breakdown -------------------------------------
+    # Per-confidence breakdown
     conf_rows = _sliced_rows(
         entries,
         lambda r: r.get("confidence") if r.get("confidence") in _CONF_ORDER else None,
@@ -478,7 +501,7 @@ def build_report(all_history: bool = False) -> str:
                 f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
             )
 
-    # ---- C.7: Per-market breakdown -----------------------------------------
+    # Per-market breakdown
     mkt_rows = _sliced_rows(
         entries,
         lambda r: r.get("market") if r.get("market") in _MKT_ORDER else None,
@@ -500,7 +523,7 @@ def build_report(all_history: bool = False) -> str:
                 f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
             )
 
-    # ---- C.8: Model-signal stratification ----------------------------------
+    # Model-signal stratification
     sig_rows = _sliced_rows(
         entries,
         lambda r: _model_bucket(r.get("model_signal")),
@@ -523,7 +546,7 @@ def build_report(all_history: bool = False) -> str:
                 f" {row['n_with_clv']} | {_fmt(row['avg_clv'])} | {_fmt(row['pos_clv'])} |"
             )
 
-    # ---- Favourite-longshot bias slice -------------------------------------
+    # Favourite-longshot bias slice
     pooled = _dedupe_pool(entries)
     bucket_rows = _bucket_stats(pooled)
     n_pool_with_clv = sum(b["n"] for b in bucket_rows)
@@ -545,15 +568,14 @@ def build_report(all_history: bool = False) -> str:
             f"| {b['bucket']} | {b['n']} | {_fmt(b['avg_clv'])} | {_fmt(b['pos_clv'])} |"
         )
 
-    lines += ["", f"*Generated: see `logs/paper/` and `logs/bets.csv`.*", ""]
+    lines += ["", "*Generated from Azure SQL `paper_bets` table.*", ""]
     return "\n".join(lines)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Strategy comparison report (CLV-based).")
     parser.add_argument("--all-history", action="store_true",
-                        help="Include rows from ALL config windows (default: filter to current "
-                             "strategy_config_hash per variant — code-change pollution excluded).")
+                        help="Kept for CLI compat; no effect (DB rows are always current).")
     args = parser.parse_args()
     report = build_report(all_history=args.all_history)
     print(report)
