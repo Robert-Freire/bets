@@ -1,13 +1,11 @@
 """
 Monday-morning CLV backfill from football-data.co.uk free Pinnacle closing odds.
 
-Replaces the every-5-min closing_line.py polling for the top-4 leagues.
-Walks bets.csv + logs/paper/*.csv and fills pinnacle_close_prob + clv_pct
-for any past-kickoff h2h or totals-2.5 bet that doesn't already have them.
+DB-only rewrite: reads pending rows from Azure SQL, matches against FDCO CSVs,
+and writes result/pnl/settled_at/pinnacle_close_prob/clv_pct back to the DB.
+No CSV mutation anywhere in this script.
 
-CSV-only writes. The Azure SQL closing_lines table is intentionally not
-populated here; bets.csv stays the canonical source for CLV during this
-swap. See docs/CLAUDE.md "CLV diagnostics" for context.
+Requires BETS_DB_WRITE=1 + AZURE_SQL_* env vars (see CLAUDE.md A.4).
 
 Usage:
     python3 scripts/backfill_clv_from_fdco.py [--dry-run] [--leagues E0 D1 ...]
@@ -16,9 +14,10 @@ Usage:
 
 import argparse
 import csv
+import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -33,20 +32,20 @@ from src.betting.team_names import API_TO_FD
 from src.config import load_leagues as _load_leagues
 
 _RAW_DIR  = _ROOT / "data" / "raw"
-_BETS_CSV = _ROOT / "logs" / "bets.csv"
-_PAPER_DIR = _ROOT / "logs" / "paper"
 _SEASON   = "2526"
 _FDCO_URL = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 _STALE_DAYS = 3
 
-# Sport label → FDCO league code — built from active config so adding/removing
-# a league in config.json flows through automatically.
-SPORT_TO_FDCO: dict[str, str] = {
-    e["label"]: e["fdco_code"]
+# sport_key → FDCO league code (e.g. "soccer_epl" → "E0")
+# load_leagues() entries use "key" which is the same value stored as sport_key in DB.
+_FDCO_BY_SPORT_KEY: dict[str, str] = {
+    e["key"]: e["fdco_code"]
     for e in _load_leagues()
     if "fdco_code" in e
 }
 
+
+# ── Preserved helpers (unchanged from pre-rewrite) ────────────────────────────
 
 def _refresh_csv(league: str) -> Path | None:
     """Download {league}_{SEASON}.csv if missing or older than _STALE_DAYS."""
@@ -121,121 +120,115 @@ def _totals_pin_prob(row: dict, side: str) -> float | None:
     return {"OVER": fair[0], "UNDER": fair[1]}.get(side)
 
 
-def _kickoff_date(kickoff_str: str) -> str | None:
-    try:
-        return datetime.strptime(kickoff_str, "%Y-%m-%d %H:%M").strftime("%Y-%m-%d")
-    except ValueError:
+# ── New helpers ───────────────────────────────────────────────────────────────
+
+def _settle_from_fdco(fdco_row: dict, market: str, side: str) -> str | None:
+    """Return 'W', 'L', or None if the result cannot be determined."""
+    if market == "h2h":
+        ftr = (fdco_row.get("FTR") or "").strip()
+        if ftr not in ("H", "D", "A"):
+            return None
+        return "W" if {"HOME": "H", "DRAW": "D", "AWAY": "A"}.get(side) == ftr else "L"
+    if market == "totals":
+        try:
+            tot = float(fdco_row["FTHG"]) + float(fdco_row["FTAG"])
+        except (KeyError, ValueError, TypeError):
+            return None
+        if side == "OVER":
+            return "W" if tot > 2.5 else "L"
+        if side == "UNDER":
+            return "W" if tot < 2.5 else "L"
+    return None
+
+
+def _pnl(stake: float | None, eff_odds: float | None, result: str) -> float | None:
+    """Compute P&L given stake, effective odds, and result string."""
+    if stake is None or eff_odds is None or stake <= 0 or eff_odds <= 1:
         return None
+    if result == "W":
+        return round(stake * (eff_odds - 1), 2)
+    if result == "L":
+        return round(-stake, 2)
+    if result == "void":
+        return 0.0
+    return None
 
 
-def _backfill_row(row: dict, fdco_by_league: dict[str, dict]) -> tuple[float, float] | None:
-    """Return (pin_prob, clv_pct) for a row, or None if not backfillable."""
-    sport = row.get("sport", "")
-    league = SPORT_TO_FDCO.get(sport)
+def _lookup_fdco(row: dict, fdco_by_sport: dict,
+                 fdco_by_league: dict[str, dict]) -> dict | None:
+    """Return the FDCO row matching this DB row, or None."""
+    sport_key = row.get("sport_key", "")
+    league = fdco_by_sport.get(sport_key)
     if not league or league not in fdco_by_league:
         return None
-    market = row.get("market", "h2h")
-    if market == "btts":
-        return None
-    if market == "totals" and str(row.get("line", "")).strip() not in ("2.5", "2.5.0"):
-        return None
 
-    ko_date = _kickoff_date(row.get("kickoff", ""))
+    ko_str = str(row.get("kickoff_utc", ""))
+    # kickoff_utc may be "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
+    ko_date = ko_str[:10] if ko_str else None
     if not ko_date:
         return None
 
     home_fd = API_TO_FD.get(row.get("home", ""), row.get("home", ""))
     away_fd = API_TO_FD.get(row.get("away", ""), row.get("away", ""))
-    fdco_row = fdco_by_league[league].get((ko_date, home_fd, away_fd))
-    if fdco_row is None:
-        return None
+    return fdco_by_league[league].get((ko_date, home_fd, away_fd))
 
+
+def _clv_from_fdco(row: dict, fdco_row: dict) -> tuple[float | None, float | None]:
+    """Return (pin_prob, clv_pct) for a DB row given its FDCO match."""
+    market = row.get("market", "h2h")
     side = row.get("side", "")
     if market == "h2h":
         pin_prob = _h2h_pin_prob(fdco_row, side)
-    else:
+    elif market == "totals":
         pin_prob = _totals_pin_prob(fdco_row, side)
+    else:
+        return None, None
     if pin_prob is None or pin_prob <= 0:
-        return None
-
+        return None, None
     try:
         odds = float(row.get("odds") or 0)
     except (TypeError, ValueError):
-        return None
+        return None, None
     if odds <= 1:
-        return None
+        return None, None
     eff = effective_odds(odds, row.get("book", ""))
     clv_pct = eff * pin_prob - 1
     return round(pin_prob, 6), round(clv_pct, 6)
 
 
-def _process_csv(path: Path, fdco_by_league: dict[str, dict],
-                 since: datetime | None, now: datetime,
-                 dry_run: bool) -> tuple[int, int, int]:
-    """Returns (backfilled, no_match, already_populated) for one CSV."""
-    if not path.exists():
-        return (0, 0, 0)
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        fieldnames = list(reader.fieldnames or [])
-        rows = list(reader)
-    for col in ("pinnacle_close_prob", "clv_pct"):
-        if col not in fieldnames:
-            fieldnames.append(col)
-
-    backfilled = no_match = already = 0
-    for row in rows:
-        if row.get("pinnacle_close_prob"):
-            already += 1
-            continue
-        ko_str = row.get("kickoff", "")
-        try:
-            ko_dt = datetime.strptime(ko_str, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if ko_dt > now:
-            continue
-        if since and ko_dt < since:
-            continue
-
-        result = _backfill_row(row, fdco_by_league)
-        if result is None:
-            no_match += 1
-            continue
-        pin_prob, clv_pct = result
-        row["pinnacle_close_prob"] = f"{pin_prob:.6f}"
-        row["clv_pct"] = f"{clv_pct:.6f}"
-        backfilled += 1
-
-    if backfilled and not dry_run:
-        tmp = path.with_suffix(".csv.tmp")
-        with open(tmp, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(rows)
-        tmp.replace(path)
-    return (backfilled, no_match, already)
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true",
-                        help="Compute backfill but don't write CSVs")
+                        help="Log intended UPDATEs without executing them")
     parser.add_argument("--leagues", nargs="+", default=None,
                         help="Limit to FDCO league codes (e.g. E0 D1)")
     parser.add_argument("--since", default=None,
                         help="Only backfill kickoffs on or after YYYY-MM-DD")
     args = parser.parse_args()
 
-    now = datetime.now(timezone.utc)
-    since = None
+    # T9: Refuse to run without DB
+    if os.environ.get("BETS_DB_WRITE", "").strip() != "1":
+        print(
+            "Result/CLV backfill writes to Azure SQL only. "
+            "Set BETS_DB_WRITE=1 + AZURE_SQL_* env vars (see CLAUDE.md A.4).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    now_utc = datetime.now(timezone.utc)
+    since: datetime | None = None
     if args.since:
         since = datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-    leagues = args.leagues or sorted(set(SPORT_TO_FDCO.values()))
-    print(f"=== FDCO CLV backfill === {now.strftime('%Y-%m-%d %H:%M UTC')} "
-          f"| leagues={leagues}{' (dry-run)' if args.dry_run else ''}")
+    leagues = args.leagues or sorted(set(_FDCO_BY_SPORT_KEY.values()))
+    print(
+        f"=== FDCO CLV backfill (DB-only) === {now_utc.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"| leagues={leagues}{' (dry-run)' if args.dry_run else ''}"
+    )
 
+    # Load FDCO CSVs
     fdco_by_league: dict[str, dict] = {}
     for league in leagues:
         path = _refresh_csv(league)
@@ -245,22 +238,136 @@ def main() -> None:
         fdco_by_league[league] = _load_fdco_index(path)
         print(f"  [fdco] {league}: {len(fdco_by_league[league])} fixtures indexed")
 
-    csv_paths = [_BETS_CSV] + sorted(_PAPER_DIR.glob("*.csv")) if _PAPER_DIR.exists() else [_BETS_CSV]
-    total_b = total_n = total_a = 0
-    files_changed = 0
-    for path in csv_paths:
-        if not path.exists():
-            continue
-        b, n, a = _process_csv(path, fdco_by_league, since, now, args.dry_run)
-        total_b += b
-        total_n += n
-        total_a += a
-        if b:
-            files_changed += 1
-            print(f"  [{path.name}] backfilled {b} | no FDCO match {n} | already populated {a}")
+    from src.storage.repo import BetRepo as _BetRepo
+    repo = _BetRepo(logs_dir=_ROOT / "logs")
 
-    print(f"\n[fdco] backfilled {total_b} bets across {files_changed} files; "
-          f"skipped {total_n} (no FDCO match); skipped {total_a} (already populated)")
+    # Counters
+    bet_w = bet_l = bet_void = 0
+    paper_w = paper_l = paper_void = 0
+    clv_bets = 0
+    clv_paper = 0
+    no_match = 0
+
+    # T5: driver loop
+    for row in repo.iter_unsettled_or_no_clv(now_utc=now_utc.replace(tzinfo=None)):
+        market = row.get("market", "h2h")
+        side = row.get("side", "")
+        is_paper = row.get("strategy_name") is not None
+
+        # --since filter
+        if since:
+            ko_str = str(row.get("kickoff_utc", ""))
+            try:
+                ko_dt = datetime.strptime(ko_str[:19], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                try:
+                    ko_dt = datetime.strptime(ko_str[:16], "%Y-%m-%dT%H:%M").replace(
+                        tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    ko_dt = None
+            if ko_dt and ko_dt < since:
+                continue
+
+        fdco_row = _lookup_fdco(row, _FDCO_BY_SPORT_KEY, fdco_by_league)
+        if fdco_row is None:
+            no_match += 1
+            continue
+
+        pin_prob, clv_val = _clv_from_fdco(row, fdco_row)
+
+        new_result: str | None = None
+        new_pnl: float | None = None
+        if row.get("result") == "pending":
+            new_result = _settle_from_fdco(fdco_row, market, side)
+            if new_result is not None:
+                # Paper: stake basis is stake; production: actual_stake or None
+                stake_basis = (
+                    row.get("stake") if is_paper else row.get("actual_stake")
+                )
+                try:
+                    stake_f = float(stake_basis) if stake_basis is not None else None
+                except (TypeError, ValueError):
+                    stake_f = None
+                eff = row.get("effective_odds") or row.get("odds")
+                try:
+                    eff_f = float(eff) if eff is not None else None
+                except (TypeError, ValueError):
+                    eff_f = None
+                new_pnl = _pnl(stake_f, eff_f, new_result)
+
+        # Skip rows that need no update
+        if new_result is None and pin_prob is None:
+            no_match += 1
+            continue
+
+        if args.dry_run:
+            print(
+                f"  [dry-run] {'paper' if is_paper else 'bet'} "
+                f"{row.get('home')} vs {row.get('away')} "
+                f"{market}/{side}: result={new_result} pin={pin_prob} clv={clv_val}"
+            )
+            continue
+
+        if is_paper:
+            ok = repo.settle_paper_bet(
+                row["strategy_name"],
+                row["fixture_id"],
+                side,
+                market,
+                row.get("line"),
+                row["book"],
+                result=new_result,
+                pnl=new_pnl,
+                pin_prob=pin_prob,
+                clv_pct=clv_val,
+            )
+            if ok:
+                if new_result == "W":
+                    paper_w += 1
+                elif new_result == "L":
+                    paper_l += 1
+                elif new_result == "void":
+                    paper_void += 1
+                if pin_prob is not None:
+                    clv_paper += 1
+        else:
+            ok = repo.settle_bet(
+                row["fixture_id"],
+                side,
+                market,
+                row.get("line"),
+                row["book"],
+                result=new_result,
+                pnl=new_pnl,
+                pin_prob=pin_prob,
+                clv_pct=clv_val,
+            )
+            if ok:
+                if new_result == "W":
+                    bet_w += 1
+                elif new_result == "L":
+                    bet_l += 1
+                elif new_result == "void":
+                    bet_void += 1
+                if pin_prob is not None:
+                    clv_bets += 1
+
+    repo.close()
+
+    # T6: summary
+    print(
+        f"[fdco] settled: bets W/L/void = {bet_w}/{bet_l}/{bet_void} | "
+        f"paper W/L/void = {paper_w}/{paper_l}/{paper_void}"
+    )
+    print(
+        f"       clv backfilled: bets={clv_bets} paper={clv_paper}"
+    )
+    print(
+        f"       no FDCO match or no signal: {no_match}"
+    )
 
 
 if __name__ == "__main__":

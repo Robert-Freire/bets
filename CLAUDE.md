@@ -13,6 +13,7 @@ A value betting scanner using the **Kaunitz consensus strategy**: compute the Sh
 export $(cat .env.dev) && python3 scripts/scan_odds.py
 
 # CLV backfill from football-data.co.uk Pinnacle close odds (Mon 08:00 cron)
+# Requires BETS_DB_WRITE=1 — writes result/pnl/CLV to Azure SQL only (DB-only, no CSV writes)
 export $(cat .env.dev) && python3 scripts/backfill_clv_from_fdco.py
 
 # Local dashboard (track bets, log results, view CLV)
@@ -22,7 +23,8 @@ python3 app.py   # → http://localhost:5000
 # https://kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io
 
 # Compare strategy variants (after a weekend of data)
-python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
+# Requires BETS_DB_WRITE=1 — reads paper_bets from Azure SQL
+export $(cat .env.dev) && python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
 ```
 
 ## How the scanner works
@@ -227,7 +229,7 @@ Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 
 ## CLV diagnostics
 
-CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, walks `bets.csv` + `logs/paper/*.csv`, and fills `pinnacle_close_prob` + `clv_pct` for any past-kickoff h2h or totals-2.5 row that's still empty. Idempotent.
+CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, queries pending rows from Azure SQL (`bets` + `paper_bets`), matches against FDCO CSVs, and writes `result`, `pnl`, `settled_at`, `pinnacle_close_prob`, `clv_pct` back to DB only. Requires `BETS_DB_WRITE=1`. Idempotent (result write guarded by `result='pending'`; CLV write always refreshes). No CSV mutation.
 
 **Source-swap rationale (2026-05-01):** the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
 
