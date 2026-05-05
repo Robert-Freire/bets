@@ -29,6 +29,7 @@ This section answers two questions the user explicitly raised before handing off
 | #37 | (Same as #36 — duplicate merge.) | Same. |
 | #38 (S.1–S.4) | DB-only result + CLV backfill. `backfill_clv_from_fdco.py` queries pending rows from DB and writes `result`/`pnl`/`settled_at`/`pinnacle_close_prob`/`clv_pct` back. | **Critical:** Pi's current cron runs the *old* CSV-walking version of this script. Once Pi pulls, it switches to DB-driven, which means Pi's CSV-only history needs to have been imported to DB first or the backfill won't see those rows. |
 | #39 (A.9) | CSV path decommissioned. Scanner / backfill / dashboard / `compare_strategies` exit 1 without `BETS_DB_WRITE=1`. | **Critical:** Pi's cron breaks until env vars are set. This is why Phase 4 sets env vars *before* Phase 6 pulls main. |
+| 2026-05-05 (no PR yet) | OddsPapi Pinnacle close-odds resolver — new script `scripts/backfill_clv_from_oddspapi.py`, Mon+Wed 10:00 UTC cron on WSL, fills the FDCO Pinnacle gap (FDCO PSCH dropped mid-Jan 2026 after Pinnacle closed their public API on 2025-07-23). Also covers La Liga (paper_bets only). FDCO backfill cron rescheduled Mon → Mon+Wed at 09:00 to align. | **New Pi-side requirement:** prod needs its own OddsPapi free-tier key (separate quota from WSL's dev key — same dev/prod key separation pattern as `ODDS_API_KEY`). Phase 4c adds `ODDSPAPI_KEY` to Pi's `.env`. Phase 6c installs the cron entry. Without the key, the script exits with a clear error rather than dropping CLV silently — same fail-fast pattern as `BETS_DB_WRITE`. |
 
 ### What's still uncertain until Phase 0 runs
 
@@ -328,6 +329,8 @@ If this fails: most likely the firewall rule from Phase 1c didn't pin the right 
 
 ### 4c. Add env vars to Pi `.env`
 
+**Pre-step:** generate a **prod** OddsPapi key separate from WSL's dev key. Sign up a second account at https://oddspapi.io/en/sign-up under a prod-mailbox alias (e.g. `robert.freire+prod@gmail.com`); free tier 250 req/mo, no credit card. Copy the key from `/en/account` and use it as `<PROD_ODDSPAPI_KEY>` below. Same dev/prod separation pattern as `ODDS_API_KEY` — never reuse the WSL key on Pi (would split one quota across both machines and trip rate limits).
+
 ```bash
 # Append to Pi's .env. Use a heredoc to avoid escape pain.
 ssh robert@192.168.0.28 "cat >> ~/projects/bets/.env << 'EOF'
@@ -335,10 +338,12 @@ ssh robert@192.168.0.28 "cat >> ~/projects/bets/.env << 'EOF'
 # A.10: Azure prod DB writes (added $(date +%Y-%m-%d))
 BETS_DB_WRITE=1
 AZURE_SQL_DSN=${PROD_DSN}
+# OddsPapi Pinnacle close-odds resolver (Phase 6c installs the cron)
+ODDSPAPI_KEY=<PROD_ODDSPAPI_KEY>
 EOF"
 
-# Verify
-ssh robert@192.168.0.28 'tail -5 ~/projects/bets/.env'
+# Verify (the OddsPapi key value should be redacted manually before pasting output anywhere)
+ssh robert@192.168.0.28 'tail -7 ~/projects/bets/.env'
 ```
 
 ### 4d. Trigger ad-hoc scan to verify dual-write
@@ -455,6 +460,47 @@ ssh robert@192.168.0.28 << 'EOF'
 crontab -l | grep book_skill
 EOF
 ```
+
+### 6c. Add OddsPapi Pinnacle close-odds resolver cron on Pi
+
+WSL runs this Mon+Wed 10:00 UTC; Pi mirrors. Pre-condition: `ODDSPAPI_KEY` set on Pi (Phase 4c). The script defaults to "last 7 days" so no date flags needed. Idempotent — re-runs over the same window are no-ops. Audit CSVs land under `~/projects/bets/logs/backfill/oddspapi/<run_iso>/`.
+
+```bash
+ssh robert@192.168.0.28 << 'EOF'
+# Idempotent install (skip if already present)
+if crontab -l 2>/dev/null | grep -qF 'backfill_clv_from_oddspapi.py'; then
+  echo "ALREADY_PRESENT"
+else
+  ( crontab -l 2>/dev/null
+    echo "# A.10: OddsPapi Pinnacle close-odds backfill — Mon+Wed 10:00 UTC (1h after FDCO settlement)"
+    echo "0 10 * * 1,3 cd ~/projects/bets && set -a && . ./.env && set +a && python3 scripts/backfill_clv_from_oddspapi.py --commit >> logs/backfill_clv_oddspapi.log 2>&1" ) | crontab -
+  echo "INSTALLED"
+fi
+crontab -l | grep oddspapi
+EOF
+```
+
+Smoke-test the key + script before relying on cron:
+
+```bash
+ssh robert@192.168.0.28 << 'EOF'
+cd ~/projects/bets
+set -a && . ./.env && set +a
+# Cheap auth check — single tournaments call (1 request)
+curl -s -o /dev/null -w "tournaments HTTP %{http_code}\n" \
+  "https://api.oddspapi.io/v4/tournaments?sportId=10&apiKey=$ODDSPAPI_KEY"
+# Dry-run on yesterday's window — no commit, just verify pipeline
+python3 scripts/backfill_clv_from_oddspapi.py 2>&1 | tail -16
+EOF
+```
+
+Expect: `HTTP 200` from the auth check, and a clean dry-run summary with `requests issued ≤ 20` and `no_fixture_match` either zero or only matching the OddsPapi 3-month historical cutoff (~3 months back from run date). If `HTTP 401/403`, the key is invalid — regenerate at https://oddspapi.io/en/account. If the dry-run reports many `no_fixture_match` rows, check team-name normalisation against the cached fixtures JSON in `logs/cache/oddspapi/fixtures/` (likely a new German/French club name we haven't aliased yet — extend `_ALIAS` in the script).
+
+### Acceptance for 6c
+
+- [ ] `ssh robert@192.168.0.28 'crontab -l | grep oddspapi'` shows the new entry.
+- [ ] First Mon-after-Phase-6 cron run on Pi writes a `logs/backfill/oddspapi/<run_iso>/audit.csv` and `clv_pct` populates for that day's settled bets in prod DB.
+- [ ] WSL and Pi both have OddsPapi entries in their respective crontabs (one quota each, never sharing the key).
 
 ### Acceptance
 

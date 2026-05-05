@@ -111,6 +111,20 @@ AZURE_BLOB_CONN="DefaultEndpointsProtocol=https;AccountName=kaunitzdevstrfk1;...
 # AZURE_BLOB_CONTAINER=raw-api-snapshots
 ```
 
+### OddsPapi Pinnacle close-odds resolver — WSL only (Pi must NOT set this)
+
+Used by `scripts/backfill_clv_from_oddspapi.py` (Mon+Wed 10:00 cron). FDCO stopped publishing Pinnacle close odds (`PSCH/PSCD/PSCA`, `PC>2.5/PC<2.5`) ~mid-Jan 2026 after Pinnacle closed their public API on 2025-07-23. OddsPapi (`api.oddspapi.io`) replaces that source for h2h Pinnacle close.
+
+```bash
+ODDSPAPI_KEY=...   # from https://oddspapi.io/en/account (free tier: 250 req/mo, no credit card)
+```
+
+Quirks:
+- Historical-odds endpoint capped at the **last 3 months** — bets older than that can't be backfilled from OddsPapi (the gap from FDCO-cutoff 2026-01-15 to ~2026-02-05 is unrecoverable from this source).
+- Free tier rate-limit is tight; script paces 5 s between calls and honours `Retry-After` on 429.
+- Script caches every response under `logs/cache/oddspapi/` — re-runs over the same window cost zero requests.
+- When `ODDSPAPI_KEY` is unset the script exits with a clear error rather than silently skipping. Pi-safe because Pi never sets the key.
+
 **Pi-safety contract (post-A.9).** `BetRepo` and `SnapshotArchive` import lazily and stay dormant when env vars are unset. **However**, after A.9 the scanner (`scan_odds.main`) and the FDCO backfill (`backfill_clv_from_fdco`) **refuse to run** without `BETS_DB_WRITE=1` — silent CSV fallback is gone. If the Pi pulls main without env vars set, those scripts will exit with a clear error rather than drop bets silently. A.10 onboards Pi to its own DB; until then, do not pull main onto the Pi. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
 
 API budget: free tier 500 credits/month per key. Cost per call = `regions × markets`; each league fetch is `uk,eu × h2h,totals` = 4 credits. Current schedule: 5 scans/wk × 6 leagues × 4 cr × 4.345 wk ≈ **~520/mo theoretical ceiling**, less in practice (canary skip on empty-fixture days saves ~20 cr/scan; off-season league windows reduce further). Bi-weekly sports check adds ~20 cr/mo. The BTTS follow-up call 422s on free tier without charging. Migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
@@ -129,7 +143,8 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 
 # CLV + housekeeping (both machines)
 0  2  * * 1     Mon 02:00           — fixture calendar ingest (fixtures table in Azure SQL)
-0  8  * * 1     Mon 08:00           — football-data.co.uk CLV + result backfill (DB-only since S.4)
+0  9  * * 1,3   Mon+Wed 09:00       — football-data.co.uk CLV + result backfill (DB-only since S.4)
+0 10  * * 1,3   Mon+Wed 10:00       — OddsPapi Pinnacle close-odds backfill (WSL only — fills the FDCO Pinnacle gap; covers last 7 days)
 0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
 
 # Pi only (WSL would conflict on git-tracked outputs)
@@ -144,7 +159,8 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 
 ```
 scripts/scan_odds.py        Main scanner
-scripts/backfill_clv_from_fdco.py  Mon 08:00 CLV backfill from football-data.co.uk
+scripts/backfill_clv_from_fdco.py  Mon+Wed 09:00 CLV backfill from football-data.co.uk (h2h FTR/PSCH)
+scripts/backfill_clv_from_oddspapi.py  Mon+Wed 10:00 OddsPapi Pinnacle-close resolver (WSL only); fills the FDCO Pinnacle gap (mid-Jan 2026 onward) for 6 prod leagues + La Liga; idempotent; caches every API response under logs/cache/oddspapi/; audit per-run under logs/backfill/oddspapi/
 scripts/closing_line.py     (paused 2026-05-01; kept for revert)
 scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.json
 scripts/check_sports.py     Sports discovery (bi-weekly)
@@ -238,7 +254,12 @@ Configured in `src/betting/risk.py` and `logs/bankroll.json`:
 
 ## CLV diagnostics
 
-CLV is sourced from football-data.co.uk's free Pinnacle closing odds (`PSCH/PSCD/PSCA` for h2h, `PC>2.5/PC<2.5` for totals 2.5). `scripts/backfill_clv_from_fdco.py` runs Mondays at 08:00 UTC, queries pending rows from Azure SQL (`bets` + `paper_bets`), matches against FDCO CSVs, and writes `result`, `pnl`, `settled_at`, `pinnacle_close_prob`, `clv_pct` back to DB only. Requires `BETS_DB_WRITE=1`. Idempotent (result write guarded by `result='pending'`; CLV write always refreshes). No CSV mutation.
+CLV uses two stacked sources:
+
+1. **FDCO** (`scripts/backfill_clv_from_fdco.py`, Mon+Wed 09:00 UTC) — football-data.co.uk free CSVs supply `result`/`pnl` (FTR/FTHG/FTAG) for all 6 production leagues. Until ~mid-Jan 2026 the same CSVs also supplied Pinnacle close (`PSCH/PSCD/PSCA`); after Pinnacle closed their public API on 2025-07-23, FDCO's Pinnacle columns went dark, so this script now mainly settles results.
+2. **OddsPapi** (`scripts/backfill_clv_from_oddspapi.py`, Mon+Wed 10:00 UTC, WSL only) — fills the Pinnacle close gap. Reads pending rows from Azure SQL, matches DB fixtures to OddsPapi `fixtureId` via name normalisation + alias table, fetches `historical-odds?bookmakers=pinnacle` per fixture (cached under `logs/cache/oddspapi/`), picks the latest snapshot where `active=True AND createdAt ≤ kickoff`, Shin-devigs, writes `pinnacle_close_prob` + `clv_pct`. Both scripts require `BETS_DB_WRITE=1`. Idempotent. Audit CSV per run under `logs/backfill/oddspapi/<run_iso>/`.
+
+Coverage: 6 production leagues + La Liga (in paper_bets only). OddsPapi historical-odds capped at last 3 months — bets settled 2026-01-15 → 2026-02-05 are unrecoverable from this source.
 
 **Source-swap rationale (2026-05-01):** the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
 
