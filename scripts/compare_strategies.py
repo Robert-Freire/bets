@@ -2,12 +2,13 @@
 Strategy comparison report.
 
 Reads paper_bets from Azure SQL via BetRepo. Prints a Markdown table to stdout
-and writes docs/STRATEGY_COMPARISON.md.
+and writes one report file per day under logs/strategy_comparisons/.
 
 Requires BETS_DB_WRITE=1 + AZURE_SQL_* env vars (see CLAUDE.md A.4).
 
 Usage:
     python3 scripts/compare_strategies.py
+    python3 scripts/compare_strategies.py --out path/to/file.md
 """
 
 import argparse
@@ -15,6 +16,7 @@ import math
 import os
 import statistics
 import sys
+from datetime import datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +25,7 @@ if str(_ROOT) not in sys.path:
 
 from src.betting.strategies import STRATEGIES  # noqa: E402
 
-OUT_DOC = _ROOT / "docs" / "STRATEGY_COMPARISON.md"
+OUT_DIR = _ROOT / "logs" / "strategy_comparisons"
 
 # Buckets for favourite-longshot bias slice. Bounds are [lo, hi).
 PROB_BUCKETS: list[tuple[float, float, str]] = [
@@ -476,12 +478,21 @@ def main():
     parser = argparse.ArgumentParser(description="Strategy comparison report (CLV-based).")
     parser.add_argument("--all-history", action="store_true",
                         help="Kept for CLI compat; no effect (DB rows are always current).")
+    parser.add_argument("--out", default=None,
+                        help="Output path (default: logs/strategy_comparisons/<YYYY-MM-DD>.md)")
     args = parser.parse_args()
     report = build_report(all_history=args.all_history)
     print(report)
-    OUT_DOC.parent.mkdir(exist_ok=True)
-    OUT_DOC.write_text(report)
-    print(f"[compare] Report written to {OUT_DOC.relative_to(_ROOT)}")
+    out_path = Path(args.out) if args.out else (
+        OUT_DIR / f"{datetime.utcnow().strftime('%Y-%m-%d')}.md"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(report)
+    try:
+        rel = out_path.relative_to(_ROOT)
+    except ValueError:
+        rel = out_path
+    print(f"[compare] Report written to {rel}")
 
 
 if __name__ == "__main__":

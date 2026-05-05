@@ -24,7 +24,7 @@ python3 app.py   # → http://localhost:5000
 
 # Compare strategy variants (after a weekend of data)
 # Requires BETS_DB_WRITE=1 — reads paper_bets from Azure SQL
-export $(cat .env.dev) && python3 scripts/compare_strategies.py   # writes docs/STRATEGY_COMPARISON.md
+export $(cat .env.dev) && python3 scripts/compare_strategies.py   # writes logs/strategy_comparisons/<YYYY-MM-DD>.md
 ```
 
 ## How the scanner works
@@ -145,7 +145,7 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 0  2  * * 1     Mon 02:00           — fixture calendar ingest (fixtures table in Azure SQL)
 0  9  * * 1,3   Mon+Wed 09:00       — football-data.co.uk CLV + result backfill (DB-only since S.4)
 0 10  * * 1,3   Mon+Wed 10:00       — OddsPapi Pinnacle close-odds backfill (WSL only — fills the FDCO Pinnacle gap; covers last 7 days)
-0 11  * * 1     Mon 11:00           — compare_strategies.py → docs/STRATEGY_COMPARISON.md (uses fresh CLV from above)
+0 11  * * 1     Mon 11:00           — compare_strategies.py → logs/strategy_comparisons/<YYYY-MM-DD>.md (uses fresh CLV from above; gitignored)
 0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
 
 # Pi only (WSL would conflict on git-tracked outputs)
@@ -166,7 +166,7 @@ scripts/closing_line.py     (paused 2026-05-01; kept for revert)
 scripts/refresh_xg.py       Weekly xG snapshot from Understat → logs/team_xg.json
 scripts/check_sports.py     Sports discovery (bi-weekly)
 scripts/model_signals.py    CatBoost signal cache generator
-scripts/compare_strategies.py  Strategy comparison report → docs/STRATEGY_COMPARISON.md
+scripts/compare_strategies.py  Strategy comparison report → logs/strategy_comparisons/<YYYY-MM-DD>.md (one report per day; gitignored)
 scripts/archive/migrate_csv_to_db.py  One-shot CSV → DB importer (archived; used once for A.3 backfill)
 scripts/compute_book_skill.py  Per-(book, league, market) skill + bias signals → book_skill table (B.0.5 + B.0.6)
 scripts/ingest_fixtures.py  Mon 02:00 fixture calendar ingest → fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
@@ -203,7 +203,7 @@ docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)
 docs/PLAN_RESEARCH_2026-04.md  Research sprint plan (R.0–R.11)
 docs/RESEARCH_NOTES_2026-04.md  Manual deep-read findings
 docs/BACKTEST.md            Shin-corrected backtest
-docs/STRATEGY_COMPARISON.md  Latest CLV comparison across paper variants
+logs/strategy_comparisons/   Per-day CLV comparison reports (Mon-AM cron; gitignored — read latest via `ls -t logs/strategy_comparisons | head`)
 docs/FIRST_WEEKEND.md       Live eval log + WSL/Pi divergence checklist
 docs/RESEARCH_SCANNER.md    Automated research scanner spec
 docs/RESEARCH_FEED.md       Auto-generated weekly findings (newest first)
@@ -239,7 +239,7 @@ Both the public Azure dashboard and the local `python3 app.py` read exclusively 
 | Dev dashboard (`kaunitz-dev-dashboard-rfk1.orangebush-...`) | Reads dev DB. | Shows WSL test stream only — has never seen Pi production data. |
 | Prod dashboard | Does not exist yet (Phase A.10). | n/a |
 
-**What this means in practice.** When you look at `STRATEGY_COMPARISON.md` or the dashboard, you are seeing the WSL test stream, not the canonical Pi-side production data. Pi data merges into a single picture only after A.10 (`docs/PI_CATCHUP_2026-05.md`).
+**What this means in practice.** When you look at the latest report under `logs/strategy_comparisons/` or the dashboard, you are seeing the WSL test stream, not the canonical Pi-side production data. Pi data merges into a single picture only after A.10 (`docs/PI_CATCHUP_2026-05.md`).
 
 ## Risk management
 
