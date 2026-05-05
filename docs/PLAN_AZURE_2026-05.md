@@ -144,7 +144,7 @@ All A.0–A.9 phases operate on `kaunitz-dev-rg`. A.10 is the only phase that cr
 | A.7 | Easy Auth (Google OIDC) on dev dashboard | dev | no | ✅ Done 2026-05-01 | A.6 |
 | A.8 | Cutover: WSL DB-only, archive WSL CSVs | dev | no | ✅ Partial 2026-05-02 — dashboard reads DB-only; scanner still dual-writes; CSV archive pending | A.7 + 1 week stable A.4/A.5 |
 | A.9 | Decommission WSL CSV path entirely (scanner stops writing CSV, remove CSV code paths) | dev | no | ✅ Done 2026-05-04 | A.8 full + 1 week stable |
-| **A.10** | **Stand up `kaunitz-prod-rg` + onboard Pi** (future sprint — separate plan doc) | **prod (new)** | **yes** | **deferred** | A.9 + ≥1 week soak |
+| **A.10** | **Stand up `kaunitz-prod-rg` + onboard Pi + prod dashboard** | **prod (new)** | **yes** | ✅ Done 2026-05-05 — Pi on `main` writing to prod DB; prod dashboard live (`kaunitz-prod-dashboard-rfk1.agreeablemoss-0a74374c.uksouth.azurecontainerapps.io`, Google OIDC) | A.9 ✅ |
 
 ---
 

@@ -125,7 +125,7 @@ Quirks:
 - Script caches every response under `logs/cache/oddspapi/` — re-runs over the same window cost zero requests.
 - When `ODDSPAPI_KEY` is unset the script exits with a clear error rather than silently skipping. Pi-safe because Pi never sets the key.
 
-**Pi-safety contract (post-A.9).** `BetRepo` and `SnapshotArchive` import lazily and stay dormant when env vars are unset. **However**, after A.9 the scanner (`scan_odds.main`) and the FDCO backfill (`backfill_clv_from_fdco`) **refuse to run** without `BETS_DB_WRITE=1` — silent CSV fallback is gone. If the Pi pulls main without env vars set, those scripts will exit with a clear error rather than drop bets silently. A.10 onboards Pi to its own DB; until then, do not pull main onto the Pi. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
+**Pi-safety contract (post-A.10).** `BetRepo` and `SnapshotArchive` import lazily and stay dormant when env vars are unset. The scanner (`scan_odds.main`) and the FDCO backfill (`backfill_clv_from_fdco`) **refuse to run** without `BETS_DB_WRITE=1` — silent CSV fallback is gone. Pi is now on `main` with `BETS_DB_WRITE=1` + `AZURE_SQL_DSN` + `ODDSPAPI_KEY` set, writing to **prod DB** `kaunitz-prod-sql-uksouth-rfk1.database.windows.net / kaunitz`. Pi blob archival (`BLOB_ARCHIVE=1`) remains out of scope. Lifecycle on the blob container: tier-to-cool at 30d, **no auto-delete** (archive is the substrate for future data-quality rules).
 
 API budget: free tier 500 credits/month per key. Cost per call = `regions × markets`; each league fetch is `uk,eu × h2h,totals` = 4 credits. Current schedule: 5 scans/wk × 6 leagues × 4 cr × 4.345 wk ≈ **~520/mo theoretical ceiling**, less in practice (canary skip on empty-fixture days saves ~20 cr/scan; off-season league windows reduce further). Bi-weekly sports check adds ~20 cr/mo. The BTTS follow-up call 422s on free tier without charging. Migrate to paid tier (~$25/mo for 100k credits) once CLV evidence justifies it.
 
@@ -228,18 +228,16 @@ Stat tiles: Bets placed · Won/Lost/Void · Total staked · P&L · ROI · **Avg 
 
 Three bet sections: **Placed — awaiting result** · **Suggested — not yet placed** · **Settled** (with P&L + CLV%).
 
-Both the public Azure dashboard and the local `python3 app.py` read exclusively from Azure SQL (A.9: DB-only, no CSV fallback). Pi data is not visible in either dashboard until A.10 onboards Pi to its own DB.
+Both the public Azure dashboards (dev + prod) and the local `python3 app.py` read exclusively from Azure SQL (A.9: DB-only, no CSV fallback). The dev and prod stacks are fully isolated — separate RGs, separate SQL servers, separate dashboards.
 
-## Data state — where things live (post-A.9, pre-A.10)
+## Data state — where things live (post-A.10)
 
 | Surface | Code | Data |
 |---|---|---|
-| WSL (`main`) | DB-only after A.9. Scanner / FDCO backfill / dashboard / `compare_strategies` exit 1 without `BETS_DB_WRITE=1`. | All bets live in dev DB `kaunitz-dev-sql-uksouth-rfk1.database.windows.net / kaunitz`. CSV files under `logs/` no longer track live data — only operational state JSONs (`bankroll.json`, `notified.json`, `team_xg.json`, `model_signals.json`). |
-| Pi (`robert@192.168.0.28`) | **Behind `main`** until A.10 lands. Still on pre-A.9 code with the dual-write paths. Pulling main onto Pi *now* would break cron — see PI_CATCHUP runbook. | Pi-local CSVs at `~/projects/bets/logs/` are the **only** copy of prod data. Not yet imported into any DB. |
-| Dev dashboard (`kaunitz-dev-dashboard-rfk1.orangebush-...`) | Reads dev DB. | Shows WSL test stream only — has never seen Pi production data. |
-| Prod dashboard | Does not exist yet (Phase A.10). | n/a |
-
-**What this means in practice.** When you look at the latest report under `logs/strategy_comparisons/` or the dashboard, you are seeing the WSL test stream, not the canonical Pi-side production data. Pi data merges into a single picture only after A.10 (`docs/PI_CATCHUP_2026-05.md`).
+| WSL (`main`) | DB-only. Scanner / FDCO backfill / dashboard / `compare_strategies` exit 1 without `BETS_DB_WRITE=1`. | Dev DB `kaunitz-dev-sql-uksouth-rfk1.database.windows.net / kaunitz` (test stream). CSV files under `logs/` no longer track live data — only operational state JSONs (`bankroll.json`, `notified.json`, `team_xg.json`, `model_signals.json`). |
+| Pi (`robert@192.168.0.28`) | On `main`. Same code as WSL. `BETS_DB_WRITE=1`, `AZURE_SQL_DSN`, `ODDSPAPI_KEY` in `.env`. | Prod DB `kaunitz-prod-sql-uksouth-rfk1.database.windows.net / kaunitz`. Pi-local `logs/*.csv` historical files are frozen since 2026-05-05 (no longer written) — pending archival per `Phase 7d` once ≥1 week of clean DB writes is observed. |
+| Dev dashboard (`kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io`) | Reads dev DB. | WSL test stream. |
+| Prod dashboard (`kaunitz-prod-dashboard-rfk1.agreeablemoss-0a74374c.uksouth.azurecontainerapps.io`) | Reads prod DB. Google OIDC + `DASHBOARD_ALLOWED_EMAILS=robert.freire@gmail.com`. | Pi production stream. |
 
 ## Risk management
 
@@ -300,7 +298,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ done 2026-05-02 (PRs #27 + #28) |
 | Phase 9 / A.9 (decommission CSV path) | ✅ done 2026-05-04 (PR #39) — DB is sole source of truth; scanner / backfill / dashboard refuse to run without `BETS_DB_WRITE=1` |
 | S.1–S.4 (DB-only result + CLV backfill) | ✅ done 2026-05-04 (PR #38) — `backfill_clv_from_fdco` reads pending rows from DB, writes `result`/`pnl`/`settled_at`/`pinnacle_close_prob`/`clv_pct` back; `compare_strategies` reads from DB |
-| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding) | pending — runbook in `docs/PI_CATCHUP_2026-05.md` |
+| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding + prod dashboard) | ✅ done 2026-05-05 — Pi writes to prod DB; identical code to WSL; prod dashboard live with Google OIDC |
 | Phase 10 (long-term: syndicate, multi-account) | open |
 | Phase 11 (research scanner) | ✅ done |
 | R.0–R.3 + R.5.5a/b + R.7–R.9 + R.11 (2026-04 research sprint) | ✅ done |
