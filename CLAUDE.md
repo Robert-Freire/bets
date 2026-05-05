@@ -145,6 +145,7 @@ Both Pi and WSL run the same scanner cron. Pi is canonical production (24/7); WS
 0  2  * * 1     Mon 02:00           — fixture calendar ingest (fixtures table in Azure SQL)
 0  9  * * 1,3   Mon+Wed 09:00       — football-data.co.uk CLV + result backfill (DB-only since S.4)
 0 10  * * 1,3   Mon+Wed 10:00       — OddsPapi Pinnacle close-odds backfill (WSL only — fills the FDCO Pinnacle gap; covers last 7 days)
+0 11  * * 1     Mon 11:00           — compare_strategies.py → docs/STRATEGY_COMPARISON.md (uses fresh CLV from above)
 0  8  1,15 * *  Bi-weekly 8am       — sports discovery check
 
 # Pi only (WSL would conflict on git-tracked outputs)
