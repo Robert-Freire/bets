@@ -2,7 +2,7 @@
 
 *Reviewed: 2026-04-29*
 
-> **Status (2026-05-01):** Foundational review that drove `docs/PLAN.md`. The "consensus uses raw `1/odds` instead of de-vigged probabilities" bug ✅ fixed via Phase 1 (Shin de-vigging shipped). CLV vs Pinnacle ✅ shipped via Phase 3 (since paused; replaced by FDCO weekly backfill — see CLAUDE.md). All other identified bugs and Phase-0–5.8 work ✅ shipped. **Retained as the historical record of the diagnosis** that motivated the system's current architecture, not as a current snapshot.
+> **Status (2026-05-01):** Foundational review that drove the Phase 0–5.8 overhaul. The "consensus uses raw `1/odds` instead of de-vigged probabilities" bug ✅ fixed via Shin de-vigging. CLV vs Pinnacle ✅ shipped (the original `closing_line.py` path is paused; replaced by FDCO + OddsPapi weekly backfill — see CLAUDE.md). All other identified bugs ✅ shipped. **Retained as the historical record of the diagnosis** that motivated the system's current architecture, not as a current snapshot.
 
 ## TL;DR
 

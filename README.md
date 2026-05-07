@@ -252,8 +252,8 @@ data/
   raw/                  football-data.co.uk CSVs (10+ seasons per league)
   raw/xg/               Understat xG CSVs
 docs/
-  PLAN.md               Phased improvement roadmap (Phases 0–10)
   APPROACH.md           Full research-backed architecture notes
+  PLAN_RESEARCH_2026-04.md  Active research sprint (pending phases)
   papers/               Academic paper summaries
 ```
 
