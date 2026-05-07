@@ -1,8 +1,6 @@
 """
 Tests for src/betting/strategies.py — verifying each of the 8 strategy variants
 behaves according to its specification.
-
-Reference: docs/PLAN.md §4.5.4 and §5.6.1
 """
 import importlib.util
 import os
