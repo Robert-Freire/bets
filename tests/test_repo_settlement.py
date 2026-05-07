@@ -28,9 +28,9 @@ def _make_db():
 
 
 class _SqliteRepo:
-    def __init__(self, conn, logs_dir):
+    def __init__(self, conn):
         from src.storage.repo import BetRepo
-        self.repo = BetRepo(logs_dir=logs_dir, dsn="sqlite-test")
+        self.repo = BetRepo(dsn="sqlite-test")
         self.repo._conn = conn
         self.repo._cur = conn.cursor()
         self.repo._connect = lambda: conn  # type: ignore[method-assign]
@@ -59,7 +59,7 @@ def _bet_row(side="HOME", book="bet365", market="h2h", line="",
 
 def test_settle_bet_populates_columns(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     repo.add_bets([_bet_row()])
@@ -88,7 +88,7 @@ def test_settle_bet_result_write_is_one_shot(fresh_env, tmp_path):
     """Re-settling an already-settled bet returns True for CLV refresh
     but leaves settled_at unchanged."""
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     repo.add_bets([_bet_row()])
@@ -116,7 +116,7 @@ def test_settle_bet_result_write_is_one_shot(fresh_env, tmp_path):
 
 def test_settle_bet_db_disabled_returns_false(fresh_env, tmp_path):
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)  # dsn=None via env
+    repo = BetRepo()  # dsn=None via env
     assert repo.db_enabled is False
     ok = repo.settle_bet("fid", "HOME", "h2h", None, "bet365",
                          result="W", pnl=5.0, pin_prob=0.5, clv_pct=0.02)
@@ -127,7 +127,7 @@ def test_settle_bet_db_disabled_returns_false(fresh_env, tmp_path):
 
 def test_settle_paper_bet_populates_columns(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     paper_row = {**_bet_row(), "strategy": "A_production",
@@ -157,7 +157,7 @@ def test_settle_paper_bet_populates_columns(fresh_env, tmp_path):
 def test_settle_paper_bet_strategy_scoped(fresh_env, tmp_path):
     """Two strategies, same fixture/side/book: only the targeted strategy row updates."""
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     base_row = {**_bet_row(), "strategy": "A_production",
@@ -193,7 +193,7 @@ def test_settle_paper_bet_strategy_scoped(fresh_env, tmp_path):
 
 def test_settle_paper_bet_result_one_shot(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     base_row = {**_bet_row(), "strategy": "A_production",
@@ -222,7 +222,7 @@ def test_settle_paper_bet_result_one_shot(fresh_env, tmp_path):
 def test_settle_bet_clv_first_then_result(fresh_env, tmp_path):
     """CLV write with result=None works; subsequent result write settles cleanly."""
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     repo.add_bets([_bet_row()])
@@ -254,7 +254,7 @@ def test_settle_bet_clv_first_then_result(fresh_env, tmp_path):
 def test_settle_bet_clv_write_idempotent(fresh_env, tmp_path):
     """Second CLV write with identical value → guard fires → rowcount=0 → False."""
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     repo.add_bets([_bet_row()])
@@ -275,7 +275,7 @@ def test_settle_bet_clv_write_idempotent(fresh_env, tmp_path):
 
 def test_iter_unsettled_yields_past_kickoff_rows(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     # Past kickoff
@@ -292,7 +292,7 @@ def test_iter_unsettled_yields_past_kickoff_rows(fresh_env, tmp_path):
 
 def test_iter_unsettled_skips_future_kickoff(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     repo.add_bets([_bet_row(kickoff="2099-01-01 15:00")])
@@ -306,7 +306,7 @@ def test_iter_unsettled_skips_future_kickoff(fresh_env, tmp_path):
 
 def test_iter_unsettled_includes_paper_bets(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     base_row = {**_bet_row(kickoff="2026-04-10 15:00"), "strategy": "A_production",

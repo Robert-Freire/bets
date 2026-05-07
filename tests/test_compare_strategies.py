@@ -33,9 +33,9 @@ def _make_db():
 
 
 class _SqliteRepo:
-    def __init__(self, conn, logs_dir):
+    def __init__(self, conn):
         from src.storage.repo import BetRepo
-        self.repo = BetRepo(logs_dir=logs_dir, dsn="sqlite-test")
+        self.repo = BetRepo(dsn="sqlite-test")
         self.repo._conn = conn
         self.repo._cur = conn.cursor()
         self.repo._connect = lambda: conn  # type: ignore[method-assign]
@@ -54,7 +54,7 @@ def db_repo(fresh_env, monkeypatch, tmp_path):
     """Yield (db_conn, repo) pair with BETS_DB_WRITE=1 set."""
     monkeypatch.setenv("BETS_DB_WRITE", "1")
     conn = _make_db()
-    helper = _SqliteRepo(conn, tmp_path)
+    helper = _SqliteRepo(conn)
     return conn, helper.repo
 
 
@@ -204,7 +204,7 @@ def test_build_report_requires_db_env(fresh_env, monkeypatch, tmp_path):
     """build_report() exits non-zero when BETS_DB_WRITE is unset."""
     # BETS_DB_WRITE not set (fresh_env stripped it)
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     with pytest.raises(SystemExit) as exc_info:
         cs.build_report(repo=helper.repo)
     assert exc_info.value.code != 0

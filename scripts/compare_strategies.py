@@ -286,7 +286,7 @@ def build_report(repo=None, all_history: bool = False) -> str:
 
     from src.storage.repo import BetRepo
     if repo is None:
-        repo = BetRepo(logs_dir=_ROOT / "logs")
+        repo = BetRepo()
 
     raw_rows = repo.fetch_paper_bets_for_compare()
     if raw_rows is None:

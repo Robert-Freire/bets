@@ -273,7 +273,6 @@ class _BookAccum:
 
 def _load_flag_signals(
     repo: BetRepo,
-    logs_dir: Path,
     since: date,
     until: date,
 ) -> dict[tuple[str, str, str], dict]:
@@ -565,7 +564,7 @@ def compute(
         print("[book_skill] BLOB_ARCHIVE not enabled — skipping B.0.5 (blob signals).")
 
     repo = BetRepo()
-    flag_stats = _load_flag_signals(repo, _ROOT / "logs", window_start, window_end)
+    flag_stats = _load_flag_signals(repo, window_start, window_end)
     rows: list[dict] = []
 
     for lg in leagues:

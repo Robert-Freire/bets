@@ -47,7 +47,7 @@ def _bet_row(scanned_at="2026-04-30 09:00 UTC", side="HOME", book="bet365",
 def _make_repo(conn, tmp_path):
     """BetRepo with a SQLite connection wired in (bypasses pyodbc)."""
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path, dsn="sqlite-test")
+    repo = BetRepo(dsn="sqlite-test")
     repo._conn = conn
     repo._cur = conn.cursor()
     repo._connect = lambda: conn  # type: ignore[method-assign]
@@ -66,7 +66,7 @@ def fresh_env(monkeypatch):
 
 def test_db_status_disabled_when_env_missing(fresh_env, tmp_path):
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
     assert repo.db_status() == "disabled"
 
 
@@ -74,7 +74,7 @@ def test_db_status_down_on_bad_dsn(fresh_env, tmp_path, monkeypatch):
     monkeypatch.setenv("BETS_DB_WRITE", "1")
     monkeypatch.setenv("AZURE_SQL_DSN", "Driver={Nonexistent};Server=nope;")
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
     assert repo.db_status() == "down"
 
 
@@ -117,7 +117,7 @@ def test_get_bets_returns_csv_style_dicts(fresh_env, tmp_path):
 
 def test_get_bets_returns_none_when_disabled(fresh_env, tmp_path):
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
     assert repo.get_bets() is None
 
 
@@ -177,7 +177,7 @@ def test_update_bet_settle_writes_to_db(fresh_env, tmp_path):
 
 def test_update_bet_settle_returns_false_when_db_disabled(fresh_env, tmp_path):
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=tmp_path)
+    repo = BetRepo()
     ok = repo.update_bet_settle(
         scan_date="2026-04-30",
         kickoff="2026-05-10 15:00", home="X", away="Y", market="h2h",

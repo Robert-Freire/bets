@@ -28,11 +28,7 @@ from src.data.fixture_calendar import (
     get_fixtures as _get_calendar_fixtures,
 )
 
-try:
-    from src.betting.devig import shin as _shin_devig, proportional as _proportional_devig
-    _DEVIG = True
-except ImportError:
-    _DEVIG = False
+from src.betting.devig import shin as _shin_devig, proportional as _proportional_devig
 
 # A.9: BetRepo writes to Azure SQL only. Requires BETS_DB_WRITE=1 + DSN.
 from src.storage.repo import BetRepo
@@ -42,37 +38,19 @@ from src.storage.repo import BetRepo
 # import of azure.storage.blob; module imports nothing extra at top level.
 from src.storage.snapshots import get_archive as _get_snapshot_archive
 
-try:
-    from src.betting.risk import (
-        get_bankroll as _get_bankroll,
-        compute_raw_stake as _compute_raw_stake,
-        load_drawdown_state as _load_drawdown_state,
-        drawdown_multiplier as _drawdown_multiplier,
-        apply_risk_pipeline as _apply_risk_pipeline,
-    )
-    _RISK = True
-except ImportError:
-    _RISK = False
-
-try:
-    from src.betting.strategies import STRATEGIES, evaluate_strategy
-    _STRATEGIES = True
-except ImportError:
-    _STRATEGIES = False
-    STRATEGIES = []
-
-try:
-    from src.betting.commissions import (
-        commission_rate as _commission_rate,
-        effective_odds as _effective_odds,
-        effective_implied_prob as _effective_implied_prob,
-    )
-    _COMMISSIONS = True
-except ImportError:
-    _COMMISSIONS = False
-    def _commission_rate(book: str) -> float: return 0.0  # noqa: E704
-    def _effective_odds(odds: float, book: str) -> float: return odds  # noqa: E704
-    def _effective_implied_prob(odds: float, book: str) -> float: return 1.0 / odds  # noqa: E704
+from src.betting.risk import (
+    get_bankroll as _get_bankroll,
+    compute_raw_stake as _compute_raw_stake,
+    load_drawdown_state as _load_drawdown_state,
+    drawdown_multiplier as _drawdown_multiplier,
+    apply_risk_pipeline as _apply_risk_pipeline,
+)
+from src.betting.strategies import STRATEGIES, evaluate_strategy
+from src.betting.commissions import (
+    commission_rate as _commission_rate,
+    effective_odds as _effective_odds,
+    effective_implied_prob as _effective_implied_prob,
+)
 
 API_KEY = os.environ.get("ODDS_API_KEY", "")
 if not API_KEY:
@@ -297,10 +275,7 @@ def _devig_book(entries: dict) -> dict[str, float]:
     silently mislabeling the devig_method in the output row."""
     sides = list(entries.keys())
     raw = [1.0 / entries[s] for s in sides]
-    if _DEVIG:
-        fair = _shin_devig(raw)
-    else:
-        fair = [r / sum(raw) for r in raw]
+    fair = _shin_devig(raw)
     return dict(zip(sides, fair))
 
 
@@ -774,7 +749,7 @@ def main():
         )
         sys.exit(1)
 
-    BANKROLL = _get_bankroll() if _RISK else float(os.environ.get("BANKROLL", 1000.0))
+    BANKROLL = _get_bankroll()
 
     now_dt = datetime.now(timezone.utc)
     now = now_dt.strftime("%Y-%m-%d %H:%M UTC")
@@ -869,8 +844,7 @@ def main():
                     skip_remaining_football = True
 
             # Paper strategies — reuse same events, no extra API calls
-            if _STRATEGIES:
-                for strategy in STRATEGIES:
+            for strategy in STRATEGIES:
                     try:
                         paper_bets = evaluate_strategy(
                             events, sport_key, strategy,
@@ -908,37 +882,31 @@ def main():
     # Production bets always use default half-Kelly (A_production).
     # If a graduated variant has kelly_fraction != 0.5, thread vb["kelly_fraction"] here.
     for vb in output_bets:
-        if _RISK:
-            vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL, vb["book"])
-        else:
-            eff = _effective_odds(vb["odds"], vb["book"])
-            vb["stake"] = max(0.0, min(0.5 * (vb["cons"] * eff - 1) / (eff - 1), 0.05)) * BANKROLL
+        vb["stake"] = _compute_raw_stake(vb["cons"], vb["odds"], BANKROLL, vb["book"])
 
     n_pre_risk = len(output_bets)
-    dd_mult = 1.0
-    if _RISK:
-        current_br, high_water = _load_drawdown_state(
-            BANKROLL, settled_pnl=repo.get_settled_pnl()
+    current_br, high_water = _load_drawdown_state(
+        BANKROLL, settled_pnl=repo.get_settled_pnl()
+    )
+    dd_mult = _drawdown_multiplier(current_br, high_water)
+    if dd_mult < 1.0:
+        print(f"[risk] Drawdown brake active: bankroll £{current_br:.0f} vs high water £{high_water:.0f} "
+              f"— stakes halved")
+    output_bets = _apply_risk_pipeline(output_bets, BANKROLL, dd_mult)
+    # Re-split using pre-pipeline tags (edge-only re-split drops the model-agree condition)
+    kaunitz_bets = [b for b in output_bets if b.get("_bucket") == "kaunitz"]
+    model_bets   = [b for b in output_bets if b.get("_bucket") == "model"]
+    print(f"[risk] After risk pipeline: {len(output_bets)} bet(s) "
+          f"(portfolio cap {15}%, fixture cap {5}%, rounding £5)")
+    if n_pre_risk > 0 and not output_bets:
+        print("[ntfy] All bets dropped by risk pipeline — sending notification.")
+        notify(
+            "WARNING: Bets - all dropped by risk pipeline",
+            f"WARNING: {n_pre_risk} value bet(s) flagged but all dropped by risk pipeline "
+            f"(stakes < £5 min after rounding). Consider reviewing bankroll or stake floor — "
+            f"you may be missing real edge.",
+            priority="default",
         )
-        dd_mult = _drawdown_multiplier(current_br, high_water)
-        if dd_mult < 1.0:
-            print(f"[risk] Drawdown brake active: bankroll £{current_br:.0f} vs high water £{high_water:.0f} "
-                  f"— stakes halved")
-        output_bets = _apply_risk_pipeline(output_bets, BANKROLL, dd_mult)
-        # Re-split using pre-pipeline tags (edge-only re-split drops the model-agree condition)
-        kaunitz_bets = [b for b in output_bets if b.get("_bucket") == "kaunitz"]
-        model_bets   = [b for b in output_bets if b.get("_bucket") == "model"]
-        print(f"[risk] After risk pipeline: {len(output_bets)} bet(s) "
-              f"(portfolio cap {15}%, fixture cap {5}%, rounding £5)")
-        if n_pre_risk > 0 and not output_bets:
-            print("[ntfy] All bets dropped by risk pipeline — sending notification.")
-            notify(
-                "WARNING: Bets - all dropped by risk pipeline",
-                f"WARNING: {n_pre_risk} value bet(s) flagged but all dropped by risk pipeline "
-                f"(stakes < £5 min after rounding). Consider reviewing bankroll or stake floor — "
-                f"you may be missing real edge.",
-                priority="default",
-            )
     print()
 
     # Print full detail

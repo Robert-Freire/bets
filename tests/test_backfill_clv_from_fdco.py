@@ -34,9 +34,9 @@ def _make_db():
 
 
 class _SqliteRepo:
-    def __init__(self, conn, logs_dir):
+    def __init__(self, conn):
         from src.storage.repo import BetRepo
-        self.repo = BetRepo(logs_dir=logs_dir, dsn="sqlite-test")
+        self.repo = BetRepo(dsn="sqlite-test")
         self.repo._conn = conn
         self.repo._cur = conn.cursor()
         self.repo._connect = lambda: conn  # type: ignore[method-assign]
@@ -148,7 +148,7 @@ def test_main_settles_paper_bet_via_db(fresh_env, monkeypatch, tmp_path):
     _write_fdco_csv(raw / "E0_2526.csv")
 
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     base_row = {
@@ -208,7 +208,7 @@ def test_dry_run_makes_no_db_writes(fresh_env, monkeypatch, tmp_path):
     _write_fdco_csv(raw / "E0_2526.csv")
 
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     base_row = {
@@ -235,7 +235,7 @@ def test_future_kickoff_not_settled(fresh_env, monkeypatch, tmp_path):
     _write_fdco_csv(raw / "E0_2526.csv")
 
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     # Future kickoff — must not appear in iter_unsettled_or_no_clv
@@ -262,7 +262,7 @@ def test_btts_market_skipped(fresh_env, monkeypatch, tmp_path):
     _write_fdco_csv(raw / "E0_2526.csv")
 
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     base_row = {

@@ -349,7 +349,7 @@ def main() -> None:
 
     # Connect to DB
     from src.storage.repo import BetRepo
-    repo = BetRepo(logs_dir=_ROOT / "logs")
+    repo = BetRepo()
 
     # Pre-fetch OddsPapi fixtures catalogues per (sport_key, window)
     catalogues: dict[str, dict[tuple[str, str], dict]] = {}

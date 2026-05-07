@@ -239,7 +239,7 @@ def main() -> None:
         print(f"  [fdco] {league}: {len(fdco_by_league[league])} fixtures indexed")
 
     from src.storage.repo import BetRepo as _BetRepo
-    repo = _BetRepo(logs_dir=_ROOT / "logs")
+    repo = _BetRepo()
 
     # Counters
     bet_w = bet_l = bet_void = 0

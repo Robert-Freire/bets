@@ -94,9 +94,9 @@ class _SqliteRepo:
     Keeps the tests hermetic and fast.
     """
 
-    def __init__(self, conn, logs_dir):
+    def __init__(self, conn):
         from src.storage.repo import BetRepo
-        self.repo = BetRepo(logs_dir=logs_dir, dsn="sqlite-test")
+        self.repo = BetRepo(dsn="sqlite-test")
         # Override connect: use the provided sqlite conn directly.
         self.repo._conn = conn
         self.repo._cur = conn.cursor()
@@ -107,7 +107,7 @@ class _SqliteRepo:
 def test_db_write_produces_matching_uuid(fresh_env, tmp_path):
     """add_bets writes to DB with the same UUID5 the A.3 importer computes."""
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     row = _bet_row()
@@ -130,7 +130,7 @@ def test_db_write_idempotent_on_retry(fresh_env, tmp_path):
     """Calling add_bets twice with the same row produces exactly 1 DB row:
     deterministic UUID + INSERT-IF-NOT-EXISTS makes the second insert a no-op."""
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     repo.add_bets([_bet_row()])
@@ -141,7 +141,7 @@ def test_db_write_idempotent_on_retry(fresh_env, tmp_path):
 
 def test_dual_write_paper_bets(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     rows = [
@@ -160,7 +160,7 @@ def test_dual_write_paper_bets(fresh_env, tmp_path):
 
 def test_dual_write_closing_lines_uses_pinnacle_book(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     closing_row = {
@@ -183,7 +183,7 @@ def test_dual_write_closing_lines_uses_pinnacle_book(fresh_env, tmp_path):
 
 def test_dual_write_drift(fresh_env, tmp_path):
     db = _make_db()
-    helper = _SqliteRepo(db, tmp_path)
+    helper = _SqliteRepo(db)
     repo = helper.repo
 
     drift_row = {

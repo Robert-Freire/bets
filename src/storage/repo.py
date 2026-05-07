@@ -192,12 +192,7 @@ class BetRepo:
     Construct one per scan/closing-line process; call `close()` at the end.
     """
 
-    def __init__(self, logs_dir: Path | None = None,
-                 dsn: str | None = "__resolve__"):
-        # logs_dir is accepted but unused — retained for backward compatibility
-        # with callers that pass it. Removed from active use in A.9.
-        _ = logs_dir
-
+    def __init__(self, dsn: str | None = "__resolve__"):
         # Pass dsn=None explicitly to force no-op (used by tests).
         # Sentinel "__resolve__" means: read env at construction time.
         if dsn == "__resolve__":
@@ -245,6 +240,12 @@ class BetRepo:
                 pass
             self._conn = None
             self._cur = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
     @contextmanager
     def _db_section(self):
