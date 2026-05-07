@@ -199,16 +199,16 @@ src/storage/snapshots.py    SnapshotArchive: gzipped raw API responses → Azure
 src/data/fixture_calendar.py  Forward fixture lookup from fixtures table via FixtureRepo (Pi-safe: no-op when DB env vars unset)
 src/betting/devig.py        Shin / proportional / power de-vigging
 src/betting/risk.py         Stake rounding, fixture cap, portfolio cap, drawdown
-src/betting/strategies.py   16 paper variants (A–P; A_production live, B–P shadow) + evaluate_strategy()
+src/betting/strategies.py   16 paper variants (A–T; A_production live, remainder shadow) + evaluate_strategy()
 src/betting/walk_forward.py  Walk-forward backtest primitive (TimeSeriesSplit)
 
-logs/team_xg.json           Per-team avg xG + q25 threshold (weekly; feeds K_draw_bias)
+logs/team_xg.json           Per-team avg xG + q25 threshold (weekly; feeds xG-based variants)
 logs/bankroll.json          High-water mark for drawdown brake
 logs/notified.json          Notification dedupe state
 logs/scan.log               Scanner output
 logs/backfill_clv.log       FDCO backfill output
 logs/ingest_fixtures.log    Fixture ingest output
-tests/                      pytest suite (469 tests across 37 files; run with `pytest`)
+tests/                      pytest suite (445 tests across 37 files; run with `pytest`)
 
 docs/PLAN_RESEARCH_2026-04.md  Research sprint plan (R.0–R.11; pending: R.5/R.5.5c/R.6/R.10)
 docs/RESEARCH_NOTES_2026-04.md  Manual deep-read findings
@@ -288,6 +288,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Group | Status |
 |---|---|
 | Foundation (Phases 0–5.8, 9a, 9b–9d, A.5.5, A.8, A.9, A.10, S.1–S.4) | ✅ all done — DB-only, Pi on prod, dual dashboards live (latest: A.10 on 2026-05-05) |
+| S.1 (strategy portfolio refresh — retire B/G/K/O, add Q/R/S/T) | ✅ done 2026-05-07 |
 | Phase 7 (model overhaul: calibration, hold-out eval) | ✅ scaffolding done 2026-05-01; HOLD on flip pending ≥50 CLV bets (`docs/MODEL_EVAL_2026-05.md`) |
 | B.0–B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
 | B.1 (bias backfill: fav-longshot slope + home/draw bias + empirical-Bayes shrinkage) | ✅ done 2026-05-03 |
@@ -304,7 +305,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 
 Detail in `docs/PLAN_RESEARCH_2026-04.md`.
 
-**Variants in shadow** (paper portfolio only, not flipped as defaults): I_power_devig, J_sharp_weighted, K_draw_bias, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner uses A_production logic.
+**Variants in shadow** (paper portfolio only, not flipped as defaults): C_loose, D_pinnacle_only, E_exchanges_only, F_model_primary, H_no_pinnacle, I_power_devig, J_sharp_weighted, L_quarter_kelly, M_min_prob_15, N_competitive_only, P_max_odds_shopping, Q_pinnacle_tight, R_longshot, S_exchange_anchor, T_high_edge. Production scanner uses A_production logic.
 
 ## Research cycle
 
