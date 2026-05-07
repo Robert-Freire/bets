@@ -1,5 +1,19 @@
 # Bets — Multi-Sport Value Betting System
 
+## Contributing — branch and PR rules
+
+**Direct pushes to `main` are restricted to documentation only** (files under `docs/`, `*.md` at repo root, `CLAUDE.md`).
+
+Every code change — any edit to `src/`, `scripts/`, `app.py`, `tests/`, `config.json`, `requirements.txt`, CI workflows, or any non-doc file — **must go through a pull request**:
+
+1. Create a feature branch from `main`: `git checkout -b <short-description>`.
+2. Commit your changes on the branch.
+3. Open a PR: `gh pr create` (title ≤70 chars; body summarises the why, not the what).
+4. Merge only after the PR is reviewed (self-review is fine for solo work; leave a comment noting what you checked).
+5. Delete the branch after merge.
+
+**Never** force-push to `main`, amend published commits on `main`, or bypass pre-commit hooks (`--no-verify`).
+
 ## What this is
 
 A value betting scanner using the **Kaunitz consensus strategy**: compute the Shin-devigged fair probability across 30–40 bookmakers, then flag bets where a UK-licensed bookmaker's odds are significantly better than the consensus. CLV (closing-line value) against Pinnacle is the primary diagnostic for whether edge is real.
@@ -194,13 +208,9 @@ logs/notified.json          Notification dedupe state
 logs/scan.log               Scanner output
 logs/backfill_clv.log       FDCO backfill output
 logs/ingest_fixtures.log    Fixture ingest output
-logs/closing_line.log       (frozen; closing_line.py paused — historical only)
-
 tests/                      pytest suite (469 tests across 37 files; run with `pytest`)
 
-docs/PLAN.md                Phased improvement roadmap (Phases 0–10, foundation — historical for done phases)
-docs/PLAN_AZURE_2026-05.md  Azure migration plan (A.0–A.10)
-docs/PLAN_RESEARCH_2026-04.md  Research sprint plan (R.0–R.11)
+docs/PLAN_RESEARCH_2026-04.md  Research sprint plan (R.0–R.11; pending: R.5/R.5.5c/R.6/R.10)
 docs/RESEARCH_NOTES_2026-04.md  Manual deep-read findings
 docs/BACKTEST.md            Shin-corrected backtest
 logs/strategy_comparisons/   Per-day CLV comparison reports (Mon-AM cron; gitignored — read latest via `ls -t logs/strategy_comparisons | head`)
@@ -208,7 +218,6 @@ docs/FIRST_WEEKEND.md       Live eval log + WSL/Pi divergence checklist
 docs/RESEARCH_SCANNER.md    Automated research scanner spec
 docs/RESEARCH_FEED.md       Auto-generated weekly findings (newest first)
 docs/APPROACH.md            Full research-backed architecture
-docs/REVIEW.md              Foundational review (2026-04-29; historical)
 docs/FDCO_INGEST_NOTES.md   Football-data.co.uk ingest details
 docs/AH_FEASIBILITY.md      Asian Handicap feasibility probe (R.9)
 docs/COMMISSIONS.md         Per-book commission rates
@@ -235,7 +244,7 @@ Both the public Azure dashboards (dev + prod) and the local `python3 app.py` rea
 | Surface | Code | Data |
 |---|---|---|
 | WSL (`main`) | DB-only. Scanner / FDCO backfill / dashboard / `compare_strategies` exit 1 without `BETS_DB_WRITE=1`. | Dev DB `kaunitz-dev-sql-uksouth-rfk1.database.windows.net / kaunitz` (test stream). CSV files under `logs/` no longer track live data — only operational state JSONs (`bankroll.json`, `notified.json`, `team_xg.json`, `model_signals.json`). |
-| Pi (`robert@192.168.0.28`) | On `main`. Same code as WSL. `BETS_DB_WRITE=1`, `AZURE_SQL_DSN`, `ODDSPAPI_KEY` in `.env`. | Prod DB `kaunitz-prod-sql-uksouth-rfk1.database.windows.net / kaunitz`. Pi-local `logs/*.csv` historical files are frozen since 2026-05-05 (no longer written) — pending archival per `Phase 7d` once ≥1 week of clean DB writes is observed. |
+| Pi (`robert@192.168.0.28`) | On `main`. Same code as WSL. `BETS_DB_WRITE=1`, `AZURE_SQL_DSN`, `ODDSPAPI_KEY` in `.env`. | Prod DB `kaunitz-prod-sql-uksouth-rfk1.database.windows.net / kaunitz`. Pi-local `logs/*.csv` historical files are frozen since 2026-05-05 (no longer written) — pending archival once ≥1 week of clean DB writes is observed. |
 | Dev dashboard (`kaunitz-dev-dashboard-rfk1.orangebush-7e5af054.uksouth.azurecontainerapps.io`) | Reads dev DB. | WSL test stream. |
 | Prod dashboard (`kaunitz-prod-dashboard-rfk1.agreeablemoss-0a74374c.uksouth.azurecontainerapps.io`) | Reads prod DB. Google OIDC + `DASHBOARD_ALLOWED_EMAILS=robert.freire@gmail.com`. | Pi production stream. |
 
@@ -260,13 +269,7 @@ CLV uses two stacked sources:
 
 Coverage: 6 production leagues + La Liga (in paper_bets only). OddsPapi historical-odds capped at last 3 months — bets settled 2026-01-15 → 2026-02-05 are unrecoverable from this source.
 
-**Source-swap rationale (2026-05-01):** the every-5-min Odds API polling in `closing_line.py` was projected at ~700–1000 credits/month forward and risked the 500/mo free quota. FDCO is free and accurate enough for CLV signal evaluation.
-
-**Trade-offs vs the previous closing_line.py path:**
-- No drift (T-60/T-15/T-1 snapshots disabled; drift.csv removed in A.9).
-- Top-6 leagues only: EPL, Bundesliga, Serie A, Ligue 1, Championship, Bundesliga 2.
-- Totals only on the 2.5 line; no BTTS (FDCO doesn't carry it; system has 0 BTTS bets anyway).
-- ≥1-day delay vs at-close capture — fine for weekly review, useless for live tracking.
+**Why FDCO+OddsPapi instead of `closing_line.py`** (paused 2026-05-01): every-5-min Odds API polling projected ~700–1000 cr/mo and risked the 500/mo free quota. Trade-off: no drift snapshots, top-6 football leagues only, ≥1-day delay (fine for weekly review).
 
 **CLV scope limitations:**
 - Tennis + NBA + BTTS bets produce no CLV (FDCO is football-only).
@@ -284,28 +287,22 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 
 | Group | Status |
 |---|---|
-| Phases 0–5.8 (hygiene, devig, risk, CLV, filters, markets, paper portfolio, commission-aware) | ✅ all done |
-| Phase 6 (storage migration: SQLite + UUIDs) | superseded by Phase 9 Azure direction |
+| Foundation (Phases 0–5.8, 9a, 9b–9d, A.5.5, A.8, A.9, A.10, S.1–S.4) | ✅ all done — DB-only, Pi on prod, dual dashboards live (latest: A.10 on 2026-05-05) |
 | Phase 7 (model overhaul: calibration, hold-out eval) | ✅ scaffolding done 2026-05-01; HOLD on flip pending ≥50 CLV bets (`docs/MODEL_EVAL_2026-05.md`) |
-| Phase 8 (Betfair API auto-placement) | pending |
-| Phase 9a (Pi cron cutover) | ✅ done 2026-05-01 |
-| Phase 9b–9d (Azure dev migration A.0–A.7 + A.5.5: SQL DB + KV + 7-table schema + importer + dual-writer + dashboard DB-first reads + Container Apps dashboard with Google OIDC + raw-API blob archive) | ✅ done 2026-05-01 |
-| B.0 + B.0.5 + B.0.6 + B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
+| B.0–B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
 | B.1 (bias backfill: fav-longshot slope + home/draw bias + empirical-Bayes shrinkage) | ✅ done 2026-05-03 |
 | B.3 (cron: WSL ✅ 2026-05-03; Pi pending) | partial |
-| B.2 (Brier-vs-close decision gate), B.4* (downstream variants) | pending |
-| Audit invariants I-1..I-13 (groups 1–4: P&L arithmetic, dashboard parity, CLV pipeline, book_skill) | ✅ done 2026-05-03; GitHub Actions workflow Mon 08:10 UTC (OIDC + KV, no new secrets); groups 5–6 pending |
-| Phase 9 / A.8 (cutover: WSL DB-only, archive CSVs) | ✅ done 2026-05-02 (PRs #27 + #28) |
-| Phase 9 / A.9 (decommission CSV path) | ✅ done 2026-05-04 (PR #39) — DB is sole source of truth; scanner / backfill / dashboard refuse to run without `BETS_DB_WRITE=1` |
-| S.1–S.4 (DB-only result + CLV backfill) | ✅ done 2026-05-04 (PR #38) — `backfill_clv_from_fdco` reads pending rows from DB, writes `result`/`pnl`/`settled_at`/`pinnacle_close_prob`/`clv_pct` back; `compare_strategies` reads from DB |
-| Phase 9 / A.10 (`kaunitz-prod-rg` + Pi onboarding + prod dashboard) | ✅ done 2026-05-05 — Pi writes to prod DB; identical code to WSL; prod dashboard live with Google OIDC |
-| Phase 10 (long-term: syndicate, multi-account) | open |
-| Phase 11 (research scanner) | ✅ done |
+| Audit invariants I-1..I-13 (groups 1–4) | ✅ done 2026-05-03; GH Actions Mon 08:10 UTC; groups 5–6 pending |
 | R.0–R.3 + R.5.5a/b + R.7–R.9 + R.11 (2026-04 research sprint) | ✅ done |
 | R.5 / R.5.5c / R.6 (Mon analysis + walk-forward run + variant graduations) | pending |
 | R.10 (AH probability conversion module) | blocked on CLV evidence |
+| B.2 (Brier-vs-close decision gate), B.4* (downstream variants) | pending |
+| Phase 6 (storage migration: SQLite + UUIDs) | superseded by Azure direction |
+| Phase 8 (Betfair API auto-placement) | pending |
+| Phase 10 (long-term: syndicate, multi-account) | open |
+| Phase 11 (research scanner) | ✅ done |
 
-Detail in `docs/PLAN.md`, `docs/PLAN_AZURE_2026-05.md`, `docs/PLAN_RESEARCH_2026-04.md`.
+Detail in `docs/PLAN_RESEARCH_2026-04.md`.
 
 **Variants in shadow** (paper portfolio only, not flipped as defaults): I_power_devig, J_sharp_weighted, K_draw_bias, L_quarter_kelly, M_min_prob_15, N_competitive_only, O_kaunitz_classic, P_max_odds_shopping. Production scanner uses A_production logic.
 

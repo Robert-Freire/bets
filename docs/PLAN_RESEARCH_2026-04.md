@@ -1036,7 +1036,6 @@ These are independent decisions and can land in the same PR or be split.
    - **Important**: any league that graduates also flips on for paper-portfolio shadow runs of variants I/J/L/M/N/O/P automatically — verify the strategies.py `markets` filter doesn't exclude the new league code.
 3. **Documentation**:
    - Update `CLAUDE.md` "How the scanner works" section.
-   - Update `docs/PLAN.md` Phase 1 table.
    - If La Liga (SP1) graduated: explicitly remove the "La Liga excluded — too noisy, not enough UK bookmaker coverage yet" line from CLAUDE.md and replace with a one-line note pointing at the R.5.5c evidence.
 
 **Acceptance.**
