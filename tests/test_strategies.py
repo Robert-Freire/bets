@@ -181,7 +181,7 @@ def test_variant_H_excludes_pinnacle_from_consensus():
 
 def test_dispersion_filter_blocks_high_dispersion():
     # 10 books strongly favour HOME; 10 books strongly favour AWAY.
-    # Cross-book stdev of HOME probs >> 0.04 → B_strict flags nothing; A_production flags ≥1.
+    # Cross-book stdev of HOME probs >> 0.04 → T_high_edge flags nothing; A_production flags ≥1.
     group_a = [b for b in sorted(UK_LICENSED_BOOKS) if b != "pinnacle"][:10]
     group_b = [b for b in sorted(UK_LICENSED_BOOKS) if b != "pinnacle"][10:20]
     h2h = {}
@@ -194,13 +194,13 @@ def test_dispersion_filter_blocks_high_dispersion():
 
     events = [synthetic_event(h2h_prices=h2h)]
     a_bets = evaluate_strategy(events, "soccer_epl", _strategy("A_production"))
-    b_bets = evaluate_strategy(events, "soccer_epl", _strategy("B_strict"))
+    t_bets = evaluate_strategy(events, "soccer_epl", _strategy("T_high_edge"))
 
     assert len(a_bets) >= 1, (
         "A_production should flag at least 1 bet on a split-opinion market"
     )
-    assert len(b_bets) == 0, (
-        f"B_strict should flag 0 bets (dispersion >> 0.04); got {len(b_bets)}"
+    assert len(t_bets) == 0, (
+        f"T_high_edge should flag 0 bets (dispersion >> 0.04); got {len(t_bets)}"
     )
 
 
@@ -335,13 +335,13 @@ def test_gross_edge_above_threshold_but_net_edge_below_is_rejected():
 
 # ── R.1 tests ─────────────────────────────────────────────────────────────────
 
-def test_variant_I_power_devig_bet_count_similar_to_G(sample_event):
+def test_variant_I_power_devig_bet_count_similar_to_A(sample_event):
     events = [sample_event]
     i_bets = evaluate_strategy(events, "soccer_epl", _strategy("I_power_devig"))
-    g_bets = evaluate_strategy(events, "soccer_epl", _strategy("G_proportional"))
-    tolerance = max(3, len(g_bets))
-    assert abs(len(i_bets) - len(g_bets)) <= tolerance, (
-        f"I_power_devig ({len(i_bets)}) vs G_proportional ({len(g_bets)}) differ by >{tolerance}"
+    a_bets = evaluate_strategy(events, "soccer_epl", _strategy("A_production"))
+    tolerance = max(3, len(a_bets))
+    assert abs(len(i_bets) - len(a_bets)) <= tolerance, (
+        f"I_power_devig ({len(i_bets)}) vs A_production ({len(a_bets)}) differ by >{tolerance}"
     )
 
 
@@ -411,50 +411,6 @@ def test_variant_N_competitive_only_rejects_heavy_favourite():
     assert home_n == [], "N_competitive_only must reject HOME bets with cons > 0.70"
 
 
-# ── R.1.5 tests ───────────────────────────────────────────────────────────────
-
-def test_variant_O_kaunitz_classic_flags_when_condition_met():
-    # 4 UK books at HOME=2.0 + betfair at HOME=2.30
-    # cons[H] (raw) = (4 * 0.500 + 0.435) / 5 ≈ 0.487
-    # (0.487 - 0.05) * 2.30 ≈ 1.005 > 1.0 → should flag
-    uk4 = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:4]
-    books = {b: (2.0, 3.0, 4.5) for b in uk4}
-    books["betfair_ex_uk"] = (2.30, 3.0, 4.5)
-    ev = synthetic_event(h2h_prices=books)
-
-    o_bets = evaluate_strategy([ev], "soccer_epl", _strategy("O_kaunitz_classic"))
-    home_bets = [b for b in o_bets if b["side"] == "H"]
-    assert home_bets, "O_kaunitz_classic should flag HOME when (cons-alpha)*max_odds > 1.0"
-    assert home_bets[0]["book"] == "betfair_ex_uk", (
-        "O should flag at the max-odds book (betfair_ex_uk)"
-    )
-
-
-def test_variant_O_kaunitz_classic_skips_when_condition_not_met():
-    # 4 UK books at HOME=2.0 + betfair at HOME=2.08
-    # cons[H] (raw) ≈ (4*0.500 + 0.481)/5 ≈ 0.496
-    # (0.496 - 0.05) * 2.08 ≈ 0.928 < 1.0 → should NOT flag
-    uk4 = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:4]
-    books = {b: (2.0, 3.0, 4.5) for b in uk4}
-    books["betfair_ex_uk"] = (2.08, 3.0, 4.5)
-    ev = synthetic_event(h2h_prices=books)
-
-    o_bets = evaluate_strategy([ev], "soccer_epl", _strategy("O_kaunitz_classic"))
-    home_bets = [b for b in o_bets if b["side"] == "H"]
-    assert home_bets == [], (
-        f"O_kaunitz_classic must not flag HOME when (cons-alpha)*max_odds <= 1.0; got {len(home_bets)}"
-    )
-
-
-def test_variant_O_kaunitz_classic_config():
-    o = _strategy("O_kaunitz_classic")
-    assert o.raw_consensus is True
-    assert o.kaunitz_alpha == 0.05
-    assert o.max_odds_shopping is True
-    assert o.min_books == 4
-    assert o.markets == ("h2h",)
-
-
 # ── R.2 tests ─────────────────────────────────────────────────────────────────
 
 def test_variant_J_sharp_weighted_wired_to_sharpness_weights():
@@ -516,105 +472,6 @@ def test_variant_J_sharp_weights_shift_consensus_toward_sharp_books():
     assert j_h > a_h, (
         f"J HOME cons {j_h:.4f} should > A HOME cons {a_h:.4f} "
         "when sharp books (weight 1.5) strongly favour HOME and soft books are down-weighted"
-    )
-
-
-# ── R.8 tests (K_draw_bias) ───────────────────────────────────────────────────
-
-def _low_xg_team_data(home: str, away: str, q25: float = 1.2) -> dict:
-    """Synthetic team_xg with both teams below q25."""
-    return {
-        "xg_q25": q25,
-        "teams": {
-            home: {"avg_xg": round(q25 * 0.7, 3), "n": 5},
-            away: {"avg_xg": round(q25 * 0.6, 3), "n": 5},
-        },
-    }
-
-
-def _high_xg_team_data(home: str, away: str, q25: float = 1.2) -> dict:
-    """Synthetic team_xg with both teams above q25."""
-    return {
-        "xg_q25": q25,
-        "teams": {
-            home: {"avg_xg": round(q25 * 1.5, 3), "n": 5},
-            away: {"avg_xg": round(q25 * 1.8, 3), "n": 5},
-        },
-    }
-
-
-def _k_event(draw_odds: float = 3.55) -> dict:
-    """Event with 20 UK books + betfair at the given draw odds.
-
-    Base books have short draw odds (consensus draw prob ~0.323). After Betfair's
-    5% commission, draw_odds≥3.55 is needed for a genuine ≥3% true edge (cons − eff_implied).
-    """
-    base = [b for b in sorted(UK_LICENSED_BOOKS) if b != "betfair_ex_uk"][:19]
-    books = {b: (2.70, 2.85, 2.80) for b in base}  # short draw → high consensus draw prob
-    books["pinnacle"] = (2.65, 2.90, 2.85)
-    books["betfair_ex_uk"] = (2.70, draw_odds, 2.80)
-    return synthetic_event(h2h_prices=books)
-
-
-def test_variant_K_draw_bias_config():
-    k = _strategy("K_draw_bias")
-    assert k.draws_only is True
-    assert k.draw_odds_band == (3.20, 3.60)
-    assert k.require_low_xg is True
-    assert k.markets == ("h2h",)
-
-
-def test_variant_K_only_produces_draw_bets():
-    ev = _k_event(draw_odds=3.55)
-    xg = _low_xg_team_data("Arsenal", "Chelsea")
-    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
-    assert bets, "K_draw_bias should produce at least one bet on low-xG in-band fixture"
-    for bet in bets:
-        assert bet["side"] == "D", (
-            f"K_draw_bias must only produce draw bets; got side={bet['side']}"
-        )
-
-
-def test_variant_K_rejects_draw_outside_odds_band():
-    # Draw odds 3.70 — outside (3.20, 3.60) band → no K bets
-    ev = _k_event(draw_odds=3.70)
-    xg = _low_xg_team_data("Arsenal", "Chelsea")
-    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
-    draw_bets = [b for b in bets if b["side"] == "D"]
-    assert draw_bets == [], (
-        f"K_draw_bias must reject draw odds 3.70 (outside 3.20–3.60); got {draw_bets}"
-    )
-
-
-def test_variant_K_rejects_high_xg_fixture():
-    # Both teams above xg_q25 → K must not flag draw
-    ev = _k_event(draw_odds=3.40)
-    xg = _high_xg_team_data("Arsenal", "Chelsea")
-    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
-    draw_bets = [b for b in bets if b["side"] == "D"]
-    assert draw_bets == [], (
-        f"K_draw_bias must reject high-xG fixtures; got {draw_bets}"
-    )
-
-
-def test_variant_K_blocks_bets_when_no_xg_data():
-    # team_xg={} means no teams found → missing data is treated as "unknown = block"
-    # to prevent polluting paper data with band-only draw bets.
-    ev = _k_event(draw_odds=3.40)
-    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg={})
-    assert bets == [], (
-        f"K_draw_bias must block all bets when team_xg has no data; got {bets}"
-    )
-
-
-def test_variant_K_rejects_below_band_odds():
-    # Draw odds 3.10 — below the 3.20 floor → rejected
-    ev = _k_event(draw_odds=3.10)
-    xg = _low_xg_team_data("Arsenal", "Chelsea")
-    bets = evaluate_strategy([ev], "soccer_epl", _strategy("K_draw_bias"), team_xg=xg)
-    draw_bets = [b for b in bets if b["side"] == "D"]
-    assert draw_bets == [], (
-        f"K_draw_bias must reject draw odds 3.10 (below 3.20 floor); got {draw_bets}"
     )
 
 

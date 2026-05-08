@@ -127,15 +127,6 @@ STRATEGIES: list[StrategyConfig] = [
         description="Mirrors production: Shin, mean consensus, all UK-licensed, 3% edge, no model gate",
     ),
     StrategyConfig(
-        name="B_strict",
-        label="B: Strict",
-        description="Weighted consensus (Pinnacle 5×), 5% edge, dispersion filter 0.04",
-        consensus_mode="weighted",
-        pinnacle_weight=5.0,
-        min_edge=0.05,
-        max_dispersion=0.04,
-    ),
-    StrategyConfig(
         name="C_loose",
         label="C: Loose",
         description="Lower edge threshold 2%, otherwise like A",
@@ -166,12 +157,6 @@ STRATEGIES: list[StrategyConfig] = [
         # agrees at model_min_edge, even if the consensus edge is mildly negative.
         min_edge=-1.0,
         markets=("h2h",),
-    ),
-    StrategyConfig(
-        name="G_proportional",
-        label="G: Proportional de-vig",
-        description="Proportional de-vig instead of Shin; tests whether Shin adds value",
-        devig="proportional",
     ),
     StrategyConfig(
         name="H_no_pinnacle",
@@ -205,19 +190,6 @@ STRATEGIES: list[StrategyConfig] = [
         min_consensus_prob=0.30,
         max_consensus_prob=0.70,
     ),
-    # ── R.1.5: paper-faithful Kaunitz baseline ────────────────────────────────
-    StrategyConfig(
-        name="O_kaunitz_classic",
-        label="O: Kaunitz classic (paper)",
-        description="Paper-faithful Kaunitz: raw consensus, α=0.05, max-odds shopping, min 4 books",
-        raw_consensus=True,
-        kaunitz_alpha=0.05,
-        max_odds_shopping=True,
-        min_books=4,
-        max_dispersion=None,
-        drop_outlier_book=False,
-        markets=("h2h",),
-    ),
     # ── R.1.6: max-odds shopping variant (optional) ───────────────────────────
     StrategyConfig(
         name="P_max_odds_shopping",
@@ -232,15 +204,35 @@ STRATEGIES: list[StrategyConfig] = [
         description="Sharpness-weighted consensus per datagolf blind-return ranking",
         sharpness_weights=SHARPNESS_WEIGHTS,
     ),
-    # ── R.8: draw-bias variant (Predictology filter) ──────────────────────────
+    # ── S.1: portfolio refresh 2026-05 ───────────────────────────────────────
     StrategyConfig(
-        name="K_draw_bias",
-        label="K: Draw-bias (Predictology)",
-        description="Draw bets only; draw odds 3.20–3.60 and both teams in bottom-xG quartile",
-        draws_only=True,
-        draw_odds_band=(3.20, 3.60),
-        require_low_xg=True,
-        markets=("h2h",),
+        name="Q_pinnacle_tight",
+        label="Q: Pinnacle anchor, dispersion-filtered",
+        description="Pinnacle-only consensus + dispersion ≤ 0.04 + outlier check; tests if D's positive CLV survives when high-uncertainty fixtures are removed",
+        consensus_mode="pinnacle_only",
+        max_dispersion=0.04,
+        drop_outlier_book=True,
+        min_edge=0.03,
+    ),
+    StrategyConfig(
+        name="R_longshot",
+        label="R: Longshot specialist (prob ≤ 25%)",
+        description="Only bet when consensus prob ≤ 25%; targets away wins in mismatches and draws in dominant-home fixtures; counterpart to M_min_prob_15",
+        max_consensus_prob=0.25,
+        min_edge=0.03,
+    ),
+    StrategyConfig(
+        name="S_exchange_anchor",
+        label="S: Exchange-anchored (8× weight)",
+        description="Betfair/Smarkets/Matchbook at 8× in consensus; tests whether exchange prices are the dominant sharp signal; harder version of J's 1.5×",
+        sharpness_weights={"betfair_ex_uk": 8.0, "smarkets": 8.0, "matchbook": 8.0},
+    ),
+    StrategyConfig(
+        name="T_high_edge",
+        label="T: High-edge only (≥5%)",
+        description="5% min edge + 0.04 dispersion cap; tests whether rare high-conviction bets carry better CLV than borderline 3% bets; Kaunitz original threshold",
+        min_edge=0.05,
+        max_dispersion=0.04,
     ),
 ]
 
