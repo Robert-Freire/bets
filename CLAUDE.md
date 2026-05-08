@@ -292,7 +292,7 @@ Current status: model RPS 0.2137 vs bookmaker 0.1957 — no edge yet. Phase 7 sh
 | Phase 7 (model overhaul: calibration, hold-out eval) | ✅ scaffolding done 2026-05-01; HOLD on flip pending ≥50 CLV bets (`docs/MODEL_EVAL_2026-05.md`) |
 | B.0–B.0.7 (book_skill table + LOO consensus + paired Brier + CIs + dual devig) | ✅ done 2026-05-02 |
 | B.1 (bias backfill: fav-longshot slope + home/draw bias + empirical-Bayes shrinkage) | ✅ done 2026-05-03 |
-| B.3 (cron: WSL ✅ 2026-05-03; Pi pending) | partial |
+| B.3 (cron: book_skill on WSL + Pi) | ✅ done 2026-05-08 |
 | Audit invariants I-1..I-13 (groups 1–4) | ✅ done 2026-05-03; GH Actions Mon 08:10 UTC; groups 5–6 pending |
 | R.0–R.3 + R.5.5a/b + R.7–R.9 + R.11 (2026-04 research sprint) | ✅ done |
 | R.5 / R.5.5c / R.6 (Mon analysis + walk-forward run + variant graduations) | pending |
